@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,20 +18,31 @@ import (
 	"rclone-manager/internal/logger"
 	"rclone-manager/internal/models"
 	"rclone-manager/internal/websocket"
+	"gorm.io/gorm"
 )
 
 const RcloneRCAddr = "http://127.0.0.1:5572"
+
+// fileLineRegex matches rclone file-transfer log lines like:
+//   INFO  : filename.mkv: Copied (new)
+//   INFO  : filename.mkv: Deleted
+var fileLineRegex = regexp.MustCompile(`INFO\s+:\s+(.+?):\s+(Copied|Deleted|Moved|Transferred)`)
+
+// statsRegex matches "Transferred:    1 / 1, 100%"
+var transferredRegex = regexp.MustCompile(`Transferred:\s*\d+\s*/\s*(\d+)`)
 
 type Executor struct {
 	runningTasks map[uint]*exec.Cmd
 	mu           sync.RWMutex
 	hub          *websocket.Hub
+	db           *gorm.DB
 }
 
-func NewExecutor(hub *websocket.Hub) *Executor {
+func NewExecutor(hub *websocket.Hub, database *gorm.DB) *Executor {
 	return &Executor{
 		runningTasks: make(map[uint]*exec.Cmd),
 		hub:          hub,
+		db:           database,
 	}
 }
 
@@ -68,6 +80,7 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 		"--drive-chunk-size", task.DriveChunkSize,
 		"--buffer-size", task.BufferSize,
 		"--retries", strconv.Itoa(task.Retries),
+		"--verbose",
 	}
 
 	if task.BindIP != "" {
@@ -95,9 +108,9 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 		return err
 	}
 
-	// Stream output to WebSocket and log file
-	go e.streamOutput(task.ID, task.Name, stdout, f, "stdout")
-	go e.streamOutput(task.ID, task.Name, stderr, f, "stderr")
+	// Stream output to WebSocket, log file and database
+	go e.streamOutput(task, stdout, f, "stdout")
+	go e.streamOutput(task, stderr, f, "stderr")
 
 	e.mu.Lock()
 	e.runningTasks[task.ID] = cmd
@@ -124,6 +137,8 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 		if err != nil {
 			e.hub.Broadcast(fmt.Sprintf(`{"type":"task_error","task_id":%d,"error":"%s"}`, task.ID, err.Error()))
 			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("Task failed: %v", err))
+			// Mark any pending logs for this task as failed
+			e.db.Model(&models.OutputLog{}).Where("task_id = ? AND status = ?", task.ID, true).Update("status", false)
 		} else {
 			e.hub.Broadcast(fmt.Sprintf(`{"type":"task_complete","task_id":%d}`, task.ID))
 			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), "Task completed successfully")
@@ -171,7 +186,7 @@ func (e *Executor) StopTask(taskID uint) error {
 	return nil
 }
 
-func (e *Executor) streamOutput(taskID uint, taskName string, reader io.Reader, logFile *os.File, streamType string) {
+func (e *Executor) streamOutput(task *models.Task, reader io.Reader, logFile *os.File, streamType string) {
 	buf := make([]byte, 1024)
 	for {
 		n, err := reader.Read(buf)
@@ -184,12 +199,94 @@ func (e *Executor) streamOutput(taskID uint, taskName string, reader io.Reader, 
 
 			// Send to WebSocket
 			msg := fmt.Sprintf(`{"type":"log","task_id":%d,"task_name":"%s","stream":"%s","content":"%s","time":"%s"}`,
-				taskID, taskName, streamType, strings.ReplaceAll(line, `"`, `\"`), timestamp)
+				task.ID, task.Name, streamType, strings.ReplaceAll(line, `"`, `\"`), timestamp)
 			e.hub.Broadcast(msg)
+
+			// Parse and persist structured output log
+			e.parseAndSaveLog(task, line)
 		}
 		if err != nil {
 			break
 		}
+	}
+}
+
+// parseAndSaveLog parses a single log line and saves a structured OutputLog record.
+func (e *Executor) parseAndSaveLog(task *models.Task, line string) {
+	if e.db == nil {
+		return
+	}
+
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return
+	}
+
+	// Try to match file transfer lines like:
+	// INFO  : filename.mkv: Copied (new)
+	// INFO  : filename.mkv: Deleted
+	matches := fileLineRegex.FindStringSubmatch(line)
+	if len(matches) >= 3 {
+		fileName := strings.TrimSpace(matches[1])
+		action := matches[2]
+
+		srcPath := filepath.Join(task.SourceDir, fileName)
+		destPath := fmt.Sprintf("%s:%s/%s", task.RemoteName, strings.TrimSuffix(task.RemoteDir, "/"), fileName)
+
+		// Get file size if source file still exists
+		var fileSize int64
+		if info, err := os.Stat(srcPath); err == nil {
+			fileSize = info.Size()
+		}
+
+		fileExt := strings.TrimPrefix(filepath.Ext(fileName), ".")
+		status := true
+		errmsg := ""
+
+		// If the action indicates failure, mark as failed
+		if strings.Contains(line, "ERROR") || strings.Contains(line, "Failed") || strings.Contains(line, "failed") {
+			status = false
+			errmsg = line
+		}
+
+		log := models.OutputLog{
+			TaskID:      task.ID,
+			Src:         srcPath,
+			SrcStorage:  "local",
+			Dest:        destPath,
+			DestStorage: task.RemoteName,
+			Mode:        action,
+			FileName:    fileName,
+			FileSize:    fileSize,
+			FileExt:     fileExt,
+			Status:      status,
+			Errmsg:      errmsg,
+			Date:        time.Now(),
+		}
+
+		// Insert into database (ignore duplicates for the same file in the same task within 1 minute)
+		var existing models.OutputLog
+		recent := time.Now().Add(-1 * time.Minute)
+		result := e.db.Where("task_id = ? AND file_name = ? AND date > ?", task.ID, fileName, recent).First(&existing)
+		if result.Error != nil {
+			// Not found, create new
+			e.db.Create(&log)
+		} else {
+			// Update existing record
+			existing.Mode = action
+			existing.Status = status
+			existing.Errmsg = errmsg
+			existing.Date = time.Now()
+			e.db.Save(&existing)
+		}
+		return
+	}
+
+	// Also handle general "Transferred:" stats lines by creating a summary entry
+	// when we see a transfer completion pattern but no specific filename
+	if transferredRegex.MatchString(line) && strings.Contains(line, "100%") {
+		// This is a stats summary line, we don't create individual records here
+		// because the per-file records above already cover each file
 	}
 }
 

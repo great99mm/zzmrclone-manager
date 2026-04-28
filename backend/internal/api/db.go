@@ -30,6 +30,7 @@ func InitDB(dataDir string) error {
 		&models.TaskLog{},
 		&models.SystemSetting{},
 		&models.User{},
+		&models.OutputLog{},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to migrate database: %v", err)
@@ -53,4 +54,9 @@ func InitDB(dataDir string) error {
 	}
 
 	return nil
+}
+
+// GetDB exposes the database instance for other packages (e.g. rclone).
+func GetDB() *gorm.DB {
+	return db
 }

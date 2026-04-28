@@ -50,8 +50,8 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	hub = websocket.NewHub()
 	go hub.Run()
 
-	// Init executor
-	executor = rclone.NewExecutor(hub)
+	// Init executor (pass db so rclone can persist structured logs)
+	executor = rclone.NewExecutor(hub, db)
 
 	// Init scheduler
 	sched = scheduler.NewScheduler(executor)
@@ -93,6 +93,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			tasks.POST("/:id/dedupe", dedupeTask)
 			tasks.GET("/:id/logs", getTaskLogs)
 			tasks.GET("/:id/status", getTaskStatus)
+			tasks.GET("/:id/output-logs", getTaskOutputLogs)
 		}
 
 		// System
@@ -105,6 +106,11 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// Rclone config
 		api.GET("/rclone/remotes", listRemotes)
 		api.GET("/rclone/config", getRcloneConfig)
+
+		// Output logs (structured persistent format)
+		api.GET("/output-logs", getOutputLogs)
+		api.DELETE("/output-logs/:id", deleteOutputLog)
+		api.DELETE("/output-logs/clean", cleanOutputLogs)
 	}
 
 	// WebSocket
@@ -310,6 +316,8 @@ func deleteTask(c *gin.Context) {
 	sched.RemoveTask(uint(id))
 	executor.StopTask(uint(id))
 
+	// GORM will CASCADE delete associated OutputLogs because of the
+	// constraint:OnDelete:CASCADE tag on Task.OutputLogs.
 	db.Delete(&models.Task{}, id)
 	c.JSON(http.StatusOK, gin.H{"message": "task deleted"})
 }
@@ -499,4 +507,103 @@ func getRcloneConfig(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"content": string(content)})
+}
+
+// ============================
+// Output logs handlers (persistent, stored in DB)
+// ============================
+
+// getOutputLogs returns paginated structured output logs from the database.
+// Supports filtering by task_id via query parameter.
+func getOutputLogs(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+	taskIDStr := c.Query("task_id")
+
+	var total int64
+	query := db.Model(&models.OutputLog{})
+	if taskIDStr != "" {
+		if taskID, err := strconv.Atoi(taskIDStr); err == nil {
+			query = query.Where("task_id = ?", taskID)
+		}
+	}
+	query.Count(&total)
+
+	var logs []models.OutputLog
+	query.Order("date DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&logs)
+
+	msg := ""
+	c.JSON(http.StatusOK, models.OutputLogResponse{
+		Success: true,
+		Message: &msg,
+		Data: models.OutputLogData{
+			List:  logs,
+			Total: total,
+		},
+	})
+}
+
+// getTaskOutputLogs returns paginated output logs for a specific task.
+func getTaskOutputLogs(c *gin.Context) {
+	id, _ := strconv.Atoi(c.Param("id"))
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+
+	// Verify task exists
+	var task models.Task
+	if err := db.First(&task, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		return
+	}
+
+	var total int64
+	db.Model(&models.OutputLog{}).Where("task_id = ?", id).Count(&total)
+
+	var logs []models.OutputLog
+	db.Where("task_id = ?", id).Order("date DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&logs)
+
+	msg := ""
+	c.JSON(http.StatusOK, models.OutputLogResponse{
+		Success: true,
+		Message: &msg,
+		Data: models.OutputLogData{
+			List:  logs,
+			Total: total,
+		},
+	})
+}
+
+// deleteOutputLog deletes a single output log entry by its ID.
+func deleteOutputLog(c *gin.Context) {
+	id, _ := strconv.Atoi(c.Param("id"))
+	if err := db.Delete(&models.OutputLog{}, id).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "output log deleted"})
+}
+
+// cleanOutputLogs removes all output log entries (optionally filtered by task_id).
+func cleanOutputLogs(c *gin.Context) {
+	taskIDStr := c.Query("task_id")
+	query := db
+	if taskIDStr != "" {
+		if taskID, err := strconv.Atoi(taskIDStr); err == nil {
+			query = query.Where("task_id = ?", taskID)
+		}
+	}
+	query.Delete(&models.OutputLog{})
+	c.JSON(http.StatusOK, gin.H{"message": "output logs cleaned"})
 }

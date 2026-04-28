@@ -46,6 +46,15 @@ export const cleanLogs = () => api.post('/system/logs/clean');
 export const getRemotes = () => api.get('/rclone/remotes');
 export const getRcloneConfig = () => api.get('/rclone/config');
 
+// Output logs (structured persistent format)
+export const getOutputLogs = (page = 1, pageSize = 20, taskId = '') => 
+  api.get(`/output-logs?page=${page}&page_size=${pageSize}${taskId ? `&task_id=${taskId}` : ''}`);
+export const getTaskOutputLogs = (taskId, page = 1, pageSize = 20) => 
+  api.get(`/tasks/${taskId}/output-logs?page=${page}&page_size=${pageSize}`);
+export const deleteOutputLog = (id) => api.delete(`/output-logs/${id}`);
+export const cleanOutputLogs = (taskId = '') => 
+  api.delete(`/output-logs/clean${taskId ? `?task_id=${taskId}` : ''}`);
+
 export const createWebSocket = () => {
   return new WebSocket(WS_BASE);
 };
