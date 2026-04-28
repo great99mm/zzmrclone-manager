@@ -24,13 +24,14 @@ rclone config
 ### 2. 启动服务
 
 ```bash
-docker-compose up -d
+git clone https://github.com/great99mm/zzmrclone-manager.git
+cd zzmrclone-manager
+docker compose up -d --build
 ```
 
 ### 3. 访问管理界面
 
 - 前端: http://localhost:7071
-- 后端 API: http://localhost:7070
 
 ### 4. 默认登录
 
@@ -93,21 +94,6 @@ rclone-manager/
 └── data/          # 数据持久化目录
 └── logs/          # 日志目录
 ```
-
-## 原脚本功能对照
-
-| 原脚本功能 | Web 版实现 |
-|-----------|-----------|
-| `setup_config` 交互配置 | 前端表单 + API |
-| `rclone move` 传输 | 任务执行器 |
-| `rclone dedupe` 去重 | 自动/手动触发 |
-| `systemd path` 目录监控 | fsnotify 监控 |
-| `systemd timer` 定时 | cron 定时器 |
-| `rc status` 状态看板 | Dashboard 页面 |
-| `rc vv/v` 日志级别 | 设置页面切换 |
-| `rc logs/debug` 日志查看 | 日志页面 + WebSocket |
-| `rc clean` 日志清理 | 清空按钮 |
-| `do_uninstall` 卸载 | 删除任务即可 |
 
 ## 技术栈
 
