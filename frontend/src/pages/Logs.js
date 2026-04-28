@@ -97,17 +97,6 @@ const Logs = () => {
     }
   };
 
-  const handleClean = async () => {
-    if (!window.confirm('确定要清空所有日志吗？此操作不可恢复。')) return;
-    try {
-      await cleanLogs();
-      toast.success('日志已清空');
-      setLogs([]);
-    } catch (err) {
-      toast.error('清空失败');
-    }
-  };
-
   const handleRefresh = () => {
     if (activeTab === 'task') {
       if (selectedTask) {
