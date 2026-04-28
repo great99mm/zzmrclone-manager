@@ -28,9 +28,6 @@ const RcloneRCAddr = "http://127.0.0.1:5572"
 //   INFO  : filename.mkv: Deleted
 var fileLineRegex = regexp.MustCompile(`INFO\s+:\s+(.+?):\s+(Copied|Deleted|Moved|Transferred)`)
 
-// statsRegex matches "Transferred:    1 / 1, 100%"
-var transferredRegex = regexp.MustCompile(`Transferred:\s*\d+\s*/\s*(\d+)`)
-
 type Executor struct {
 	runningTasks map[uint]*exec.Cmd
 	mu           sync.RWMutex
@@ -280,13 +277,6 @@ func (e *Executor) parseAndSaveLog(task *models.Task, line string) {
 			e.db.Save(&existing)
 		}
 		return
-	}
-
-	// Also handle general "Transferred:" stats lines by creating a summary entry
-	// when we see a transfer completion pattern but no specific filename
-	if transferredRegex.MatchString(line) && strings.Contains(line, "100%") {
-		// This is a stats summary line, we don't create individual records here
-		// because the per-file records above already cover each file
 	}
 }
 

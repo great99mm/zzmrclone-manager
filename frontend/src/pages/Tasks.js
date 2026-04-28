@@ -11,7 +11,8 @@ import {
   Eye,
   CheckCircle2,
   XCircle,
-  Clock
+  Clock,
+  ClipboardCheck
 } from 'lucide-react';
 import { getTasks, deleteTask, startTask, stopTask } from '../services/api';
 import toast from 'react-hot-toast';
@@ -59,6 +60,19 @@ const Tasks = () => {
     } catch (err) {
       toast.error(err.response?.data?.error || '启动失败');
     }
+  };
+
+  const handleCopyTaskApiUrl = (taskId) => {
+    const base = window.location.origin;
+    const token = localStorage.getItem('apiToken') || '';
+    const url = token 
+      ? `${base}/api/output-logs?task_id=${taskId}&token=${token}`
+      : `${base}/api/output-logs?task_id=${taskId}`;
+    navigator.clipboard.writeText(url).then(() => {
+      toast.success('API URL 已复制到剪贴板');
+    }).catch(() => {
+      toast.error('复制失败');
+    });
   };
 
   const handleStop = async (id) => {
@@ -221,6 +235,13 @@ const Tasks = () => {
                         >
                           <Pencil className="w-4 h-4" />
                         </Link>
+                        <button
+                          onClick={() => handleCopyTaskApiUrl(task.id)}
+                          className="p-1.5 text-blue-500 hover:bg-blue-50 rounded-lg transition-colors"
+                          title="复制输出日志 API URL"
+                        >
+                          <ClipboardCheck className="w-4 h-4" />
+                        </button>
                         <button
                           onClick={() => handleDelete(task.id)}
                           className="p-1.5 text-red-500 hover:bg-red-50 rounded-lg transition-colors"

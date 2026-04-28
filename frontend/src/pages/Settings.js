@@ -1,14 +1,18 @@
 import React, { useState, useEffect } from 'react';
-import { Settings2, Save, AlertTriangle, Lock, Eye, EyeOff } from 'lucide-react';
-import { getRcloneConfig, getRcloneStats, setLogLevel, changePassword } from '../services/api';
+import { Settings2, Save, AlertTriangle, Lock, Eye, EyeOff, Key, ClipboardCheck } from 'lucide-react';
+import { getRcloneConfig, setLogLevel, changePassword, getTokenInfo, updateToken } from '../services/api';
 import useAuthStore from '../hooks/useAuthStore';
 import toast from 'react-hot-toast';
 
 const Settings = () => {
   const [config, setConfig] = useState('');
-  const [stats, setStats] = useState(null);
-  const [logLevel, setLogLevel] = useState('INFO');
+  const [logLevel, setLogLevelState] = useState('INFO');
   const [loading, setLoading] = useState(true);
+
+  // Token state
+  const [apiToken, setApiToken] = useState('');
+  const [tokenEnabled, setTokenEnabled] = useState(false);
+  const [showToken, setShowToken] = useState(false);
 
   // Password change state
   const [currentPassword, setCurrentPassword] = useState('');
@@ -26,12 +30,19 @@ const Settings = () => {
 
   const loadData = async () => {
     try {
-      const [configRes, statsRes] = await Promise.all([
+      const [configRes, tokenRes] = await Promise.all([
         getRcloneConfig(),
-        getRcloneStats(),
+        getTokenInfo(),
       ]);
       setConfig(configRes.data.content);
-      setStats(statsRes.data);
+      // Token
+      if (tokenRes.data) {
+        setTokenEnabled(tokenRes.data.enabled);
+        setApiToken(tokenRes.data.token || '');
+      }
+      // Load saved log level from localStorage
+      const savedLevel = localStorage.getItem('logLevel') || 'INFO';
+      setLogLevelState(savedLevel);
     } catch (err) {
       console.error('Failed to load settings');
     } finally {
@@ -42,7 +53,8 @@ const Settings = () => {
   const handleLogLevelChange = async (level) => {
     try {
       await setLogLevel(level);
-      setLogLevel(level);
+      setLogLevelState(level);
+      localStorage.setItem('logLevel', level);
       toast.success(`日志级别已切换为 ${level}`);
     } catch (err) {
       toast.error('切换失败');
@@ -77,6 +89,28 @@ const Settings = () => {
     } finally {
       setChangingPassword(false);
     }
+  };
+
+  const handleSaveToken = async () => {
+    try {
+      await updateToken(apiToken);
+      localStorage.setItem('apiToken', apiToken);
+      setTokenEnabled(apiToken !== '');
+      toast.success('API Token 已保存');
+    } catch (err) {
+      toast.error('保存失败');
+    }
+  };
+
+  const handleCopyTokenUrl = () => {
+    const base = window.location.origin;
+    const token = localStorage.getItem('apiToken') || apiToken;
+    const url = `${base}/api/output-logs?token=${token}`;
+    navigator.clipboard.writeText(url).then(() => {
+      toast.success('URL 已复制到剪贴板');
+    }).catch(() => {
+      toast.error('复制失败');
+    });
   };
 
   if (loading) {
@@ -188,32 +222,57 @@ const Settings = () => {
         </form>
       </div>
 
-      {/* Rclone Stats */}
-      {stats && !stats.error && (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-          <h2 className="text-lg font-semibold text-gray-900 mb-4">Rclone 状态</h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="p-4 bg-gray-50 rounded-lg">
-              <div className="text-sm text-gray-500">传输速度</div>
-              <div className="text-lg font-semibold text-gray-900 mt-1">
-                {stats.speed || '0 B/s'}
-              </div>
+      {/* API Token */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+        <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+          <Key className="w-5 h-5 text-blue-500" />
+          API Token 设置
+        </h2>
+        <div className="space-y-4 max-w-md">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              访问令牌 {tokenEnabled && <span className="text-green-600 text-xs">(已启用)</span>}
+            </label>
+            <div className="relative">
+              <input
+                type={showToken ? 'text' : 'password'}
+                value={apiToken}
+                onChange={(e) => setApiToken(e.target.value)}
+                placeholder="留空表示不启用 Token 验证"
+                className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => setShowToken(!showToken)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1"
+              >
+                {showToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
             </div>
-            <div className="p-4 bg-gray-50 rounded-lg">
-              <div className="text-sm text-gray-500">已传输</div>
-              <div className="text-lg font-semibold text-gray-900 mt-1">
-                {stats.bytes || 0} bytes
-              </div>
-            </div>
-            <div className="p-4 bg-gray-50 rounded-lg">
-              <div className="text-sm text-gray-500">错误数</div>
-              <div className="text-lg font-semibold text-gray-900 mt-1">
-                {stats.errors || 0}
-              </div>
-            </div>
+            <p className="text-sm text-gray-500 mt-1">
+              设置后，外部访问输出日志 API 需要在 URL 中添加 ?token=xxx
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleSaveToken}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
+            >
+              <Save className="w-4 h-4" />
+              保存 Token
+            </button>
+            {apiToken && (
+              <button
+                onClick={handleCopyTokenUrl}
+                className="inline-flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors font-medium"
+              >
+                <ClipboardCheck className="w-4 h-4" />
+                复制 API URL
+              </button>
+            )}
           </div>
         </div>
-      )}
+      </div>
 
       {/* Log Level */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">

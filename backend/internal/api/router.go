@@ -25,11 +25,13 @@ var (
 	sched     *scheduler.Scheduler
 	watch     *watcher.Watcher
 	hub       *websocket.Hub
+	cfgGlobal *config.Config
 )
 
 func SetupRouter(cfg *config.Config) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.Default()
+	cfgGlobal = cfg
 
 	// CORS
 	router.Use(cors.New(cors.Config{
@@ -80,6 +82,10 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		api.POST("/register", handleRegister)
 		api.POST("/change-password", handleChangePassword)
 
+		// Token management (read/update)
+		api.GET("/token", requireTokenQuery, getTokenInfo)
+		api.POST("/token", requireTokenQuery, updateToken)
+
 		// Tasks
 		tasks := api.Group("/tasks")
 		{
@@ -93,7 +99,6 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			tasks.POST("/:id/dedupe", dedupeTask)
 			tasks.GET("/:id/logs", getTaskLogs)
 			tasks.GET("/:id/status", getTaskStatus)
-			tasks.GET("/:id/output-logs", getTaskOutputLogs)
 		}
 
 		// System
@@ -107,16 +112,64 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		api.GET("/rclone/remotes", listRemotes)
 		api.GET("/rclone/config", getRcloneConfig)
 
-		// Output logs (structured persistent format)
-		api.GET("/output-logs", getOutputLogs)
-		api.DELETE("/output-logs/:id", deleteOutputLog)
-		api.DELETE("/output-logs/clean", cleanOutputLogs)
+		// Output logs (structured persistent format) - protected by token query
+		api.GET("/output-logs", requireTokenQuery, getOutputLogs)
+		api.DELETE("/output-logs/:id", requireTokenQuery, deleteOutputLog)
+		api.DELETE("/output-logs/clean", requireTokenQuery, cleanOutputLogs)
 	}
 
 	// WebSocket
 	router.GET("/ws", hub.HandleWebSocket)
 
 	return router
+}
+
+// requireTokenQuery middleware checks ?token= query param against configured API token.
+// Returns 403 if token is set in config but doesn't match.
+func requireTokenQuery(c *gin.Context) {
+	if cfgGlobal.APIToken == "" {
+		// Token protection is disabled
+		c.Next()
+		return
+	}
+	token := c.Query("token")
+	if token != cfgGlobal.APIToken {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "invalid or missing token"})
+		return
+	}
+	c.Next()
+}
+
+// getTokenInfo returns whether token protection is enabled and the token value (masked).
+func getTokenInfo(c *gin.Context) {
+	enabled := cfgGlobal.APIToken != ""
+	masked := ""
+	if enabled && len(cfgGlobal.APIToken) > 4 {
+		masked = strings.Repeat("*", len(cfgGlobal.APIToken)-4) + cfgGlobal.APIToken[len(cfgGlobal.APIToken)-4:]
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"enabled": enabled,
+		"token":   cfgGlobal.APIToken,
+		"masked":  masked,
+	})
+}
+
+// updateToken updates the API token in memory and persists it to SystemSetting table.
+func updateToken(c *gin.Context) {
+	var req struct {
+		Token string `json:"token"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	cfgGlobal.APIToken = req.Token
+	// Persist to env/system setting for hot-reload awareness
+	var setting models.SystemSetting
+	db.Where("`key` = ?", "api_token").FirstOrCreate(&setting, models.SystemSetting{Key: "api_token"})
+	setting.Value = req.Token
+	db.Save(&setting)
+	c.JSON(http.StatusOK, gin.H{"message": "token updated"})
 }
 
 // Auth handlers
@@ -456,7 +509,7 @@ func setLogLevel(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "log level updated"})
+	c.JSON(http.StatusOK, gin.H{"message": "log level updated", "level": req.Level})
 }
 
 func getSystemLogs(c *gin.Context) {
@@ -537,42 +590,6 @@ func getOutputLogs(c *gin.Context) {
 
 	var logs []models.OutputLog
 	query.Order("date DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&logs)
-
-	msg := ""
-	c.JSON(http.StatusOK, models.OutputLogResponse{
-		Success: true,
-		Message: &msg,
-		Data: models.OutputLogData{
-			List:  logs,
-			Total: total,
-		},
-	})
-}
-
-// getTaskOutputLogs returns paginated output logs for a specific task.
-func getTaskOutputLogs(c *gin.Context) {
-	id, _ := strconv.Atoi(c.Param("id"))
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	if page < 1 {
-		page = 1
-	}
-	if pageSize < 1 || pageSize > 100 {
-		pageSize = 20
-	}
-
-	// Verify task exists
-	var task models.Task
-	if err := db.First(&task, id).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
-		return
-	}
-
-	var total int64
-	db.Model(&models.OutputLog{}).Where("task_id = ?", id).Count(&total)
-
-	var logs []models.OutputLog
-	db.Where("task_id = ?", id).Order("date DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&logs)
 
 	msg := ""
 	c.JSON(http.StatusOK, models.OutputLogResponse{

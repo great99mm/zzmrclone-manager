@@ -11,7 +11,9 @@ import {
   Activity,
   Clock,
   CheckCircle2,
-  AlertCircle
+  AlertCircle,
+  ExternalLink,
+  ClipboardCheck
 } from 'lucide-react';
 import { getTask, getTaskStatus, getTaskLogs, startTask, stopTask, dedupeTask, deleteTask } from '../services/api';
 import { createWebSocket } from '../services/api';
@@ -154,6 +156,19 @@ const TaskDetail = () => {
     toast.success('日志已刷新');
   };
 
+  const handleCopyApiUrl = () => {
+    const base = window.location.origin;
+    const token = localStorage.getItem('apiToken') || '';
+    const url = token 
+      ? `${base}/api/output-logs?task_id=${id}&token=${token}`
+      : `${base}/api/output-logs?task_id=${id}`;
+    navigator.clipboard.writeText(url).then(() => {
+      toast.success('API URL 已复制到剪贴板');
+    }).catch(() => {
+      toast.error('复制失败');
+    });
+  };
+
   if (loading || !task) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -252,6 +267,39 @@ const TaskDetail = () => {
           value={task.watch_enabled ? '监控' : '手动'} 
           sub={task.schedule_enabled ? `定时 ${task.schedule_interval}分` : '无定时'}
         />
+      </div>
+
+      {/* Output Logs API URL */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+        <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+          <ExternalLink className="w-5 h-5 text-blue-500" />
+          输出日志 API
+        </h2>
+        <div className="bg-gray-900 text-gray-300 p-4 rounded-lg font-mono text-sm break-all">
+          {(() => {
+            const base = window.location.origin;
+            const token = localStorage.getItem('apiToken') || '';
+            return token 
+              ? `${base}/api/output-logs?task_id=${id}&token=${token}`
+              : `${base}/api/output-logs?task_id=${id}`;
+          })()}
+        </div>
+        <div className="flex items-center gap-3 mt-3">
+          <button
+            onClick={handleCopyApiUrl}
+            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium text-sm"
+          >
+            <ClipboardCheck className="w-4 h-4" />
+            复制 API URL
+          </button>
+          <Link
+            to={`/logs?tab=records&task=${id}`}
+            className="inline-flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors font-medium text-sm"
+          >
+            <ExternalLink className="w-4 h-4" />
+            查看转移记录
+          </Link>
+        </div>
       </div>
 
       {/* Log Viewer */}

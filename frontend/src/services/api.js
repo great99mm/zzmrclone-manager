@@ -46,14 +46,31 @@ export const cleanLogs = () => api.post('/system/logs/clean');
 export const getRemotes = () => api.get('/rclone/remotes');
 export const getRcloneConfig = () => api.get('/rclone/config');
 
-// Output logs (structured persistent format)
-export const getOutputLogs = (page = 1, pageSize = 20, taskId = '') => 
-  api.get(`/output-logs?page=${page}&page_size=${pageSize}${taskId ? `&task_id=${taskId}` : ''}`);
-export const getTaskOutputLogs = (taskId, page = 1, pageSize = 20) => 
-  api.get(`/tasks/${taskId}/output-logs?page=${page}&page_size=${pageSize}`);
-export const deleteOutputLog = (id) => api.delete(`/output-logs/${id}`);
-export const cleanOutputLogs = (taskId = '') => 
-  api.delete(`/output-logs/clean${taskId ? `?task_id=${taskId}` : ''}`);
+// Output logs (structured persistent format) - requires ?token= query param
+export const getOutputLogs = (page = 1, pageSize = 20, taskId = '') => {
+  const token = localStorage.getItem('apiToken') || '';
+  const tid = taskId ? `&task_id=${taskId}` : '';
+  return api.get(`/output-logs?page=${page}&page_size=${pageSize}${tid}&token=${token}`);
+};
+export const deleteOutputLog = (id) => {
+  const token = localStorage.getItem('apiToken') || '';
+  return api.delete(`/output-logs/${id}?token=${token}`);
+};
+export const cleanOutputLogs = (taskId = '') => {
+  const token = localStorage.getItem('apiToken') || '';
+  const tid = taskId ? `&task_id=${taskId}` : '';
+  return api.delete(`/output-logs/clean?token=${token}${tid}`);
+};
+
+// Token management
+export const getTokenInfo = () => {
+  const token = localStorage.getItem('apiToken') || '';
+  return api.get(`/token?token=${token}`);
+};
+export const updateToken = (tokenValue) => {
+  const token = localStorage.getItem('apiToken') || '';
+  return api.post(`/token?token=${token}`, { token: tokenValue });
+};
 
 export const createWebSocket = () => {
   return new WebSocket(WS_BASE);

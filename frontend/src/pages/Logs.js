@@ -15,7 +15,7 @@ const Logs = () => {
   const [outputLogs, setOutputLogs] = useState([]);
   const [outputLogsTotal, setOutputLogsTotal] = useState(0);
   const [outputLogsPage, setOutputLogsPage] = useState(1);
-  const [outputLogsFailed, setOutputLogsFailed] = useState(0);
+  const [failedTasksCount, setFailedTasksCount] = useState(0);
 
   useEffect(() => {
     loadTaskList();
@@ -37,6 +37,9 @@ const Logs = () => {
     try {
       const res = await fetch('/api/tasks').then(r => r.json());
       setTasks(res);
+      // Count tasks with error status
+      const failed = res.filter(t => t.status === 'error').length;
+      setFailedTasksCount(failed);
     } catch (err) {
       console.error('Failed to load tasks');
     }
@@ -77,19 +80,14 @@ const Logs = () => {
         const list = res.data.data.list || [];
         setOutputLogs(list);
         setOutputLogsTotal(res.data.data.total || 0);
-        // Count failed entries
-        const failed = list.filter(l => !l.status).length;
-        setOutputLogsFailed(failed);
       } else {
         setOutputLogs([]);
         setOutputLogsTotal(0);
-        setOutputLogsFailed(0);
       }
     } catch (err) {
       toast.error('加载转移记录失败');
       setOutputLogs([]);
       setOutputLogsTotal(0);
-      setOutputLogsFailed(0);
     } finally {
       setLoading(false);
     }
@@ -138,6 +136,7 @@ const Logs = () => {
       }
     } else if (activeTab === 'records') {
       loadOutputLogs();
+      loadTaskList();
     }
     toast.success('已刷新');
   };
@@ -167,7 +166,6 @@ const Logs = () => {
     return `${yyyy}-${mm}-${dd}\n${hh}:${mi}:${ss}`;
   };
 
-  // Stats cards data
   const taskCount = tasks.length;
 
   return (
@@ -181,8 +179,8 @@ const Logs = () => {
                 <span className="text-red-400 text-lg font-bold">×</span>
               </div>
             </div>
-            <div className="text-3xl font-bold text-red-400">{outputLogsFailed}</div>
-            <div className="text-gray-400 text-sm mt-1">刷新失败</div>
+            <div className="text-3xl font-bold text-red-400">{failedTasksCount}</div>
+            <div className="text-gray-400 text-sm mt-1">任务失败</div>
           </div>
           <div className="bg-gray-800 rounded-xl p-5 border border-gray-700">
             <div className="flex items-center gap-3 mb-3">
