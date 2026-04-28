@@ -26,6 +26,7 @@ rclone config
 ```bash
 git clone https://github.com/great99mm/zzmrclone-manager.git
 cd zzmrclone-manager
+vim docker-compose.yml #配置映射目录，别忘了映射你要监控的本机目录到容器内部
 docker compose up -d --build
 ```
 
