@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Build
+build/
+dist/
+
+# Data
+data/
+logs/
+*.db
+
+# Environment
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

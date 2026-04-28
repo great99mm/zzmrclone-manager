@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  rclone-manager:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rclone-manager
+    restart: unless-stopped
+    ports:
+      - "7071:80"
+    volumes:
+      - ./data:/app/data
+      - /root/.config/rclone:/root/.config/rclone
+      - ./logs:/app/logs
+    environment:
+      - TZ=Asia/Shanghai
+      - RCLONE_MANAGER_DATA_DIR=/app/data
+      - RCLONE_MANAGER_LOG_DIR=/app/logs
+      - RCLONE_MANAGER_PORT=7070
+      - RCLONE_CONFIG=/root/.config/rclone/rclone.conf
