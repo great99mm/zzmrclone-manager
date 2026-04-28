@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { FileText, Trash2, RotateCcw, Search, List, ChevronLeft, ChevronRight, LayoutList, Terminal } from 'lucide-react';
-import { getSystemLogs, cleanLogs, getTaskLogs, getOutputLogs, deleteOutputLog, cleanOutputLogs } from '../services/api';
+import { FileText, Trash2, RotateCcw, Search, List, ChevronLeft, ChevronRight, LayoutList } from 'lucide-react';
+import { getTaskLogs, getOutputLogs, deleteOutputLog, cleanOutputLogs } from '../services/api';
 import toast from 'react-hot-toast';
 
 const Logs = () => {
@@ -15,16 +15,13 @@ const Logs = () => {
   const [outputLogs, setOutputLogs] = useState([]);
   const [outputLogsTotal, setOutputLogsTotal] = useState(0);
   const [outputLogsPage, setOutputLogsPage] = useState(1);
-  const [failedTasksCount, setFailedTasksCount] = useState(0);
 
   useEffect(() => {
     loadTaskList();
   }, []);
 
   useEffect(() => {
-    if (activeTab === 'system') {
-      loadSystemLogs();
-    } else if (activeTab === 'task') {
+    if (activeTab === 'task') {
       if (selectedTask) {
         loadTaskLog(selectedTask);
       }
@@ -37,24 +34,8 @@ const Logs = () => {
     try {
       const res = await fetch('/api/tasks').then(r => r.json());
       setTasks(res);
-      // Count tasks with error status
-      const failed = res.filter(t => t.status === 'error').length;
-      setFailedTasksCount(failed);
     } catch (err) {
       console.error('Failed to load tasks');
-    }
-  };
-
-  const loadSystemLogs = async () => {
-    setLoading(true);
-    try {
-      const res = await getSystemLogs('system.log', 500);
-      const content = res.data.logs[0] || '';
-      setLogs(content.split('\n').filter(l => l.trim()));
-    } catch (err) {
-      toast.error('加载系统日志失败');
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -128,9 +109,7 @@ const Logs = () => {
   };
 
   const handleRefresh = () => {
-    if (activeTab === 'system') {
-      loadSystemLogs();
-    } else if (activeTab === 'task') {
+    if (activeTab === 'task') {
       if (selectedTask) {
         loadTaskLog(selectedTask);
       }
@@ -141,7 +120,7 @@ const Logs = () => {
     toast.success('已刷新');
   };
 
-  const filteredLogs = logs.filter(line => 
+  const filteredLogs = logs.filter(line =>
     line.toLowerCase().includes(search.toLowerCase())
   );
 
@@ -172,16 +151,7 @@ const Logs = () => {
     <div className="space-y-6">
       {/* Stats Cards */}
       {activeTab === 'records' && (
-        <div className="grid grid-cols-2 gap-4">
-          <div className="bg-gray-800 rounded-xl p-5 border border-gray-700">
-            <div className="flex items-center gap-3 mb-3">
-              <div className="w-10 h-10 rounded-full bg-red-500/20 flex items-center justify-center">
-                <span className="text-red-400 text-lg font-bold">×</span>
-              </div>
-            </div>
-            <div className="text-3xl font-bold text-red-400">{failedTasksCount}</div>
-            <div className="text-gray-400 text-sm mt-1">任务失败</div>
-          </div>
+        <div className="grid grid-cols-1 gap-4">
           <div className="bg-gray-800 rounded-xl p-5 border border-gray-700">
             <div className="flex items-center gap-3 mb-3">
               <div className="w-10 h-10 rounded-full bg-blue-500/20 flex items-center justify-center">
@@ -200,8 +170,8 @@ const Logs = () => {
           <button
             onClick={() => setActiveTab('records')}
             className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
-              activeTab === 'records' 
-                ? 'border-blue-500 text-blue-400' 
+              activeTab === 'records'
+                ? 'border-blue-500 text-blue-400'
                 : 'border-transparent text-gray-400 hover:text-gray-200'
             }`}
           >
@@ -213,27 +183,14 @@ const Logs = () => {
           <button
             onClick={() => setActiveTab('task')}
             className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
-              activeTab === 'task' 
-                ? 'border-blue-500 text-blue-400' 
+              activeTab === 'task'
+                ? 'border-blue-500 text-blue-400'
                 : 'border-transparent text-gray-400 hover:text-gray-200'
             }`}
           >
             <div className="flex items-center gap-2">
               <FileText className="w-4 h-4" />
               任务
-            </div>
-          </button>
-          <button
-            onClick={() => setActiveTab('system')}
-            className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
-              activeTab === 'system' 
-                ? 'border-blue-500 text-blue-400' 
-                : 'border-transparent text-gray-400 hover:text-gray-200'
-            }`}
-          >
-            <div className="flex items-center gap-2">
-              <Terminal className="w-4 h-4" />
-              日志
             </div>
           </button>
         </div>
@@ -280,47 +237,29 @@ const Logs = () => {
             ) : (
               <>
                 <div className="flex items-center gap-3">
-                  {activeTab === 'system' ? (
-                    <>
-                      <Terminal className="w-5 h-5 text-blue-400" />
-                      <h2 className="text-lg font-semibold text-gray-100">系统日志</h2>
-                    </>
-                  ) : (
-                    <>
-                      <FileText className="w-5 h-5 text-blue-400" />
-                      <h2 className="text-lg font-semibold text-gray-100">任务日志</h2>
-                    </>
-                  )}
+                  <FileText className="w-5 h-5 text-blue-400" />
+                  <h2 className="text-lg font-semibold text-gray-100">任务日志</h2>
                 </div>
                 <div className="flex items-center gap-2">
-                  {activeTab === 'task' && (
-                    <select
-                      value={selectedTask}
-                      onChange={(e) => {
-                        setSelectedTask(e.target.value);
-                        loadTaskLog(e.target.value);
-                      }}
-                      className="px-3 py-2 bg-gray-700 border border-gray-600 text-gray-100 rounded-lg focus:ring-2 focus:ring-blue-500 text-sm"
-                    >
-                      <option value="">选择任务</option>
-                      {tasks.map(task => (
-                        <option key={task.id} value={task.id}>{task.name}</option>
-                      ))}
-                    </select>
-                  )}
+                  <select
+                    value={selectedTask}
+                    onChange={(e) => {
+                      setSelectedTask(e.target.value);
+                      loadTaskLog(e.target.value);
+                    }}
+                    className="px-3 py-2 bg-gray-700 border border-gray-600 text-gray-100 rounded-lg focus:ring-2 focus:ring-blue-500 text-sm"
+                  >
+                    <option value="">选择任务</option>
+                    {tasks.map(task => (
+                      <option key={task.id} value={task.id}>{task.name}</option>
+                    ))}
+                  </select>
                   <button
                     onClick={handleRefresh}
                     className="inline-flex items-center gap-2 px-3 py-2 bg-gray-700 border border-gray-600 text-gray-200 rounded-lg hover:bg-gray-600 transition-colors text-sm"
                   >
                     <RotateCcw className="w-3.5 h-3.5" />
                     刷新
-                  </button>
-                  <button
-                    onClick={handleClean}
-                    className="inline-flex items-center gap-2 px-3 py-2 bg-red-500/20 text-red-400 border border-red-500/30 rounded-lg hover:bg-red-500/30 transition-colors text-sm"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    清空日志
                   </button>
                 </div>
               </>
@@ -362,8 +301,8 @@ const Logs = () => {
                     </tr>
                   ) : (
                     outputLogs.map((log, idx) => (
-                      <tr 
-                        key={log.id} 
+                      <tr
+                        key={log.id}
                         className={`border-b border-gray-700/50 hover:bg-gray-700/30 transition-colors ${
                           idx === outputLogs.length - 1 ? 'border-b-0' : ''
                         }`}
@@ -455,7 +394,7 @@ const Logs = () => {
               )}
             </div>
           ) : (
-            /* Raw log viewer (system / task tabs) */
+            /* Raw log viewer (task tab) */
             <>
               {/* Search */}
               <div className="relative mb-4">
@@ -485,8 +424,8 @@ const Logs = () => {
                 ) : (
                   <div className="divide-y divide-gray-800">
                     {filteredLogs.map((line, idx) => (
-                      <div 
-                        key={idx} 
+                      <div
+                        key={idx}
                         className={`px-4 py-2 ${
                           line.includes('ERROR') ? 'text-red-400 bg-red-500/5' :
                           line.includes('WARN') ? 'text-yellow-400 bg-yellow-500/5' :

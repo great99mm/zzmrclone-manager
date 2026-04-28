@@ -1,18 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { 
-  Plus, 
-  Play, 
-  Square, 
-  Pencil, 
-  Trash2, 
+import {
+  Plus,
+  Play,
+  Square,
+  Pencil,
+  Trash2,
   Search,
   Filter,
   Eye,
   CheckCircle2,
   XCircle,
-  Clock,
-  ClipboardCheck
+  Clock
 } from 'lucide-react';
 import { getTasks, deleteTask, startTask, stopTask } from '../services/api';
 import toast from 'react-hot-toast';
@@ -62,19 +61,6 @@ const Tasks = () => {
     }
   };
 
-  const handleCopyTaskApiUrl = (taskId) => {
-    const base = window.location.origin;
-    const token = localStorage.getItem('apiToken') || '';
-    const url = token 
-      ? `${base}/api/output-logs?task_id=${taskId}&token=${token}`
-      : `${base}/api/output-logs?task_id=${taskId}`;
-    navigator.clipboard.writeText(url).then(() => {
-      toast.success('API URL 已复制到剪贴板');
-    }).catch(() => {
-      toast.error('复制失败');
-    });
-  };
-
   const handleStop = async (id) => {
     try {
       await stopTask(id);
@@ -109,7 +95,7 @@ const Tasks = () => {
           <h1 className="text-2xl font-bold text-gray-900">任务管理</h1>
           <p className="text-gray-500 mt-1">管理所有 Rclone 自动化任务</p>
         </div>
-        <Link 
+        <Link
           to="/tasks/new"
           className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
         >
@@ -221,27 +207,20 @@ const Tasks = () => {
                             <Square className="w-4 h-4" />
                           </button>
                         )}
-                        <Link 
+                        <Link
                           to={`/tasks/${task.id}`}
                           className="p-1.5 text-gray-500 hover:bg-gray-100 rounded-lg transition-colors"
                           title="详情"
                         >
                           <Eye className="w-4 h-4" />
                         </Link>
-                        <Link 
+                        <Link
                           to={`/tasks/${task.id}/edit`}
                           className="p-1.5 text-blue-500 hover:bg-blue-50 rounded-lg transition-colors"
                           title="编辑"
                         >
                           <Pencil className="w-4 h-4" />
                         </Link>
-                        <button
-                          onClick={() => handleCopyTaskApiUrl(task.id)}
-                          className="p-1.5 text-blue-500 hover:bg-blue-50 rounded-lg transition-colors"
-                          title="复制输出日志 API URL"
-                        >
-                          <ClipboardCheck className="w-4 h-4" />
-                        </button>
                         <button
                           onClick={() => handleDelete(task.id)}
                           className="p-1.5 text-red-500 hover:bg-red-50 rounded-lg transition-colors"

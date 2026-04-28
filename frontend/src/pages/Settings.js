@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Settings2, Save, AlertTriangle, Lock, Eye, EyeOff, Key, ClipboardCheck } from 'lucide-react';
+import { Settings2, Save, AlertTriangle, Lock, Eye, EyeOff, Key } from 'lucide-react';
 import { getRcloneConfig, changePassword, getTokenInfo, updateToken } from '../services/api';
 import useAuthStore from '../hooks/useAuthStore';
 import toast from 'react-hot-toast';
@@ -85,17 +85,6 @@ const Settings = () => {
     } catch (err) {
       toast.error('保存失败');
     }
-  };
-
-  const handleCopyTokenUrl = () => {
-    const base = window.location.origin;
-    const token = localStorage.getItem('apiToken') || apiToken;
-    const url = `${base}/api/output-logs?token=${token}`;
-    navigator.clipboard.writeText(url).then(() => {
-      toast.success('URL 已复制到剪贴板');
-    }).catch(() => {
-      toast.error('复制失败');
-    });
   };
 
   if (loading) {
@@ -238,24 +227,13 @@ const Settings = () => {
               设置后，外部访问输出日志 API 需要在 URL 中添加 ?token=xxx
             </p>
           </div>
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handleSaveToken}
-              className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
-            >
-              <Save className="w-4 h-4" />
-              保存 Token
-            </button>
-            {apiToken && (
-              <button
-                onClick={handleCopyTokenUrl}
-                className="inline-flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors font-medium"
-              >
-                <ClipboardCheck className="w-4 h-4" />
-                复制 API URL
-              </button>
-            )}
-          </div>
+          <button
+            onClick={handleSaveToken}
+            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
+          >
+            <Save className="w-4 h-4" />
+            保存 Token
+          </button>
         </div>
       </div>
 

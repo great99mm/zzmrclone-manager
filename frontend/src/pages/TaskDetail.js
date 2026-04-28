@@ -1,19 +1,18 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import { 
-  ArrowLeft, 
-  Play, 
-  Square, 
-  RotateCcw, 
-  Pencil, 
+import {
+  ArrowLeft,
+  Play,
+  Square,
+  RotateCcw,
+  Pencil,
   Trash2,
   Terminal,
   Activity,
   Clock,
   CheckCircle2,
   AlertCircle,
-  ExternalLink,
-  ClipboardCheck
+  ExternalLink
 } from 'lucide-react';
 import { getTask, getTaskStatus, getTaskLogs, startTask, stopTask, dedupeTask, deleteTask } from '../services/api';
 import { createWebSocket } from '../services/api';
@@ -156,19 +155,6 @@ const TaskDetail = () => {
     toast.success('日志已刷新');
   };
 
-  const handleCopyApiUrl = () => {
-    const base = window.location.origin;
-    const token = localStorage.getItem('apiToken') || '';
-    const url = token 
-      ? `${base}/api/output-logs?task_id=${id}&token=${token}`
-      : `${base}/api/output-logs?task_id=${id}`;
-    navigator.clipboard.writeText(url).then(() => {
-      toast.success('API URL 已复制到剪贴板');
-    }).catch(() => {
-      toast.error('复制失败');
-    });
-  };
-
   if (loading || !task) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -182,7 +168,7 @@ const TaskDetail = () => {
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="flex items-center gap-4">
-          <button 
+          <button
             onClick={() => navigate('/tasks')}
             className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
           >
@@ -243,28 +229,28 @@ const TaskDetail = () => {
 
       {/* Info Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <InfoCard 
-          icon={Activity} 
-          label="并发传输" 
-          value={task.transfers} 
+        <InfoCard
+          icon={Activity}
+          label="并发传输"
+          value={task.transfers}
           sub={`检查: ${task.checkers}`}
         />
-        <InfoCard 
-          icon={Clock} 
-          label="最小年龄" 
-          value={task.min_age} 
+        <InfoCard
+          icon={Clock}
+          label="最小年龄"
+          value={task.min_age}
           sub={`重试: ${task.retries}次`}
         />
-        <InfoCard 
-          icon={Terminal} 
-          label="块大小" 
-          value={task.drive_chunk_size} 
+        <InfoCard
+          icon={Terminal}
+          label="块大小"
+          value={task.drive_chunk_size}
           sub={`缓冲: ${task.buffer_size}`}
         />
-        <InfoCard 
-          icon={CheckCircle2} 
-          label="自动化" 
-          value={task.watch_enabled ? '监控' : '手动'} 
+        <InfoCard
+          icon={CheckCircle2}
+          label="自动化"
+          value={task.watch_enabled ? '监控' : '手动'}
           sub={task.schedule_enabled ? `定时 ${task.schedule_interval}分` : '无定时'}
         />
       </div>
@@ -279,22 +265,15 @@ const TaskDetail = () => {
           {(() => {
             const base = window.location.origin;
             const token = localStorage.getItem('apiToken') || '';
-            return token 
+            return token
               ? `${base}/api/output-logs?task_id=${id}&token=${token}`
               : `${base}/api/output-logs?task_id=${id}`;
           })()}
         </div>
         <div className="flex items-center gap-3 mt-3">
-          <button
-            onClick={handleCopyApiUrl}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium text-sm"
-          >
-            <ClipboardCheck className="w-4 h-4" />
-            复制 API URL
-          </button>
           <Link
             to={`/logs?tab=records&task=${id}`}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 transition-colors font-medium text-sm"
+            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium text-sm"
           >
             <ExternalLink className="w-4 h-4" />
             查看转移记录
@@ -346,8 +325,8 @@ const TaskDetail = () => {
           ) : (
             <div className="space-y-0">
               {logs.map((log, idx) => (
-                <div 
-                  key={idx} 
+                <div
+                  key={idx}
                   className={`log-line ${
                     log.content.includes('ERROR') ? 'log-error' :
                     log.content.includes('WARN') ? 'log-warn' :
