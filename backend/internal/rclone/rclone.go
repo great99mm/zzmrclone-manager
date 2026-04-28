@@ -1,6 +1,7 @@
 package rclone
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -15,18 +16,21 @@ import (
 	"sync"
 	"time"
 
+	"gorm.io/gorm"
 	"rclone-manager/internal/logger"
 	"rclone-manager/internal/models"
 	"rclone-manager/internal/websocket"
-	"gorm.io/gorm"
 )
 
 const RcloneRCAddr = "http://127.0.0.1:5572"
 
-// fileLineRegex matches rclone file-transfer log lines like:
+// fileLineRegex matches rclone per-file transfer log lines like:
 //   INFO  : filename.mkv: Copied (new)
+//   INFO  : filename.mkv: Copied (replaced existing)
 //   INFO  : filename.mkv: Deleted
-var fileLineRegex = regexp.MustCompile(`INFO\s+:\s+(.+?):\s+(Copied|Deleted|Moved|Transferred)`)
+//   INFO  : filename.mkv: Moved
+//   INFO  : filename.mkv: Checked (rclone already there)
+var fileLineRegex = regexp.MustCompile(`INFO\s*:\s*(.+?)\s*:\s*(Copied|Deleted|Moved|Transferred|Checked)`)
 
 type Executor struct {
 	runningTasks map[uint]*exec.Cmd
@@ -77,7 +81,6 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 		"--drive-chunk-size", task.DriveChunkSize,
 		"--buffer-size", task.BufferSize,
 		"--retries", strconv.Itoa(task.Retries),
-		"--verbose",
 	}
 
 	if task.BindIP != "" {
@@ -105,7 +108,7 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 		return err
 	}
 
-	// Stream output to WebSocket, log file and database
+	// Stream output to WebSocket, log file and database (line-by-line)
 	go e.streamOutput(task, stdout, f, "stdout")
 	go e.streamOutput(task, stderr, f, "stderr")
 
@@ -135,11 +138,16 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 			e.hub.Broadcast(fmt.Sprintf(`{"type":"task_error","task_id":%d,"error":"%s"}`, task.ID, err.Error()))
 			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("Task failed: %v", err))
 			// Mark any pending logs for this task as failed
-			e.db.Model(&models.OutputLog{}).Where("task_id = ? AND status = ?", task.ID, true).Update("status", false)
+			if e.db != nil {
+				e.db.Model(&models.OutputLog{}).Where("task_id = ? AND status = ?", task.ID, true).Update("status", false)
+			}
 		} else {
 			e.hub.Broadcast(fmt.Sprintf(`{"type":"task_complete","task_id":%d}`, task.ID))
 			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), "Task completed successfully")
 		}
+
+		// Scan full log file to catch any lines we might have missed
+		e.scanLogFileForTransfers(task)
 
 		// Auto dedupe if enabled
 		if task.AutoDedupe && err == nil {
@@ -183,28 +191,28 @@ func (e *Executor) StopTask(taskID uint) error {
 	return nil
 }
 
+// streamOutput reads from the pipe line-by-line (using bufio.Scanner) and
+// forwards each complete line to the log file, WebSocket and database.
 func (e *Executor) streamOutput(task *models.Task, reader io.Reader, logFile *os.File, streamType string) {
-	buf := make([]byte, 1024)
-	for {
-		n, err := reader.Read(buf)
-		if n > 0 {
-			line := string(buf[:n])
-			timestamp := time.Now().Format("2006-01-02 15:04:05")
-
-			// Write to log file
-			logFile.WriteString(fmt.Sprintf("[%s] %s", timestamp, line))
-
-			// Send to WebSocket
-			msg := fmt.Sprintf(`{"type":"log","task_id":%d,"task_name":"%s","stream":"%s","content":"%s","time":"%s"}`,
-				task.ID, task.Name, streamType, strings.ReplaceAll(line, `"`, `\"`), timestamp)
-			e.hub.Broadcast(msg)
-
-			// Parse and persist structured output log
-			e.parseAndSaveLog(task, line)
+	scanner := bufio.NewScanner(reader)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.TrimSpace(line) == "" {
+			continue
 		}
-		if err != nil {
-			break
-		}
+
+		timestamp := time.Now().Format("2006-01-02 15:04:05")
+
+		// Write to log file
+		logFile.WriteString(fmt.Sprintf("[%s] %s\n", timestamp, line))
+
+		// Send to WebSocket
+		msg := fmt.Sprintf(`{"type":"log","task_id":%d,"task_name":"%s","stream":"%s","content":"%s","time":"%s"}`,
+			task.ID, task.Name, streamType, strings.ReplaceAll(line, `"`, `\"`), timestamp)
+		e.hub.Broadcast(msg)
+
+		// Parse and persist structured output log
+		e.parseAndSaveLog(task, line)
 	}
 }
 
@@ -227,7 +235,13 @@ func (e *Executor) parseAndSaveLog(task *models.Task, line string) {
 		fileName := strings.TrimSpace(matches[1])
 		action := matches[2]
 
-		srcPath := filepath.Join(task.SourceDir, fileName)
+		// Resolve full source path
+		var srcPath string
+		if filepath.IsAbs(fileName) {
+			srcPath = fileName
+		} else {
+			srcPath = filepath.Join(task.SourceDir, fileName)
+		}
 		destPath := fmt.Sprintf("%s:%s/%s", task.RemoteName, strings.TrimSuffix(task.RemoteDir, "/"), fileName)
 
 		// Get file size if source file still exists
@@ -240,7 +254,7 @@ func (e *Executor) parseAndSaveLog(task *models.Task, line string) {
 		status := true
 		errmsg := ""
 
-		// If the action indicates failure, mark as failed
+		// If the line contains error indicators, mark as failed
 		if strings.Contains(line, "ERROR") || strings.Contains(line, "Failed") || strings.Contains(line, "failed") {
 			status = false
 			errmsg = line
@@ -261,15 +275,13 @@ func (e *Executor) parseAndSaveLog(task *models.Task, line string) {
 			Date:        time.Now(),
 		}
 
-		// Insert into database (ignore duplicates for the same file in the same task within 1 minute)
+		// Upsert: update if same file exists within 1 minute, otherwise create new
 		var existing models.OutputLog
 		recent := time.Now().Add(-1 * time.Minute)
 		result := e.db.Where("task_id = ? AND file_name = ? AND date > ?", task.ID, fileName, recent).First(&existing)
 		if result.Error != nil {
-			// Not found, create new
 			e.db.Create(&log)
 		} else {
-			// Update existing record
 			existing.Mode = action
 			existing.Status = status
 			existing.Errmsg = errmsg
@@ -277,6 +289,25 @@ func (e *Executor) parseAndSaveLog(task *models.Task, line string) {
 			e.db.Save(&existing)
 		}
 		return
+	}
+}
+
+// scanLogFileForTransfers reads the entire task log file after completion
+// and inserts any transfer lines that were missed during streaming.
+func (e *Executor) scanLogFileForTransfers(task *models.Task) {
+	if e.db == nil {
+		return
+	}
+
+	logFilePath := filepath.Join(logger.GetLogDir(), fmt.Sprintf("task_%d.log", task.ID))
+	content, err := os.ReadFile(logFilePath)
+	if err != nil {
+		return
+	}
+
+	lines := strings.Split(string(content), "\n")
+	for _, line := range lines {
+		e.parseAndSaveLog(task, line)
 	}
 }
 

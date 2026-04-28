@@ -1,12 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { Settings2, Save, AlertTriangle, Lock, Eye, EyeOff, Key, ClipboardCheck } from 'lucide-react';
-import { getRcloneConfig, setLogLevel, changePassword, getTokenInfo, updateToken } from '../services/api';
+import { getRcloneConfig, changePassword, getTokenInfo, updateToken } from '../services/api';
 import useAuthStore from '../hooks/useAuthStore';
 import toast from 'react-hot-toast';
 
 const Settings = () => {
   const [config, setConfig] = useState('');
-  const [logLevel, setLogLevelState] = useState('INFO');
   const [loading, setLoading] = useState(true);
 
   // Token state
@@ -40,24 +39,10 @@ const Settings = () => {
         setTokenEnabled(tokenRes.data.enabled);
         setApiToken(tokenRes.data.token || '');
       }
-      // Load saved log level from localStorage
-      const savedLevel = localStorage.getItem('logLevel') || 'INFO';
-      setLogLevelState(savedLevel);
     } catch (err) {
       console.error('Failed to load settings');
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleLogLevelChange = async (level) => {
-    try {
-      await setLogLevel(level);
-      setLogLevelState(level);
-      localStorage.setItem('logLevel', level);
-      toast.success(`日志级别已切换为 ${level}`);
-    } catch (err) {
-      toast.error('切换失败');
     }
   };
 
@@ -272,29 +257,6 @@ const Settings = () => {
             )}
           </div>
         </div>
-      </div>
-
-      {/* Log Level */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">日志级别</h2>
-        <div className="flex gap-2">
-          {['DEBUG', 'INFO', 'NOTICE', 'ERROR'].map(level => (
-            <button
-              key={level}
-              onClick={() => handleLogLevelChange(level)}
-              className={`px-4 py-2 rounded-lg font-medium transition-colors ${
-                logLevel === level 
-                  ? 'bg-blue-600 text-white' 
-                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-              }`}
-            >
-              {level}
-            </button>
-          ))}
-        </div>
-        <p className="text-sm text-gray-500 mt-3">
-          DEBUG: 最详细，包含所有调试信息 | INFO: 常规信息 | NOTICE: 重要通知 | ERROR: 仅错误
-        </p>
       </div>
 
       {/* Rclone Config View */}
