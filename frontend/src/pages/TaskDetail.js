@@ -29,11 +29,34 @@ const TaskDetail = () => {
   const [loading, setLoading] = useState(true);
   const [autoScroll, setAutoScroll] = useState(true);
   const [fileProgresses, setFileProgresses] = useState({});
-  const logsEndRef = useRef(null);
   const wsRef = useRef(null);
   const progressTimerRef = useRef(null);
+  const logContainerRef = useRef(null);
 
-  // Clean up stale file progresses (files not updated for 5s are considered done)
+  // 从单条日志解析 transferring 进度
+  const parseLogProgress = useCallback((line) => {
+    // 匹配 rclone stats transferring 行，如：
+    // * test_file_1.dat:  6% /10Gi, 16.075Mi/s, 9m55s
+    // test_file_1.dat:  6% /10Gi, 16.075Mi/s, 9m55s
+    const match = line.match(/^\s*(?:\*\s*)?(.+?):\s+(\d+(?:\.\d+)?%)\s+\/([^,]+)(?:,\s*([^,]+))?/);
+    if (match) {
+      const fileName = match[1].trim();
+      const percent = parseFloat(match[2]);
+      const sizeStr = match[3].trim();
+      const speedStr = (match[4] || '').trim();
+      setFileProgresses(prev => ({
+        ...prev,
+        [fileName]: {
+          progress: percent,
+          sizeStr,
+          speedStr,
+          lastUpdate: Date.now(),
+        }
+      }));
+    }
+  }, []);
+
+  // 清理超过5秒未更新的文件进度（视为已完成）
   const cleanupStaleProgresses = useCallback(() => {
     setFileProgresses(prev => {
       const now = Date.now();
@@ -55,7 +78,6 @@ const TaskDetail = () => {
     loadLogs();
     loadStatus();
 
-    // Setup WebSocket for real-time logs and file progress
     const ws = createWebSocket();
     wsRef.current = ws;
 
@@ -63,11 +85,15 @@ const TaskDetail = () => {
       const data = JSON.parse(event.data);
       if (data.task_id === parseInt(id)) {
         if (data.type === 'log') {
-          setLogs(prev => [...prev.slice(-500), {
+          // 新日志插入到开头，实现倒序（最新的在上面）
+          setLogs(prev => [{
             time: data.time,
             content: data.content,
             stream: data.stream,
-          }]);
+          }, ...prev.slice(0, 499)]);
+
+          // 从日志解析 transferring 进度
+          parseLogProgress(data.content);
         } else if (data.type === 'task_complete') {
           toast.success('任务执行完成');
           setFileProgresses({});
@@ -77,6 +103,7 @@ const TaskDetail = () => {
           setFileProgresses({});
           loadStatus();
         } else if (data.type === 'file_progress') {
+          // 兼容后端 WebSocket file_progress 消息
           setFileProgresses(prev => ({
             ...prev,
             [data.file_name]: {
@@ -84,6 +111,8 @@ const TaskDetail = () => {
               bytes: data.bytes || 0,
               size: data.size || 0,
               speed: data.speed || 0,
+              sizeStr: formatBytes(data.size || 0),
+              speedStr: formatSpeed(data.speed || 0),
               lastUpdate: Date.now(),
             }
           }));
@@ -104,11 +133,11 @@ const TaskDetail = () => {
       clearInterval(interval);
       if (progressTimerRef.current) clearInterval(progressTimerRef.current);
     };
-  }, [id, cleanupStaleProgresses]);
+  }, [id, cleanupStaleProgresses, parseLogProgress]);
 
   useEffect(() => {
-    if (autoScroll && logsEndRef.current) {
-      logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    if (autoScroll && logContainerRef.current) {
+      logContainerRef.current.scrollTop = 0;
     }
   }, [logs, autoScroll]);
 
@@ -133,7 +162,8 @@ const TaskDetail = () => {
         content: line.replace(/^\[.*?\]\s*/, ''),
         stream: 'stdout',
       }));
-      setLogs(lines);
+      // 倒序：最新的在前面
+      setLogs(lines.reverse());
     } catch (err) {
       // Ignore log load errors
     }
@@ -295,19 +325,27 @@ const TaskDetail = () => {
       </div>
 
       {/* Active File Transfers */}
-      {Object.keys(fileProgresses).length > 0 && (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Upload className="w-5 h-5 text-blue-500" />
-              <h2 className="font-semibold text-gray-900">正在传输的文件</h2>
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Upload className="w-5 h-5 text-blue-500" />
+            <h2 className="font-semibold text-gray-900">正在传输的文件</h2>
+            {Object.keys(fileProgresses).length > 0 && (
               <span className="px-2 py-0.5 bg-blue-100 text-blue-700 text-xs font-medium rounded-full animate-pulse">
                 {Object.keys(fileProgresses).length} 个文件
               </span>
-            </div>
+            )}
           </div>
-          <div className="p-4 md:p-6 space-y-4">
-            {Object.entries(fileProgresses).map(([fileName, data]) => (
+        </div>
+        <div className="p-4 md:p-6 space-y-4">
+          {Object.keys(fileProgresses).length === 0 ? (
+            <div className="text-center text-gray-400 py-4">
+              <Upload className="w-8 h-8 mx-auto mb-2 opacity-40" />
+              <p className="text-sm">暂无活跃传输</p>
+              <p className="text-xs mt-1">启动任务后将显示实时进度</p>
+            </div>
+          ) : (
+            Object.entries(fileProgresses).map(([fileName, data]) => (
               <div key={fileName} className="space-y-2">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2 min-w-0">
@@ -317,7 +355,7 @@ const TaskDetail = () => {
                     </span>
                   </div>
                   <div className="text-xs text-gray-500 flex-shrink-0 ml-3">
-                    {formatBytes(data.bytes)} / {formatBytes(data.size)} @ {formatSpeed(data.speed)}
+                    {data.sizeStr} @ {data.speedStr || '0 B/s'}
                   </div>
                 </div>
                 <div className="flex items-center gap-3">
@@ -332,10 +370,10 @@ const TaskDetail = () => {
                   </span>
                 </div>
               </div>
-            ))}
-          </div>
+            ))
+          )}
         </div>
-      )}
+      </div>
 
       {/* Output Logs API URL */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 md:p-6">
@@ -395,7 +433,7 @@ const TaskDetail = () => {
           </div>
         </div>
 
-        <div className="log-viewer h-64 md:h-96 overflow-auto p-2 rounded-b-lg">
+        <div className="log-viewer h-64 md:h-96 overflow-auto p-2 rounded-b-lg" ref={logContainerRef}>
           {logs.length === 0 ? (
             <div className="flex items-center justify-center h-full text-gray-500">
               <div className="text-center">
@@ -420,7 +458,6 @@ const TaskDetail = () => {
                   {log.content}
                 </div>
               ))}
-              <div ref={logsEndRef} />
             </div>
           )}
         </div>
