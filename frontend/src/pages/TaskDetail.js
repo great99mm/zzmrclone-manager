@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   ArrowLeft,
@@ -12,7 +12,9 @@ import {
   Clock,
   CheckCircle2,
   AlertCircle,
-  ExternalLink
+  ExternalLink,
+  Upload,
+  File
 } from 'lucide-react';
 import { getTask, getTaskStatus, getTaskLogs, startTask, stopTask, dedupeTask, deleteTask } from '../services/api';
 import { createWebSocket } from '../services/api';
@@ -26,15 +28,34 @@ const TaskDetail = () => {
   const [status, setStatus] = useState({ status: 'idle', running: false });
   const [loading, setLoading] = useState(true);
   const [autoScroll, setAutoScroll] = useState(true);
+  const [fileProgresses, setFileProgresses] = useState({});
   const logsEndRef = useRef(null);
   const wsRef = useRef(null);
+  const progressTimerRef = useRef(null);
+
+  // Clean up stale file progresses (files not updated for 5s are considered done)
+  const cleanupStaleProgresses = useCallback(() => {
+    setFileProgresses(prev => {
+      const now = Date.now();
+      const updated = {};
+      let changed = false;
+      for (const [name, data] of Object.entries(prev)) {
+        if (now - data.lastUpdate < 5000) {
+          updated[name] = data;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? updated : prev;
+    });
+  }, []);
 
   useEffect(() => {
     loadTask();
     loadLogs();
     loadStatus();
 
-    // Setup WebSocket for real-time logs
+    // Setup WebSocket for real-time logs and file progress
     const ws = createWebSocket();
     wsRef.current = ws;
 
@@ -49,10 +70,23 @@ const TaskDetail = () => {
           }]);
         } else if (data.type === 'task_complete') {
           toast.success('任务执行完成');
+          setFileProgresses({});
           loadStatus();
         } else if (data.type === 'task_error') {
           toast.error(`任务异常: ${data.error}`);
+          setFileProgresses({});
           loadStatus();
+        } else if (data.type === 'file_progress') {
+          setFileProgresses(prev => ({
+            ...prev,
+            [data.file_name]: {
+              progress: data.progress || 0,
+              bytes: data.bytes || 0,
+              size: data.size || 0,
+              speed: data.speed || 0,
+              lastUpdate: Date.now(),
+            }
+          }));
         }
       }
     };
@@ -62,11 +96,15 @@ const TaskDetail = () => {
       loadStatus();
     }, 3000);
 
+    // Cleanup stale progresses every 2 seconds
+    progressTimerRef.current = setInterval(cleanupStaleProgresses, 2000);
+
     return () => {
       ws.close();
       clearInterval(interval);
+      if (progressTimerRef.current) clearInterval(progressTimerRef.current);
     };
-  }, [id]);
+  }, [id, cleanupStaleProgresses]);
 
   useEffect(() => {
     if (autoScroll && logsEndRef.current) {
@@ -124,6 +162,7 @@ const TaskDetail = () => {
     try {
       await stopTask(id);
       toast.success('任务已停止');
+      setFileProgresses({});
       loadStatus();
     } catch (err) {
       toast.error('停止失败');
@@ -255,6 +294,49 @@ const TaskDetail = () => {
         />
       </div>
 
+      {/* Active File Transfers */}
+      {Object.keys(fileProgresses).length > 0 && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+          <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Upload className="w-5 h-5 text-blue-500" />
+              <h2 className="font-semibold text-gray-900">正在传输的文件</h2>
+              <span className="px-2 py-0.5 bg-blue-100 text-blue-700 text-xs font-medium rounded-full animate-pulse">
+                {Object.keys(fileProgresses).length} 个文件
+              </span>
+            </div>
+          </div>
+          <div className="p-4 md:p-6 space-y-4">
+            {Object.entries(fileProgresses).map(([fileName, data]) => (
+              <div key={fileName} className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <File className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                    <span className="text-sm font-medium text-gray-700 truncate" title={fileName}>
+                      {fileName}
+                    </span>
+                  </div>
+                  <div className="text-xs text-gray-500 flex-shrink-0 ml-3">
+                    {formatBytes(data.bytes)} / {formatBytes(data.size)} @ {formatSpeed(data.speed)}
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <div className="flex-1 h-2.5 bg-gray-100 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-gradient-to-r from-blue-500 to-blue-400 rounded-full transition-all duration-500 ease-out"
+                      style={{ width: `${Math.min(data.progress, 100)}%` }}
+                    />
+                  </div>
+                  <span className="text-xs font-semibold text-blue-600 w-12 text-right flex-shrink-0">
+                    {Math.min(data.progress, 100).toFixed(1)}%
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Output Logs API URL */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 md:p-6">
         <h2 className="text-base md:text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
@@ -373,5 +455,18 @@ const InfoCard = ({ icon: Icon, label, value, sub }) => (
     <div className="text-xs text-gray-500 mt-0.5">{sub}</div>
   </div>
 );
+
+const formatBytes = (bytes) => {
+  if (bytes === 0 || !bytes) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+};
+
+const formatSpeed = (bytesPerSec) => {
+  if (bytesPerSec === 0 || !bytesPerSec) return '0 B/s';
+  return formatBytes(bytesPerSec) + '/s';
+};
 
 export default TaskDetail;
