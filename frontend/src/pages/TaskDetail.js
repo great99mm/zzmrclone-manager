@@ -256,12 +256,12 @@ const TaskDetail = () => {
       </div>
 
       {/* Output Logs API URL */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 md:p-6">
+        <h2 className="text-base md:text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
           <ExternalLink className="w-5 h-5 text-blue-500" />
           输出日志 API
         </h2>
-        <div className="bg-gray-900 text-gray-300 p-4 rounded-lg font-mono text-sm break-all">
+        <div className="bg-gray-50 text-gray-700 p-3 md:p-4 rounded-lg font-mono text-xs md:text-sm break-all border border-gray-200">
           {(() => {
             const base = window.location.origin;
             const token = localStorage.getItem('apiToken') || '';
@@ -313,7 +313,7 @@ const TaskDetail = () => {
           </div>
         </div>
 
-        <div className="log-viewer h-96 overflow-auto p-2">
+        <div className="log-viewer h-64 md:h-96 overflow-auto p-2 rounded-b-lg">
           {logs.length === 0 ? (
             <div className="flex items-center justify-center h-full text-gray-500">
               <div className="text-center">

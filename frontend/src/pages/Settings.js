@@ -240,21 +240,21 @@ const Settings = () => {
       {/* Rclone Config View */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
         <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-          <Settings2 className="w-5 h-5" />
+          <Settings2 className="w-5 h-5 text-gray-500" />
           Rclone 配置预览
         </h2>
         <div className="relative">
-          <pre className="bg-gray-900 text-gray-300 p-4 rounded-lg overflow-auto max-h-96 text-sm font-mono">
+          <pre className="bg-gray-50 text-gray-700 p-4 rounded-lg overflow-auto max-h-96 text-sm font-mono border border-gray-200">
             {config || '无法读取配置文件'}
           </pre>
           <div className="absolute top-2 right-2">
-            <span className="px-2 py-1 bg-gray-800 text-gray-400 text-xs rounded">
+            <span className="px-2 py-1 bg-gray-200 text-gray-600 text-xs rounded">
               只读
             </span>
           </div>
         </div>
         <p className="text-sm text-gray-500 mt-3 flex items-center gap-1">
-          <AlertTriangle className="w-4 h-4 text-yellow-500" />
+          <AlertTriangle className="w-4 h-4 text-amber-500" />
           配置文件通过 Docker volume 挂载，如需修改请直接编辑宿主机上的 rclone.conf
         </p>
       </div>

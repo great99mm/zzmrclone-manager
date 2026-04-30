@@ -112,6 +112,10 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 	go e.streamOutput(task, stdout, f, "stdout")
 	go e.streamOutput(task, stderr, f, "stderr")
 
+	// Start progress polling goroutine
+	stopProgress := make(chan struct{})
+	go e.pollProgress(task, stopProgress)
+
 	e.mu.Lock()
 	e.runningTasks[task.ID] = cmd
 	e.mu.Unlock()
@@ -133,6 +137,9 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 		e.mu.Lock()
 		delete(e.runningTasks, task.ID)
 		e.mu.Unlock()
+
+		// Close progress polling
+		close(stopProgress)
 
 		if err != nil {
 			e.hub.Broadcast(fmt.Sprintf(`{"type":"task_error","task_id":%d,"error":"%s"}`, task.ID, err.Error()))
@@ -271,6 +278,7 @@ func (e *Executor) parseAndSaveLog(task *models.Task, line string) {
 			FileSize:    fileSize,
 			FileExt:     fileExt,
 			Status:      status,
+			Progress:    100,
 			Errmsg:      errmsg,
 			Date:        time.Now(),
 		}
@@ -308,6 +316,45 @@ func (e *Executor) scanLogFileForTransfers(task *models.Task) {
 	lines := strings.Split(string(content), "\n")
 	for _, line := range lines {
 		e.parseAndSaveLog(task, line)
+	}
+}
+
+// pollProgress periodically queries rclone core/stats and broadcasts file transfer progress via WebSocket.
+func (e *Executor) pollProgress(task *models.Task, stop <-chan struct{}) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			stats, err := GetRcloneStats()
+			if err != nil {
+				continue
+			}
+			transferring, ok := stats["transferring"].([]interface{})
+			if !ok || len(transferring) == 0 {
+				continue
+			}
+			for _, t := range transferring {
+				item, ok := t.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				name, _ := item["name"].(string)
+				percentage, _ := item["percentage"].(float64)
+				bytesDone, _ := item["bytes"].(float64)
+				size, _ := item["size"].(float64)
+				speed, _ := item["speed"].(float64)
+				if name == "" {
+					continue
+				}
+				msg := fmt.Sprintf(`{"type":"file_progress","task_id":%d,"file_name":"%s","progress":%.1f,"bytes":%.0f,"size":%.0f,"speed":%.0f}`,
+					task.ID, strings.ReplaceAll(name, `"`, `\"`), percentage, bytesDone, size, speed)
+				e.hub.Broadcast(msg)
+			}
+		}
 	}
 }
 

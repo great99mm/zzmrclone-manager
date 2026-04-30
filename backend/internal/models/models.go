@@ -75,6 +75,7 @@ type OutputLog struct {
 	FileSize     int64          `json:"file_size"`
 	FileExt      string         `json:"file_ext"`
 	Status       bool           `json:"status" gorm:"default:true"`
+	Progress     int            `json:"progress" gorm:"default:0"`
 	Errmsg       string         `json:"errmsg" gorm:"type:text"`
 	Date         time.Time      `json:"date"`
 	CreatedAt    time.Time      `json:"created_at"`

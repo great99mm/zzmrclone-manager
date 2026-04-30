@@ -38,8 +38,8 @@ body {
 
 /* Log viewer styles */
 .log-viewer {
-  background: #1e1e1e;
-  color: #d4d4d4;
+  background: #f9fafb;
+  color: #374151;
   font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
   font-size: 13px;
   line-height: 1.5;
@@ -52,10 +52,10 @@ body {
 }
 
 .log-line:hover {
-  background: #2a2a2a;
+  background: #f3f4f6;
 }
 
-.log-info { color: #4fc1ff; }
-.log-error { color: #f48771; }
-.log-warn { color: #dcdcaa; }
-.log-success { color: #4ec9b0; }
+.log-info { color: #2563eb; }
+.log-error { color: #dc2626; }
+.log-warn { color: #d97706; }
+.log-success { color: #059669; }

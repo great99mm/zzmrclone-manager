@@ -580,7 +580,7 @@ func getOutputLogs(c *gin.Context) {
 	taskIDStr := c.Query("task_id")
 
 	var total int64
-	query := db.Model(&models.OutputLog{})
+	query := db.Model(&models.OutputLog{}).Where("progress = ?", 100)
 	if taskIDStr != "" {
 		if taskID, err := strconv.Atoi(taskIDStr); err == nil {
 			query = query.Where("task_id = ?", taskID)
