@@ -56,14 +56,15 @@ const TaskDetail = () => {
     }
   }, []);
 
-  // 清理超过5秒未更新的文件进度（视为已完成）
+  // 清理超过30秒未更新的文件进度（视为已完成）
+  // 30秒远大于 rclone --stats 15s 的间隔，避免进度条一闪一闪
   const cleanupStaleProgresses = useCallback(() => {
     setFileProgresses(prev => {
       const now = Date.now();
       const updated = {};
       let changed = false;
       for (const [name, data] of Object.entries(prev)) {
-        if (now - data.lastUpdate < 5000) {
+        if (now - data.lastUpdate < 30000) {
           updated[name] = data;
         } else {
           changed = true;

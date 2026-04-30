@@ -70,7 +70,7 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 		"--config", getRcloneConfig(task),
 		"--fast-list",
 		"--min-age", task.MinAge,
-		"--stats", "15s",
+		"--stats", "1s",
 		"--log-level", "INFO",
 		"--ignore-errors",
 		"--delete-empty-src-dirs",
@@ -405,3 +405,4 @@ func SetLogLevel(level string) error {
 	})
 	return err
 }
+ 
