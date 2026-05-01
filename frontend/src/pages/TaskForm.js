@@ -428,14 +428,14 @@ const TaskForm = () => {
                     required={form.openlist_enabled}
                     value={form.openlist_url}
                     onChange={(e) => handleChange('openlist_url', e.target.value)}
-                    placeholder="https://fox.oplist.org/364155732e0"
+                    placeholder="http://localhost:5244"
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   />
                   <p className="text-xs text-gray-500 mt-1">
                     填写 OpenList 的基础地址，程序会自动调用 /api/fs/list 接口刷新目录
                   </p>
                   <p className="text-xs text-gray-400 mt-0.5">
-                    例如：https://fox.oplist.org/364155732e0 或 https://your-domain.com
+                    例如：http://localhost:5244 或 https://your-domain.com
                   </p>
                 </div>
 
