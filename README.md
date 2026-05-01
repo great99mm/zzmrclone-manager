@@ -54,7 +54,7 @@ cd zzmrclone-manager
 docker-compose up -d
 ```
 
-访问 `http://localhost:7070`，默认账号 `admin` / `admin123`。
+访问 `http://ip:7071`，默认账号 `admin` / `admin123`。
 
 ### 环境变量
 
@@ -74,7 +74,7 @@ docker-compose up -d
 
 1. 编辑任务，展开 **OpenList 刷新设置**
 2. 打开 **启用 OpenList 刷新** 开关
-3. 填写 **OpenList 地址**，例如：`https://fox.oplist.org/364155732e0`
+3. 填写 **OpenList 地址**
 4. 填写 **认证 Token**（从 OpenList 管理后台获取）
 5. （可选）填写 **路径映射**
 
@@ -184,7 +184,7 @@ zzmrclone-manager/
 
 ## 更新日志
 
-### v1.0.0 (2026-05-01)
+### v1.0.1 (2026-05-01)
 
 - **新增** OpenList 目录自动刷新功能（支持路径映射和 API Token 认证）
 - **新增** 任务配置中 OpenList 刷新开关、地址、认证 Token、路径映射字段
