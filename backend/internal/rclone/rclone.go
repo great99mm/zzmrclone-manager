@@ -572,16 +572,30 @@ func (e *Executor) refreshOpenListForTask(task *models.Task) {
 	var logs []models.OutputLog
 	e.db.Where("task_id = ? AND status = ? AND date > ?", task.ID, true, recent).Find(&logs)
 
+	logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("[DEBUG] OpenList refresh found %d output log records", len(logs)))
+
 	if len(logs) == 0 {
+		logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), "[DEBUG] No output logs found for OpenList refresh, falling back to task remote dir")
+		// Fallback: use task remote dir
+		dir := extractOpenListDir(fmt.Sprintf("%s:%s", task.RemoteName, task.RemoteDir), task.OpenlistMapping)
+		success, msg := refreshOpenList(task.OpenlistURL, dir, task.OpenlistToken)
+		if success {
+			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("OpenList refresh [%s]: %s", dir, msg))
+		} else {
+			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("OpenList refresh [%s] failed: %s", dir, msg))
+		}
 		return
 	}
 
 	// Refresh each file's directory individually (no deduplication)
 	for _, log := range logs {
+		logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("[DEBUG] OutputLog ID=%d Dest=%q Mapping=%q", log.ID, log.Dest, task.OpenlistMapping))
 		if log.Dest == "" {
+			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("[DEBUG] Skipping log ID=%d, empty Dest", log.ID))
 			continue
 		}
 		dir := extractOpenListDir(log.Dest, task.OpenlistMapping)
+		logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("[DEBUG] Extracted dir: %s from Dest: %s", dir, log.Dest))
 		success, msg := refreshOpenList(task.OpenlistURL, dir, task.OpenlistToken)
 		if success {
 			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("OpenList refresh [%s]: %s", dir, msg))
