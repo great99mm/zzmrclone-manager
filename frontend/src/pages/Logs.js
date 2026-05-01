@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { FileText, Trash2, RotateCcw, Search, List, ChevronLeft, ChevronRight, LayoutList, HardDrive, CheckCircle2 } from 'lucide-react';
+import { FileText, Trash2, RotateCcw, Search, List, ChevronLeft, ChevronRight, LayoutList, HardDrive, CheckCircle2, RefreshCw } from 'lucide-react';
 import { getTaskLogs, getOutputLogs, deleteOutputLog, cleanOutputLogs } from '../services/api';
 import { createWebSocket } from '../services/api';
 import toast from 'react-hot-toast';
@@ -383,6 +383,7 @@ const Logs = () => {
                       <th className="px-4 py-3">目标路径</th>
                       <th className="px-4 py-3">大小</th>
                       <th className="px-4 py-3">进度</th>
+                      <th className="px-4 py-3 w-24">OpenList</th>
                       <th className="px-4 py-3 w-28">时间</th>
                       <th className="px-4 py-3 rounded-tr-lg w-16">操作</th>
                     </tr>
@@ -390,7 +391,7 @@ const Logs = () => {
                   <tbody>
                     {loading ? (
                       <tr>
-                        <td colSpan="8" className="px-4 py-8 text-center text-gray-400">
+                        <td colSpan="9" className="px-4 py-8 text-center text-gray-400">
                           <div className="flex items-center justify-center">
                             <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-500"></div>
                           </div>
@@ -398,7 +399,7 @@ const Logs = () => {
                       </tr>
                     ) : outputLogs.length === 0 && activeTransfers.length === 0 ? (
                       <tr>
-                        <td colSpan="8" className="px-4 py-8 text-center text-gray-400">
+                        <td colSpan="9" className="px-4 py-8 text-center text-gray-400">
                           <List className="w-8 h-8 mx-auto mb-2 opacity-50" />
                           <p>暂无转移记录</p>
                           <p className="text-xs mt-1">执行任务后，文件传输记录将显示在这里</p>
@@ -446,6 +447,23 @@ const Logs = () => {
                           </td>
                           <td className="px-4 py-3">
                             <ProgressBar progress={100} bytes={0} size={log.file_size || 0} speed={0} />
+                          </td>
+                          <td className="px-4 py-3">
+                            {log.openlist_status ? (
+                              log.openlist_status === 'true' ? (
+                                <span className="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-green-100 text-green-700" title={log.openlist_msg || ''}>
+                                  <RefreshCw className="w-3 h-3 mr-1" />
+                                  已刷新
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-red-100 text-red-700" title={log.openlist_msg || ''}>
+                                  <RefreshCw className="w-3 h-3 mr-1" />
+                                  失败
+                                </span>
+                              )
+                            ) : (
+                              <span className="text-xs text-gray-400">-</span>
+                            )}
                           </td>
                           <td className="px-4 py-3 text-gray-400 whitespace-pre-line text-xs">
                             {formatDate(log.date)}
@@ -513,6 +531,22 @@ const Logs = () => {
                           <span className="text-gray-400">时间:</span> {formatDate(log.date).replace('\n', ' ')}
                         </div>
                       </div>
+                      {log.openlist_status && (
+                        <div className="text-xs">
+                          <span className="text-gray-400">OpenList:</span>{' '}
+                          {log.openlist_status === 'true' ? (
+                            <span className="text-green-600 font-medium" title={log.openlist_msg || ''}>
+                              <RefreshCw className="w-3 h-3 inline mr-1" />
+                              已刷新
+                            </span>
+                          ) : (
+                            <span className="text-red-600 font-medium" title={log.openlist_msg || ''}>
+                              <RefreshCw className="w-3 h-3 inline mr-1" />
+                              失败: {log.openlist_msg || '未知错误'}
+                            </span>
+                          )}
+                        </div>
+                      )}
                       <div className="text-xs text-gray-500 truncate" title={log.src}>
                         <span className="text-gray-400">源:</span> {log.src || '-'}
                       </div>

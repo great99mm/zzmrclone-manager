@@ -32,6 +32,12 @@ type Task struct {
 	UpdatedAt        time.Time      `json:"updated_at"`
 	DeletedAt        gorm.DeletedAt `json:"-" gorm:"index"`
 
+	// OpenList refresh configuration
+	OpenlistEnabled bool   `json:"openlist_enabled" gorm:"default:false"`
+	OpenlistURL     string `json:"openlist_url" gorm:"default:''"`
+	OpenlistMapping string `json:"openlist_mapping" gorm:"default:''"`
+	OpenlistToken   string `json:"openlist_token" gorm:"default:''"`
+
 	// Cascading: when a Task is deleted, all its OutputLogs are deleted
 	OutputLogs []OutputLog `json:"-" gorm:"constraint:OnDelete:CASCADE;"`
 }
@@ -81,6 +87,10 @@ type OutputLog struct {
 	CreatedAt    time.Time      `json:"created_at"`
 	UpdatedAt    time.Time      `json:"updated_at"`
 	DeletedAt    gorm.DeletedAt `json:"-" gorm:"index"`
+
+	// OpenList refresh status
+	OpenlistStatus string `json:"openlist_status" gorm:"default:''"`
+	OpenlistMsg    string `json:"openlist_msg" gorm:"default:''"`
 }
 
 // OutputLogResponse is the unified API response wrapper for the frontend.

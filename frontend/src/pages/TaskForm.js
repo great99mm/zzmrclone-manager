@@ -8,7 +8,8 @@ import {
   Settings2,
   Clock,
   Eye,
-  CheckCircle2
+  CheckCircle2,
+  RefreshCw
 } from 'lucide-react';
 import { createTask, updateTask, getTask, getRemotes } from '../services/api';
 import toast from 'react-hot-toast';
@@ -36,6 +37,10 @@ const TaskForm = () => {
     schedule_enabled: false,
     schedule_interval: 15,
     watch_enabled: true,
+    openlist_enabled: false,
+    openlist_url: '',
+    openlist_mapping: '',
+    openlist_token: '',
   });
 
   const [remotes, setRemotes] = useState([]);
@@ -385,6 +390,95 @@ const TaskForm = () => {
                 <div className="w-11 h-6 bg-gray-200 peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
               </label>
             </div>
+          </div>
+        </div>
+
+        {/* OpenList Refresh */}
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+          <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+            <RefreshCw className="w-5 h-5 text-orange-500" />
+            OpenList 刷新设置
+          </h2>
+
+          <div className="space-y-4">
+            <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+              <div>
+                <div className="font-medium text-gray-900">启用 OpenList 刷新</div>
+                <div className="text-sm text-gray-500">转移成功后自动刷新 OpenList 目录缓存</div>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={form.openlist_enabled}
+                  onChange={(e) => handleChange('openlist_enabled', e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-gray-200 peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+              </label>
+            </div>
+
+            {form.openlist_enabled && (
+              <div className="md:ml-4 p-4 border-l-2 border-orange-200 space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    OpenList 地址 <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required={form.openlist_enabled}
+                    value={form.openlist_url}
+                    onChange={(e) => handleChange('openlist_url', e.target.value)}
+                    placeholder="https://fox.oplist.org/364155732e0"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    填写 OpenList 的基础地址，程序会自动调用 /api/fs/list 接口刷新目录
+                  </p>
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    例如：https://fox.oplist.org/364155732e0 或 https://your-domain.com
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    路径映射（可选）
+                  </label>
+                  <input
+                    type="text"
+                    value={form.openlist_mapping}
+                    onChange={(e) => handleChange('openlist_mapping', e.target.value)}
+                    placeholder='{"op:s1":"/s2"}'
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-sm"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    当 OpenList 挂载路径与 rclone 目标路径不一致时，通过映射刷新正确的目录
+                  </p>
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    格式：JSON 对象，键为 rclone 路径前缀，值为 OpenList 对应路径。例如 {"op:s1":"/s2"} 表示 rclone 的 op:s1 映射到 OpenList 的 /s2
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    认证 Token <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required={form.openlist_enabled}
+                    value={form.openlist_token}
+                    onChange={(e) => handleChange('openlist_token', e.target.value)}
+                    placeholder="openlist-xxx..."
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-sm"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    OpenList API 认证 Token，用于调用 /api/fs/list 接口
+                  </p>
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    例如：openlist-4de0432a-f847-43a7-b6ef-f5d06ac7cbbf...（从 OpenList 管理后台获取）
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 

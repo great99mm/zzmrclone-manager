@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -151,6 +152,25 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 		} else {
 			e.hub.Broadcast(fmt.Sprintf(`{"type":"task_complete","task_id":%d}`, task.ID))
 			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), "Task completed successfully")
+
+			// Refresh OpenList directory after successful transfer
+			if task.OpenlistEnabled && task.OpenlistURL != "" {
+				dir := extractOpenListDir(fmt.Sprintf("%s:%s", task.RemoteName, task.RemoteDir), task.OpenlistMapping)
+				success, msg := refreshOpenList(task.OpenlistURL, dir, task.OpenlistToken)
+				if success {
+					logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("OpenList refresh [%s]: %s", dir, msg))
+				} else {
+					logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("OpenList refresh [%s] failed: %s", dir, msg))
+				}
+
+				// Update all output logs for this task with OpenList refresh status
+				e.db.Model(&models.OutputLog{}).
+					Where("task_id = ? AND status = ?", task.ID, true).
+					Updates(map[string]interface{}{
+						"openlist_status": fmt.Sprintf("%t", success),
+						"openlist_msg":    msg,
+					})
+			}
 		}
 
 		// Scan full log file to catch any lines we might have missed
@@ -404,4 +424,151 @@ func SetLogLevel(level string) error {
 		},
 	})
 	return err
+}
+
+// extractOpenListDir extracts the directory path from rclone dest path,
+// then applies any configured path mapping for OpenList refresh.
+// e.g., "op:/s1/a.txt" -> "/s1", "op:/s1/sub/b.txt" -> "/s1/sub"
+// With mapping {"op:s1":"/s2"}, "op:s1/a.txt" -> "/s2"
+func extractOpenListDir(destPath, mappingJSON string) string {
+	// destPath format: "remote_name:remote_dir/filename"
+	// Remove the remote_name: prefix
+	parts := strings.SplitN(destPath, ":", 2)
+	if len(parts) < 2 {
+		return "/"
+	}
+	// parts[1] is like "/s1/a.txt" or "s1/a.txt"
+	dir := filepath.Dir(parts[1])
+	// Ensure Unix-style path
+	dir = filepath.ToSlash(dir)
+	if dir == "." {
+		dir = "/"
+	}
+
+	// Apply path mapping if configured
+	if mappingJSON != "" {
+		var mappings map[string]string
+		if err := json.Unmarshal([]byte(mappingJSON), &mappings); err == nil {
+			dir = applyOpenListMapping(destPath, dir, mappings)
+		}
+	}
+
+	return dir
+}
+
+// applyOpenListMapping applies configured path mappings to the OpenList directory.
+// Mapping key format: "op:s1" or "op:/s1", value format: "/s2"
+// The remote_name prefix is stripped before matching.
+func applyOpenListMapping(destPath, dir string, mappings map[string]string) string {
+	// destPath format: "remote_name:remote_dir/filename"
+	parts := strings.SplitN(destPath, ":", 2)
+	if len(parts) < 2 {
+		return dir
+	}
+	// remotePath is like "/s1/a.txt" or "s1/a.txt" (without remote_name)
+	remotePath := parts[1]
+	remotePath = filepath.ToSlash(remotePath)
+
+	for key, val := range mappings {
+		// Normalize key: "op:s1" -> "s1" (strip remote prefix)
+		keyPath := key
+		if idx := strings.Index(key, ":"); idx >= 0 {
+			keyPath = key[idx+1:]
+		}
+		keyPath = filepath.ToSlash(keyPath)
+		// Ensure key path starts with /
+		if !strings.HasPrefix(keyPath, "/") {
+			keyPath = "/" + keyPath
+		}
+
+		// Check if remotePath starts with keyPath
+		dirPart := filepath.ToSlash(filepath.Dir(remotePath))
+		if dirPart == keyPath || strings.HasPrefix(dirPart, keyPath+"/") {
+			// Replace matched prefix with mapped value
+			newDir := strings.Replace(dirPart, keyPath, val, 1)
+			return newDir
+		}
+	}
+
+	return dir
+}
+
+// refreshOpenList calls the OpenList API to refresh the specified directory.
+func refreshOpenList(openlistURL, dir, token string) (bool, string) {
+	if openlistURL == "" {
+		return false, "OpenList URL not configured"
+	}
+
+	apiURL, err := url.Parse(openlistURL)
+	if err != nil {
+		return false, fmt.Sprintf("Invalid OpenList URL: %v", err)
+	}
+
+	// Append /api/fs/list to the base URL
+	apiURL = apiURL.JoinPath("api", "fs", "list")
+
+	payload := map[string]interface{}{
+		"path":     dir,
+		"refresh":  true,
+		"page":     1,
+		"per_page": 0,
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return false, fmt.Sprintf("Failed to marshal request: %v", err)
+	}
+
+	req, err := http.NewRequest("POST", apiURL.String(), bytes.NewBuffer(jsonData))
+	if err != nil {
+		return false, fmt.Sprintf("Failed to create request: %v", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", token)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false, fmt.Sprintf("Request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return false, fmt.Sprintf("Failed to read response: %v", err)
+	}
+
+	// Parse response (Alist/OpenList style)
+	var result struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		// Non-JSON response, treat as success if HTTP status is OK
+		if resp.StatusCode == http.StatusOK {
+			return true, string(body)
+		}
+		return false, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	if result.Code != 200 {
+		return false, fmt.Sprintf("API error (code=%d): %s", result.Code, result.Message)
+	}
+
+	return true, "Refresh succeeded"
+}
+
+// updateOutputLogOpenListStatus updates the OpenList refresh status for matching output log records.
+func (e *Executor) updateOutputLogOpenListStatus(taskID uint, fileName string, status bool, msg string) {
+	if e.db == nil {
+		return
+	}
+	e.db.Model(&models.OutputLog{}).
+		Where("task_id = ? AND file_name = ?", taskID, fileName).
+		Updates(map[string]interface{}{
+			"openlist_status": fmt.Sprintf("%t", status),
+			"openlist_msg":    msg,
+		})
 }

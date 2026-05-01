@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -30,7 +31,8 @@ var (
 
 func SetupRouter(cfg *config.Config) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
-	router := gin.Default()
+	router := gin.New()
+	router.Use(gin.Recovery())
 	cfgGlobal = cfg
 
 	// CORS
@@ -300,6 +302,17 @@ func createTask(c *gin.Context) {
 	if task.Retries == 0 {
 		task.Retries = 3
 	}
+	// Trim trailing slash from OpenList URL to avoid double slashes
+	if task.OpenlistURL != "" {
+		task.OpenlistURL = strings.TrimRight(task.OpenlistURL, "/")
+	}
+	// Validate OpenList mapping JSON if provided
+	if task.OpenlistMapping != "" {
+		if !isValidJSON(task.OpenlistMapping) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "OpenList mapping must be a valid JSON object like '{\"op:s1\":\"/s2\"}'"})
+			return
+		}
+	}
 
 	if err := db.Create(&task).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -339,6 +352,18 @@ func updateTask(c *gin.Context) {
 	if err := c.ShouldBindJSON(&updates); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	// Trim trailing slash from OpenList URL
+	if updates.OpenlistURL != "" {
+		updates.OpenlistURL = strings.TrimRight(updates.OpenlistURL, "/")
+	}
+	// Validate OpenList mapping JSON if provided
+	if updates.OpenlistMapping != "" {
+		if !isValidJSON(updates.OpenlistMapping) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "OpenList mapping must be a valid JSON object like '{\"op:s1\":\"/s2\"}'"})
+			return
+		}
 	}
 
 	// Stop existing watchers/schedules
@@ -623,4 +648,10 @@ func cleanOutputLogs(c *gin.Context) {
 	}
 	query.Delete(&models.OutputLog{})
 	c.JSON(http.StatusOK, gin.H{"message": "output logs cleaned"})
+}
+
+// isValidJSON checks if a string is a valid JSON object.
+func isValidJSON(s string) bool {
+	var v map[string]interface{}
+	return json.Unmarshal([]byte(s), &v) == nil
 }
