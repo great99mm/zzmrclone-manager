@@ -152,29 +152,15 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 		} else {
 			e.hub.Broadcast(fmt.Sprintf(`{"type":"task_complete","task_id":%d}`, task.ID))
 			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), "Task completed successfully")
-
-			// Refresh OpenList directory after successful transfer
-			if task.OpenlistEnabled && task.OpenlistURL != "" {
-				dir := extractOpenListDir(fmt.Sprintf("%s:%s", task.RemoteName, task.RemoteDir), task.OpenlistMapping)
-				success, msg := refreshOpenList(task.OpenlistURL, dir, task.OpenlistToken)
-				if success {
-					logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("OpenList refresh [%s]: %s", dir, msg))
-				} else {
-					logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("OpenList refresh [%s] failed: %s", dir, msg))
-				}
-
-				// Update all output logs for this task with OpenList refresh status
-				e.db.Model(&models.OutputLog{}).
-					Where("task_id = ? AND status = ?", task.ID, true).
-					Updates(map[string]interface{}{
-						"openlist_status": fmt.Sprintf("%t", success),
-						"openlist_msg":    msg,
-					})
-			}
 		}
 
 		// Scan full log file to catch any lines we might have missed
 		e.scanLogFileForTransfers(task)
+
+		// Refresh OpenList directories after successful transfer
+		if task.OpenlistEnabled && task.OpenlistURL != "" && err == nil {
+			e.refreshOpenListForTask(task)
+		}
 
 		// Auto dedupe if enabled
 		if task.AutoDedupe && err == nil {
@@ -571,4 +557,49 @@ func (e *Executor) updateOutputLogOpenListStatus(taskID uint, fileName string, s
 			"openlist_status": fmt.Sprintf("%t", status),
 			"openlist_msg":    msg,
 		})
+}
+
+// refreshOpenListForTask refreshes OpenList directories for all successful transfers
+// of the given task. It reads actual file destinations from OutputLog records
+// and calls the OpenList refresh API for each file's directory.
+func (e *Executor) refreshOpenListForTask(task *models.Task) {
+	if e.db == nil || task.OpenlistURL == "" {
+		return
+	}
+
+	// Use a recent time window to capture only transfers from this run
+	recent := time.Now().Add(-5 * time.Minute)
+	var logs []models.OutputLog
+	e.db.Where("task_id = ? AND status = ? AND date > ?", task.ID, true, recent).Find(&logs)
+
+	if len(logs) == 0 {
+		return
+	}
+
+	var overallSuccess = true
+	var overallMsg = "Refresh succeeded"
+
+	// Refresh each file's directory individually (no deduplication)
+	for _, log := range logs {
+		if log.Dest == "" {
+			continue
+		}
+		dir := extractOpenListDir(log.Dest, task.OpenlistMapping)
+		success, msg := refreshOpenList(task.OpenlistURL, dir, task.OpenlistToken)
+		if success {
+			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("OpenList refresh [%s]: %s", dir, msg))
+		} else {
+			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("OpenList refresh [%s] failed: %s", dir, msg))
+			overallSuccess = false
+			overallMsg = msg
+		}
+
+		// Update individual output log with refresh status
+		e.db.Model(&models.OutputLog{}).
+			Where("id = ?", log.ID).
+			Updates(map[string]interface{}{
+				"openlist_status": fmt.Sprintf("%t", success),
+				"openlist_msg":    msg,
+			})
+	}
 }
