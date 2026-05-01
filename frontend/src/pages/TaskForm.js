@@ -454,7 +454,7 @@ const TaskForm = () => {
                     当 OpenList 挂载路径与 rclone 目标路径不一致时，通过映射刷新正确的目录
                   </p>
                   <p className="text-xs text-gray-400 mt-0.5">
-                    格式：JSON 对象，键为 rclone 路径前缀，值为 OpenList 对应路径。例如 {"op:s1":"/s2"} 表示 rclone 的 op:s1 映射到 OpenList 的 /s2
+                    格式：JSON 对象，键为 rclone 路径前缀，值为 OpenList 对应路径。例如 {'{'}"op:s1":"/s2"{'}'} 表示 rclone 的 op:s1 映射到 OpenList 的 /s2
                   </p>
                 </div>
 
