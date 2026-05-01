@@ -576,9 +576,6 @@ func (e *Executor) refreshOpenListForTask(task *models.Task) {
 		return
 	}
 
-	var overallSuccess = true
-	var overallMsg = "Refresh succeeded"
-
 	// Refresh each file's directory individually (no deduplication)
 	for _, log := range logs {
 		if log.Dest == "" {
@@ -590,8 +587,6 @@ func (e *Executor) refreshOpenListForTask(task *models.Task) {
 			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("OpenList refresh [%s]: %s", dir, msg))
 		} else {
 			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("OpenList refresh [%s] failed: %s", dir, msg))
-			overallSuccess = false
-			overallMsg = msg
 		}
 
 		// Update individual output log with refresh status
