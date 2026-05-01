@@ -51,7 +51,7 @@ git clone https://github.com/great99mm/zzmrclone-manager
 cd zzmrclone-manager
 vim docker-compose.yml #记得修改监控目录
 # 启动服务
-docker-compose up -d --build
+docker compose up -d --build
 ```
 
 访问 `http://ip:7071`，默认账号 `admin` / `admin123`。
