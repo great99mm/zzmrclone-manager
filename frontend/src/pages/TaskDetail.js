@@ -56,15 +56,15 @@ const TaskDetail = () => {
     }
   }, []);
 
-  // 清理超过60秒未更新的文件进度（视为已完成）
-  // 60秒超时兜底，即使偶尔丢日志进度条也不会消失
+  // 清理超过30秒未更新的文件进度（视为已完成）
+  // 30秒超时兜底，即使偶尔丢日志进度条也不会消失
   const cleanupStaleProgresses = useCallback(() => {
     setFileProgresses(prev => {
       const now = Date.now();
       const updated = {};
       let changed = false;
       for (const [name, data] of Object.entries(prev)) {
-        if (now - data.lastUpdate < 60000) {
+        if (now - data.lastUpdate < 30000) {
           updated[name] = data;
         } else {
           changed = true;
