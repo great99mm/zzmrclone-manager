@@ -470,7 +470,7 @@ const TaskDetail = () => {
 const StatusBadge = ({ status }) => {
   const configs = {
     running: { text: '运行中', class: 'bg-green-100 text-green-700' },
-    idle: { text: '待机', class: 'bg-gray-100 text-gray-600' },
+    idle: { text: '当前空闲', class: 'bg-gray-100 text-gray-600' },
     error: { text: '异常', class: 'bg-red-100 text-red-700' },
   };
 
