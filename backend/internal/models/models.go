@@ -12,15 +12,23 @@ type Task struct {
 	SourceDir        string         `json:"source_dir" gorm:"not null"`
 	RemoteName       string         `json:"remote_name" gorm:"not null"`
 	RemoteDir        string         `json:"remote_dir" gorm:"not null"`
-	Transfers        int            `json:"transfers" gorm:"default:16"`
-	Checkers         int            `json:"checkers" gorm:"default:32"`
+	// ---- memory-safe defaults ----
+	// Old: transfers=16  => with buffer-size 512M that's 8GB RAM.
+	// New: transfers=8   => with buffer-size 64M that's 512MB peak.
+	// Users can still raise via UI up to the hard cap in router.go.
+	Transfers        int            `json:"transfers" gorm:"default:8"`
+	// checkers raised from 32 to 16 — still fast, far less RAM.
+	Checkers         int            `json:"checkers" gorm:"default:16"`
 	BindIP           string         `json:"bind_ip"`
 	RcloneConfig     string         `json:"rclone_config"`
 	Enabled          bool           `json:"enabled" gorm:"default:true"`
 	AutoDedupe       bool           `json:"auto_dedupe" gorm:"default:true"`
 	MinAge           string         `json:"min_age" gorm:"default:10s"`
-	DriveChunkSize   string         `json:"drive_chunk_size" gorm:"default:256M"`
-	BufferSize       string         `json:"buffer_size" gorm:"default:512M"`
+	// drive-chunk-size: 256M -> 64M.  Still fast, 4x less RAM per transfer.
+	DriveChunkSize   string         `json:"drive_chunk_size" gorm:"default:64M"`
+	// buffer-size: 512M -> 64M.  THIS IS THE BIGGEST WIN.
+	// 8 transfers * 64M = 512MB peak vs old 8GB.
+	BufferSize       string         `json:"buffer_size" gorm:"default:64M"`
 	Retries          int            `json:"retries" gorm:"default:3"`
 	ScheduleEnabled  bool           `json:"schedule_enabled" gorm:"default:false"`
 	ScheduleInterval int            `json:"schedule_interval" gorm:"default:15"`
