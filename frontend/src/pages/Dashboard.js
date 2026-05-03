@@ -36,13 +36,14 @@ const Dashboard = () => {
 
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
-      if (data.type === 'task_complete' || data.type === 'task_error') {
+      if (data.type === 'task_complete' || data.type === 'task_error' ||
+          data.type === 'task_started' || data.type === 'task_stopped') {
         loadData();
       }
     };
 
-    // Refresh every 5 seconds
-    const interval = setInterval(loadData, 5000);
+    // Refresh every 2 seconds (was 5s — too slow to feel real-time)
+    const interval = setInterval(loadData, 2000);
 
     return () => {
       ws.close();
@@ -69,7 +70,7 @@ const Dashboard = () => {
     try {
       await startTask(id);
       toast.success('任务已启动');
-      loadData();
+      setTimeout(loadData, 300);
     } catch (err) {
       toast.error(err.response?.data?.error || '启动失败');
     }
@@ -79,7 +80,7 @@ const Dashboard = () => {
     try {
       await stopTask(id);
       toast.success('任务已停止');
-      loadData();
+      setTimeout(loadData, 300);
     } catch (err) {
       toast.error('停止失败');
     }

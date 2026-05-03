@@ -111,6 +111,10 @@ const TaskDetail = () => {
           toast.error(`任务异常: ${data.error}`);
           setFileProgresses({});
           loadStatus();
+        } else if (data.type === 'task_started') {
+          loadStatus();
+        } else if (data.type === 'task_stopped') {
+          loadStatus();
         } else if (data.type === 'file_progress') {
           // 兼容后端 WebSocket file_progress 消息
           setFileProgresses(prev => ({
@@ -129,10 +133,10 @@ const TaskDetail = () => {
       }
     };
 
-    // Poll status every 3 seconds
+    // Poll status every 2 seconds (was 3s)
     const interval = setInterval(() => {
       loadStatus();
-    }, 3000);
+    }, 2000);
 
     // Cleanup stale progresses every 2 seconds
     progressTimerRef.current = setInterval(cleanupStaleProgresses, 2000);
@@ -191,7 +195,8 @@ const TaskDetail = () => {
     try {
       await startTask(id);
       toast.success('任务已启动');
-      loadStatus();
+      // Small delay so the backend has time to update DB + IsRunning state.
+      setTimeout(loadStatus, 300);
     } catch (err) {
       toast.error(err.response?.data?.error || '启动失败');
     }
@@ -202,7 +207,7 @@ const TaskDetail = () => {
       await stopTask(id);
       toast.success('任务已停止');
       setFileProgresses({});
-      loadStatus();
+      setTimeout(loadStatus, 300);
     } catch (err) {
       toast.error('停止失败');
     }
