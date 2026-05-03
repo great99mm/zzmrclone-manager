@@ -204,6 +204,9 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 		})
 	}
 
+	// Push real-time notification to all connected dashboards.
+	e.hub.Broadcast(fmt.Sprintf(`{"type":"task_started","task_id":%d}`, task.ID))
+
 	// Wait for completion
 	go func() {
 		err := cmd.Wait()
