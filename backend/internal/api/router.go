@@ -466,11 +466,8 @@ func startTask(c *gin.Context) {
 		return
 	}
 
-	now := time.Now()
-	task.Status = "running"
-	task.LastRun = &now
-	db.Save(&task)
-
+	// ExecuteMove now updates status / last_run internally (covers both
+	// API-triggered and watcher/scheduler-triggered paths).
 	c.JSON(http.StatusOK, gin.H{"message": "task started"})
 }
 
@@ -481,6 +478,7 @@ func stopTask(c *gin.Context) {
 	var task models.Task
 	db.First(&task, id)
 	task.Status = "idle"
+	task.LastError = ""
 	db.Save(&task)
 
 	c.JSON(http.StatusOK, gin.H{"message": "task stopped"})
