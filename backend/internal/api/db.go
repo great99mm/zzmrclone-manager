@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/glebarez/sqlite"
 	"golang.org/x/crypto/bcrypt"
@@ -18,11 +19,29 @@ func InitDB(dataDir string) error {
 
 	dbPath := filepath.Join(dataDir, "rclone-manager.db")
 
+	// WAL mode + busy timeout + normal sync for better concurrency.
+	// _pragma=journal_mode(WAL)    : write-ahead logging allows readers to proceed while a write is in progress.
+	// _pragma=busy_timeout(5000)   : wait up to 5s before returning "database is locked".
+	// _pragma=synchronous(NORMAL)  : sufficient durability with WAL, much faster than FULL.
+	dsn := dbPath + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)"
+
 	var err error
-	db, err = gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	db, err = gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		return fmt.Errorf("failed to connect database: %v", err)
 	}
+
+	// Limit SQLite to a single connection. SQLite handles concurrency best
+	// with one writer; multiple open connections from the pool cause lock
+	// contention even with WAL. With MaxOpenConns=1 all DB operations are
+	// naturally serialized without extra mutexes.
+	sqlDB, err := db.DB()
+	if err != nil {
+		return fmt.Errorf("failed to get underlying sql.DB: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxIdleConns(1)
+	sqlDB.SetConnMaxLifetime(time.Hour)
 
 	// Auto migrate
 	err = db.AutoMigrate(
