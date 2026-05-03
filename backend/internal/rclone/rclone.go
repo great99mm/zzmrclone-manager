@@ -38,13 +38,58 @@ type Executor struct {
 	mu           sync.RWMutex
 	hub          *websocket.Hub
 	db           *gorm.DB
+	logQueue     chan *models.OutputLog // async log persistence queue
 }
 
 func NewExecutor(hub *websocket.Hub, database *gorm.DB) *Executor {
-	return &Executor{
+	e := &Executor{
 		runningTasks: make(map[uint]*exec.Cmd),
 		hub:          hub,
 		db:           database,
+		logQueue:     make(chan *models.OutputLog, 1000),
+	}
+	if database != nil {
+		go e.logWorker()
+	}
+	return e
+}
+
+// logWorker serializes all database write operations to eliminate lock contention.
+// SQLite with MaxOpenConns=1 no longer has multi-connection races, but a single
+// writer goroutine also batches back-pressure and keeps rclone stdout/stderr
+// readers from blocking on DB I/O.
+func (e *Executor) logWorker() {
+	for log := range e.logQueue {
+		if log == nil {
+			continue
+		}
+		e.persistLog(log)
+	}
+}
+
+// persistLog performs the actual upsert with 1-minute deduplication window.
+func (e *Executor) persistLog(log *models.OutputLog) {
+	if e.db == nil {
+		return
+	}
+
+	var existing models.OutputLog
+	recent := time.Now().Add(-1 * time.Minute)
+	result := e.db.Where("task_id = ? AND file_name = ? AND date > ?", log.TaskID, log.FileName, recent).First(&existing)
+	if result.Error != nil {
+		e.db.Create(log)
+	} else {
+		existing.Mode = log.Mode
+		existing.Status = log.Status
+		existing.Errmsg = log.Errmsg
+		existing.Date = time.Now()
+		if log.FileSize > 0 {
+			existing.FileSize = log.FileSize
+		}
+		if log.Dest != "" {
+			existing.Dest = log.Dest
+		}
+		e.db.Save(&existing)
 	}
 }
 
@@ -109,9 +154,10 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 		return err
 	}
 
-	// Stream output to WebSocket, log file and database (line-by-line)
-	go e.streamOutput(task, stdout, f, "stdout")
-	go e.streamOutput(task, stderr, f, "stderr")
+	// Merge stdout+stderr into a single reader so only one goroutine parses
+	// logs and enqueues DB writes. This halves the concurrency pressure on
+	// SQLite and removes *os.File write races between the two pipes.
+	go e.streamOutput(task, io.MultiReader(stdout, stderr), f, "combined")
 
 	// Start progress polling goroutine
 	stopProgress := make(chan struct{})
@@ -205,7 +251,7 @@ func (e *Executor) StopTask(taskID uint) error {
 }
 
 // streamOutput reads from the pipe line-by-line (using bufio.Scanner) and
-// forwards each complete line to the log file, WebSocket and database.
+// forwards each complete line to the log file, WebSocket and database queue.
 func (e *Executor) streamOutput(task *models.Task, reader io.Reader, logFile *os.File, streamType string) {
 	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
@@ -224,12 +270,12 @@ func (e *Executor) streamOutput(task *models.Task, reader io.Reader, logFile *os
 			task.ID, task.Name, streamType, strings.ReplaceAll(line, `"`, `\"`), timestamp)
 		e.hub.Broadcast(msg)
 
-		// Parse and persist structured output log
+		// Parse and enqueue structured output log for async persistence
 		e.parseAndSaveLog(task, line)
 	}
 }
 
-// parseAndSaveLog parses a single log line and saves a structured OutputLog record.
+// parseAndSaveLog parses a single log line and enqueues it for async persistence.
 func (e *Executor) parseAndSaveLog(task *models.Task, line string) {
 	if e.db == nil {
 		return
@@ -273,7 +319,7 @@ func (e *Executor) parseAndSaveLog(task *models.Task, line string) {
 			errmsg = line
 		}
 
-		log := models.OutputLog{
+		log := &models.OutputLog{
 			TaskID:      task.ID,
 			Src:         srcPath,
 			SrcStorage:  "local",
@@ -289,20 +335,14 @@ func (e *Executor) parseAndSaveLog(task *models.Task, line string) {
 			Date:        time.Now(),
 		}
 
-		// Upsert: update if same file exists within 1 minute, otherwise create new
-		var existing models.OutputLog
-		recent := time.Now().Add(-1 * time.Minute)
-		result := e.db.Where("task_id = ? AND file_name = ? AND date > ?", task.ID, fileName, recent).First(&existing)
-		if result.Error != nil {
-			e.db.Create(&log)
-		} else {
-			existing.Mode = action
-			existing.Status = status
-			existing.Errmsg = errmsg
-			existing.Date = time.Now()
-			e.db.Save(&existing)
+		// Non-blocking send to queue. If the queue is full we drop the log
+		// rather than stall the rclone pipe reader. In practice with a 1000
+		// slot buffer and a fast serial writer this should never happen.
+		select {
+		case e.logQueue <- log:
+		default:
+			// Queue full, drop the log to keep rclone running smoothly
 		}
-		return
 	}
 }
 
