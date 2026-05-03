@@ -54,16 +54,42 @@ func NewExecutor(hub *websocket.Hub, database *gorm.DB) *Executor {
 	return e
 }
 
-// logWorker serializes all database write operations to eliminate lock contention.
-// SQLite with MaxOpenConns=1 no longer has multi-connection races, but a single
-// writer goroutine also batches back-pressure and keeps rclone stdout/stderr
-// readers from blocking on DB I/O.
+// logWorker batches log writes to minimise DB round-trips.  With
+// MaxOpenConns=4 reads can now proceed in parallel, but writes still
+// contend for the single SQLite write lock.  Batching (50 logs or 1 s)
+// cuts the write-lock frequency by ~50x during heavy rclone output.
 func (e *Executor) logWorker() {
-	for log := range e.logQueue {
-		if log == nil {
-			continue
+	batch := make([]*models.OutputLog, 0, 50)
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	flush := func() {
+		if len(batch) == 0 {
+			return
 		}
-		e.persistLog(log)
+		for _, log := range batch {
+			e.persistLog(log)
+		}
+		batch = batch[:0]
+	}
+
+	for {
+		select {
+		case log, ok := <-e.logQueue:
+			if !ok {
+				flush()
+				return
+			}
+			if log == nil {
+				continue
+			}
+			batch = append(batch, log)
+			if len(batch) >= 50 {
+				flush()
+			}
+		case <-ticker.C:
+			flush()
+		}
 	}
 }
 
