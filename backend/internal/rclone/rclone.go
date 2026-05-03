@@ -34,19 +34,22 @@ const RcloneRCAddr = "http://127.0.0.1:5572"
 var fileLineRegex = regexp.MustCompile(`INFO\s*:\s*(.+?)\s*:\s*(Copied|Deleted|Moved|Transferred|Checked)`)
 
 type Executor struct {
-	runningTasks map[uint]*exec.Cmd
-	mu           sync.RWMutex
-	hub          *websocket.Hub
-	db           *gorm.DB
-	logQueue     chan *models.OutputLog // async log persistence queue
+	runningTasks  map[uint]*exec.Cmd
+	mu            sync.RWMutex
+	hub           *websocket.Hub
+	db            *gorm.DB
+	logQueue      chan *models.OutputLog   // async log persistence queue
+	recentRefresh map[string]time.Time     // dir -> last refresh time (dedup)
+	refreshMu     sync.Mutex
 }
 
 func NewExecutor(hub *websocket.Hub, database *gorm.DB) *Executor {
 	e := &Executor{
-		runningTasks: make(map[uint]*exec.Cmd),
-		hub:          hub,
-		db:           database,
-		logQueue:     make(chan *models.OutputLog, 1000),
+		runningTasks:  make(map[uint]*exec.Cmd),
+		hub:           hub,
+		db:            database,
+		logQueue:      make(chan *models.OutputLog, 1000),
+		recentRefresh: make(map[string]time.Time),
 	}
 	if database != nil {
 		go e.logWorker()
@@ -54,10 +57,24 @@ func NewExecutor(hub *websocket.Hub, database *gorm.DB) *Executor {
 	return e
 }
 
-// logWorker batches log writes to minimise DB round-trips.  With
-// MaxOpenConns=4 reads can now proceed in parallel, but writes still
-// contend for the single SQLite write lock.  Batching (50 logs or 1 s)
-// cuts the write-lock frequency by ~50x during heavy rclone output.
+// shouldRefresh returns true if the given directory has not been refreshed
+// in the last 5 seconds.  This prevents hammering the OpenList API when
+// multiple files land in the same directory.
+func (e *Executor) shouldRefresh(dir string) bool {
+	e.refreshMu.Lock()
+	defer e.refreshMu.Unlock()
+	last, exists := e.recentRefresh[dir]
+	if !exists || time.Since(last) > 5*time.Second {
+		e.recentRefresh[dir] = time.Now()
+		return true
+	}
+	return false
+}
+
+// logWorker batches log writes and triggers per-file OpenList refresh.
+// Each successfully transferred file causes an immediate refresh of its
+// parent directory (deduped to 1 refresh per 5 s per dir).  The refresh
+// runs in its own goroutine so it never blocks the DB writer.
 func (e *Executor) logWorker() {
 	batch := make([]*models.OutputLog, 0, 50)
 	ticker := time.NewTicker(1 * time.Second)
@@ -67,8 +84,36 @@ func (e *Executor) logWorker() {
 		if len(batch) == 0 {
 			return
 		}
+		// Cache task configs so we query each task only once per batch.
+		taskCache := make(map[uint]*models.Task)
 		for _, log := range batch {
 			e.persistLog(log)
+			// ---- per-file OpenList refresh ----
+			if log.Dest == "" || !log.Status {
+				continue // skip failed transfers or missing dest
+			}
+			task, ok := taskCache[log.TaskID]
+			if !ok {
+				var t models.Task
+				if e.db.First(&t, log.TaskID).Error != nil {
+					continue
+				}
+				task = &t
+				taskCache[log.TaskID] = task
+			}
+			if !task.OpenlistEnabled || task.OpenlistURL == "" {
+				continue
+			}
+			dir := extractOpenListDir(log.Dest, task.OpenlistMapping)
+			if e.shouldRefresh(dir) {
+				// Async — never block the writer on a network call.
+				go func(url, d, tok string) {
+					ok, msg := refreshOpenList(url, d, tok)
+					if !ok {
+						logger.WriteLog("openlist.log", fmt.Sprintf("refresh [%s] failed: %s", d, msg))
+					}
+				}(task.OpenlistURL, dir, task.OpenlistToken)
+			}
 		}
 		batch = batch[:0]
 	}
