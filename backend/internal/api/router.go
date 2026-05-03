@@ -12,6 +12,7 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 	"rclone-manager/internal/config"
 	"rclone-manager/internal/logger"
 	"rclone-manager/internal/models"
@@ -695,13 +696,20 @@ func deleteOutputLog(c *gin.Context) {
 // cleanOutputLogs removes all output log entries (optionally filtered by task_id).
 func cleanOutputLogs(c *gin.Context) {
 	taskIDStr := c.Query("task_id")
-	query := db
+	query := db.Model(&models.OutputLog{})
 	if taskIDStr != "" {
 		if taskID, err := strconv.Atoi(taskIDStr); err == nil {
 			query = query.Where("task_id = ?", taskID)
 		}
 	}
-	query.Delete(&models.OutputLog{})
+	// GORM v2 refuses to execute DELETE without a WHERE clause unless
+	// AllowGlobalUpdate is explicitly enabled. This was the root cause of
+	// the "fake clear" bug: the endpoint returned 200 but deleted nothing.
+	if err := query.Session(&gorm.Session{AllowGlobalUpdate: true}).
+		Delete(&models.OutputLog{}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"message": "output logs cleaned"})
 }
 
