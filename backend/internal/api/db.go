@@ -31,16 +31,17 @@ func InitDB(dataDir string) error {
 		return fmt.Errorf("failed to connect database: %v", err)
 	}
 
-	// Limit SQLite to a single connection. SQLite handles concurrency best
-	// with one writer; multiple open connections from the pool cause lock
-	// contention even with WAL. With MaxOpenConns=1 all DB operations are
-	// naturally serialized without extra mutexes.
+	// With WAL mode + busy_timeout we no longer need the extreme
+	// MaxOpenConns=1 setting.  A small pool (4) allows concurrent reads
+	// (dashboard, task list, logs) while writes are still serialized by
+	// SQLite itself.  This eliminates the starvation caused by logWorker
+	// monopolising the single connection.
 	sqlDB, err := db.DB()
 	if err != nil {
 		return fmt.Errorf("failed to get underlying sql.DB: %v", err)
 	}
-	sqlDB.SetMaxOpenConns(1)
-	sqlDB.SetMaxIdleConns(1)
+	sqlDB.SetMaxOpenConns(4)
+	sqlDB.SetMaxIdleConns(2)
 	sqlDB.SetConnMaxLifetime(time.Hour)
 
 	// Auto migrate
