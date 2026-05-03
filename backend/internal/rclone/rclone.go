@@ -252,8 +252,18 @@ func (e *Executor) StopTask(taskID uint) error {
 
 // streamOutput reads from the pipe line-by-line (using bufio.Scanner) and
 // forwards each complete line to the log file, WebSocket and database queue.
+//
+// FIX: set a max token size (64KB) so rclone output lines that contain
+// extremely long pathnames don't cause the Scanner to auto-grow its buffer
+// into multi-megabyte territory.
 func (e *Executor) streamOutput(task *models.Task, reader io.Reader, logFile *os.File, streamType string) {
 	scanner := bufio.NewScanner(reader)
+	// Cap individual line buffer at 64KB.  This prevents unbounded memory
+	// growth when rclone prints very long single-line JSON / path output.
+	const maxScanTokenSize = 64 * 1024
+	scanBuf := make([]byte, 4096) // initial 4KB buffer
+	scanner.Buffer(scanBuf, maxScanTokenSize)
+
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.TrimSpace(line) == "" {
@@ -346,22 +356,33 @@ func (e *Executor) parseAndSaveLog(task *models.Task, line string) {
 	}
 }
 
-// scanLogFileForTransfers reads the entire task log file after completion
+// scanLogFileForTransfers reads the task log file line-by-line after completion
 // and inserts any transfer lines that were missed during streaming.
+//
+// FIX: the old implementation used os.ReadFile which loads the ENTIRE file
+// into memory.  For large transfer jobs the log file can be hundreds of MB,
+// causing a sharp post-completion memory spike.  Now we use bufio.Scanner
+// which uses a fixed ~4KB buffer regardless of file size.
 func (e *Executor) scanLogFileForTransfers(task *models.Task) {
 	if e.db == nil {
 		return
 	}
 
 	logFilePath := filepath.Join(logger.GetLogDir(), fmt.Sprintf("task_%d.log", task.ID))
-	content, err := os.ReadFile(logFilePath)
+	f, err := os.Open(logFilePath)
 	if err != nil {
 		return
 	}
+	defer f.Close()
 
-	lines := strings.Split(string(content), "\n")
-	for _, line := range lines {
-		e.parseAndSaveLog(task, line)
+	scanner := bufio.NewScanner(f)
+	// Same 64KB cap as streamOutput for consistency.
+	const maxScanTokenSize = 64 * 1024
+	scanBuf := make([]byte, 4096)
+	scanner.Buffer(scanBuf, maxScanTokenSize)
+
+	for scanner.Scan() {
+		e.parseAndSaveLog(task, scanner.Text())
 	}
 }
 
