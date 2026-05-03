@@ -14,7 +14,19 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
 	},
+	// Enforce a read size limit to prevent memory exhaustion from malicious
+	// or accidental oversized client frames.
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
 }
+
+// pingInterval / pongWait prevent "zombie" WebSocket connections from
+// accumulating in memory when the network drops or the browser tab crashes.
+const (
+	pingInterval = 30 * time.Second
+	pongWait     = 60 * time.Second
+	writeWait    = 10 * time.Second
+)
 
 type Hub struct {
 	clients    map[*Client]bool
@@ -63,6 +75,8 @@ func (h *Hub) Run() {
 				select {
 				case client.send <- message:
 				default:
+					// Client send buffer full — likely a dead connection.
+					// Remove it to prevent memory leak.
 					close(client.send)
 					delete(h.clients, client)
 				}
@@ -76,7 +90,7 @@ func (h *Hub) Broadcast(message string) {
 	select {
 	case h.broadcast <- []byte(message):
 	default:
-		// Channel full, drop message
+		// Channel full, drop message to avoid blocking the caller.
 	}
 }
 
@@ -105,7 +119,15 @@ func (c *Client) readPump() {
 		c.conn.Close()
 	}()
 
+	// Heartbeat: if no pong received within pongWait, ReadMessage will fail
+	// and the connection will be cleaned up.
 	c.conn.SetReadLimit(512)
+	c.conn.SetReadDeadline(time.Now().Add(pongWait))
+	c.conn.SetPongHandler(func(string) error {
+		c.conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+
 	for {
 		_, _, err := c.conn.ReadMessage()
 		if err != nil {
@@ -118,7 +140,9 @@ func (c *Client) readPump() {
 }
 
 func (c *Client) writePump() {
+	ticker := time.NewTicker(pingInterval)
 	defer func() {
+		ticker.Stop()
 		c.conn.Close()
 	}()
 
@@ -126,12 +150,21 @@ func (c *Client) writePump() {
 		select {
 		case message, ok := <-c.send:
 			if !ok {
+				c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
 
-			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+				return
+			}
+
+		case <-ticker.C:
+			// Send ping.  If the underlying connection is dead, WriteControl
+			// will fail and writePump exits, freeing the client memory.
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(writeWait)); err != nil {
 				return
 			}
 		}
