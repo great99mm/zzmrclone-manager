@@ -481,6 +481,8 @@ func stopTask(c *gin.Context) {
 	task.LastError = ""
 	db.Save(&task)
 
+	hub.Broadcast(fmt.Sprintf(`{"type":"task_stopped","task_id":%d}`, id))
+
 	c.JSON(http.StatusOK, gin.H{"message": "task stopped"})
 }
 
