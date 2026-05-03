@@ -100,7 +100,10 @@ func (e *Executor) IsRunning(taskID uint) bool {
 	if !exists || cmd == nil {
 		return false
 	}
-	return cmd.Process != nil
+	// cmd.Process != nil only means the process object was created.
+	// ProcessState is set after the process exits, so we also require
+	// it to be nil to report "truly running".
+	return cmd.Process != nil && cmd.ProcessState == nil
 }
 
 func (e *Executor) ExecuteMove(task *models.Task) error {
@@ -154,10 +157,14 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 		return err
 	}
 
-	// Merge stdout+stderr into a single reader so only one goroutine parses
-	// logs and enqueues DB writes. This halves the concurrency pressure on
-	// SQLite and removes *os.File write races between the two pipes.
-	go e.streamOutput(task, io.MultiReader(stdout, stderr), f, "combined")
+	// Read stdout and stderr in separate goroutines. io.MultiReader was tried
+	// but causes a deadlock: rclone logs to stderr, and MultiReader blocks on
+	// stdout EOF before ever reading stderr, so all log data piles up in the
+	// pipe buffer and WebSocket / log file get nothing.
+	// os.File.WriteString is concurrency-safe at the kernel level, so both
+	// goroutines can write to the same log file safely.
+	go e.streamOutput(task, stdout, f, "stdout")
+	go e.streamOutput(task, stderr, f, "stderr")
 
 	// Start progress polling goroutine
 	stopProgress := make(chan struct{})
@@ -173,7 +180,28 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 		e.mu.Lock()
 		delete(e.runningTasks, task.ID)
 		e.mu.Unlock()
+		// Start failed — roll status back to error so the UI doesn’t
+		// show "running" for a process that never launched.
+		if e.db != nil {
+			now := time.Now()
+			task.LastRun = &now
+			e.db.Model(task).Updates(map[string]interface{}{
+				"status":     "error",
+				"last_error": err.Error(),
+			})
+		}
 		return err
+	}
+
+	// Process started successfully — commit "running" state so that
+	// watcher / scheduler triggered tasks also show correctly.
+	if e.db != nil {
+		now := time.Now()
+		task.LastRun = &now
+		e.db.Model(task).Updates(map[string]interface{}{
+			"status":     "running",
+			"last_error": "",
+		})
 	}
 
 	// Wait for completion
@@ -191,13 +219,30 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 		if err != nil {
 			e.hub.Broadcast(fmt.Sprintf(`{"type":"task_error","task_id":%d,"error":"%s"}`, task.ID, err.Error()))
 			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("Task failed: %v", err))
-			// Mark any pending logs for this task as failed
-			if e.db != nil {
-				e.db.Model(&models.OutputLog{}).Where("task_id = ? AND status = ?", task.ID, true).Update("status", false)
-			}
 		} else {
 			e.hub.Broadcast(fmt.Sprintf(`{"type":"task_complete","task_id":%d}`, task.ID))
 			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), "Task completed successfully")
+		}
+
+		// Update final status in DB.  We only touch the row if it is still
+		// "running" so that a manual "stop" (which sets status to "idle")
+		// is not overwritten back to "error" by the goroutine.
+		if e.db != nil {
+			var current models.Task
+			e.db.First(&current, task.ID)
+			if current.Status == "running" {
+				if err != nil {
+					e.db.Model(&current).Updates(map[string]interface{}{
+						"status":     "error",
+						"last_error": err.Error(),
+					})
+				} else {
+					e.db.Model(&current).Updates(map[string]interface{}{
+						"status":     "idle",
+						"last_error": "",
+					})
+				}
+			}
 		}
 
 		// Scan full log file to catch any lines we might have missed
