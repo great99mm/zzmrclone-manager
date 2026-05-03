@@ -72,6 +72,25 @@ func InitDB(dataDir string) error {
 		db.Create(admin)
 	}
 
+	// ---- periodic maintenance (goroutine) ----
+	// SQLite WAL files grow unbounded over time.  A periodic checkpoint
+	// truncates the WAL and keeps the DB file size predictable.
+	// OutputLog records older than 30 days are also pruned — this is the
+	// *structured DB table*, NOT the task_N.log files which are untouched.
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			// WAL checkpoint: move WAL pages back into the main DB file
+			if sqlDB != nil {
+				sqlDB.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+			}
+			// Prune old structured output logs (keep 30 days)
+			cutoff := time.Now().AddDate(0, 0, -30)
+			db.Where("date < ?", cutoff).Delete(&models.OutputLog{})
+		}
+	}()
+
 	return nil
 }
 

@@ -29,6 +29,16 @@ var (
 	cfgGlobal *config.Config
 )
 
+// Hard caps for memory-hungry rclone flags.  These act as guardrails:
+// a user (or the old defaults) cannot request so much per-transfer RAM
+// that the host OOMs.  The caps are still high enough for fast transfers.
+const (
+	maxTransfers      = 16   // old default was 16, keep same cap
+	maxCheckers       = 32   // old default was 32, keep same cap
+	maxBufferSize     = "512M" // hard ceiling; most users will run at 64M
+	maxDriveChunkSize = "256M" // hard ceiling
+)
+
 func SetupRouter(cfg *config.Config) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
@@ -269,6 +279,50 @@ func handleChangePassword(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "password changed successfully"})
 }
 
+// clampRcloneParams enforces hard caps on memory-hungry flags so that a user
+// cannot accidentally request enough RAM to OOM the host.
+// Caps preserve the old max values; defaults in models.go are what actually drop RAM.
+func clampRcloneParams(task *models.Task) {
+	if task.Transfers <= 0 {
+		task.Transfers = 8
+	} else if task.Transfers > maxTransfers {
+		task.Transfers = maxTransfers
+	}
+	if task.Checkers <= 0 {
+		task.Checkers = 16
+	} else if task.Checkers > maxCheckers {
+		task.Checkers = maxCheckers
+	}
+	if task.DriveChunkSize == "" {
+		task.DriveChunkSize = "64M"
+	} else if parseSize(task.DriveChunkSize) > parseSize(maxDriveChunkSize) {
+		task.DriveChunkSize = maxDriveChunkSize
+	}
+	if task.BufferSize == "" {
+		task.BufferSize = "64M"
+	} else if parseSize(task.BufferSize) > parseSize(maxBufferSize) {
+		task.BufferSize = maxBufferSize
+	}
+}
+
+// parseSize converts human-readable sizes like "512M" or "1G" to a comparable
+// numeric value (megabytes).  Used only for clamping.
+func parseSize(s string) int64 {
+	s = strings.ToUpper(strings.TrimSpace(s))
+	var mult int64 = 1
+	if strings.HasSuffix(s, "G") {
+		mult = 1024
+		s = strings.TrimSuffix(s, "G")
+	} else if strings.HasSuffix(s, "M") {
+		s = strings.TrimSuffix(s, "M")
+	} else if strings.HasSuffix(s, "K") {
+		mult = 0
+		s = strings.TrimSuffix(s, "K")
+	}
+	v, _ := strconv.ParseInt(s, 10, 64)
+	return v * mult
+}
+
 // Task handlers
 func listTasks(c *gin.Context) {
 	var tasks []models.Task
@@ -283,21 +337,11 @@ func createTask(c *gin.Context) {
 		return
 	}
 
-	// Set defaults
-	if task.Transfers == 0 {
-		task.Transfers = 16
-	}
-	if task.Checkers == 0 {
-		task.Checkers = task.Transfers * 2
-	}
+	// Enforce safe memory defaults / caps before the task ever reaches rclone.
+	clampRcloneParams(&task)
+
 	if task.MinAge == "" {
 		task.MinAge = "10s"
-	}
-	if task.DriveChunkSize == "" {
-		task.DriveChunkSize = "256M"
-	}
-	if task.BufferSize == "" {
-		task.BufferSize = "512M"
 	}
 	if task.Retries == 0 {
 		task.Retries = 3
@@ -353,6 +397,9 @@ func updateTask(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+
+	// Clamp memory params on updates as well
+	clampRcloneParams(&updates)
 
 	// Trim trailing slash from OpenList URL
 	if updates.OpenlistURL != "" {
@@ -457,6 +504,10 @@ func dedupeTask(c *gin.Context) {
 func getTaskLogs(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
 	lines, _ := strconv.Atoi(c.DefaultQuery("lines", "100"))
+	// Clamp lines to a sane range so a huge request doesn't OOM the backend.
+	if lines <= 0 || lines > 5000 {
+		lines = 100
+	}
 
 	logFile := fmt.Sprintf("task_%d.log", id)
 	content, err := logger.ReadLog(logFile, lines)
@@ -539,6 +590,10 @@ func setLogLevel(c *gin.Context) {
 
 func getSystemLogs(c *gin.Context) {
 	lines, _ := strconv.Atoi(c.DefaultQuery("lines", "100"))
+	// Clamp lines so a huge request doesn't OOM the backend.
+	if lines <= 0 || lines > 5000 {
+		lines = 100
+	}
 	logFile := c.DefaultQuery("file", "system.log")
 
 	content, err := logger.ReadLog(logFile, lines)
