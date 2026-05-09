@@ -96,7 +96,7 @@ const Settings = () => {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 min-w-0">
       {/* Header */}
       <div>
         <h1 className="text-2xl font-bold text-gray-900">系统设置</h1>
@@ -238,15 +238,18 @@ const Settings = () => {
       </div>
 
       {/* Rclone Config View */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 md:p-6 min-w-0 overflow-hidden">
         <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
           <Settings2 className="w-5 h-5 text-gray-500" />
           Rclone 配置预览
         </h2>
         <div className="relative">
-          <pre className="bg-gray-50 text-gray-700 p-4 rounded-lg overflow-auto max-h-96 text-sm font-mono border border-gray-200">
+          <div
+            className="bg-gray-50 text-gray-700 p-3 md:p-4 rounded-lg max-h-96 text-xs md:text-sm font-mono border border-gray-200 overflow-x-auto"
+            style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', overflowWrap: 'anywhere' }}
+          >
             {config || '无法读取配置文件'}
-          </pre>
+          </div>
           <div className="absolute top-2 right-2">
             <span className="px-2 py-1 bg-gray-200 text-gray-600 text-xs rounded">
               只读

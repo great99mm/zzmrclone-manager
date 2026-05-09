@@ -65,7 +65,7 @@ function App() {
     <div className="flex h-screen bg-gray-50">
       <Sidebar open={sidebarOpen} setOpen={setSidebarOpen} />
 
-      <div className={`flex-1 flex flex-col transition-all duration-300 ${sidebarOpen ? 'ml-64' : 'ml-0'}`}>
+      <div className={`flex-1 flex flex-col transition-all duration-300 min-w-0 ${sidebarOpen ? 'md:ml-64' : 'ml-0'}`}>
         {/* Mobile header */}
         <div className="md:hidden bg-white border-b border-gray-200 px-4 py-3 flex items-center shadow-sm">
           <button 
@@ -79,7 +79,7 @@ function App() {
           <span className="ml-3 font-semibold text-gray-800">Rclone Manager</span>
         </div>
 
-        <main className="flex-1 overflow-auto p-3 md:p-6">
+        <main className="flex-1 overflow-auto p-3 md:p-6 min-w-0">
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/tasks" element={<Tasks />} />

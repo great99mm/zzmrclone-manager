@@ -67,21 +67,27 @@ const Dashboard = () => {
   };
 
   const handleStart = async (id) => {
+    // Optimistically update local state
+    setTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'running' } : t));
     try {
       await startTask(id);
       toast.success('任务已启动');
       setTimeout(loadData, 300);
     } catch (err) {
+      // Revert on failure
+      setTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'idle' } : t));
       toast.error(err.response?.data?.error || '启动失败');
     }
   };
 
   const handleStop = async (id) => {
+    setTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'idle' } : t));
     try {
       await stopTask(id);
       toast.success('任务已停止');
       setTimeout(loadData, 300);
     } catch (err) {
+      setTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'running' } : t));
       toast.error('停止失败');
     }
   };
@@ -103,76 +109,76 @@ const Dashboard = () => {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">总览</h1>
-          <p className="text-gray-500 mt-1">Rclone 自动化任务管理面板</p>
+          <h1 className="text-xl md:text-2xl font-bold text-gray-900">总览</h1>
+          <p className="text-xs md:text-sm text-gray-500 mt-0.5 md:mt-1">Rclone 自动化任务管理面板</p>
         </div>
-        <div className="flex items-center gap-2">
-          <span className={`w-2.5 h-2.5 rounded-full ${wsConnected ? 'bg-green-500' : 'bg-red-500'}`}></span>
-          <span className="text-sm text-gray-500">{wsConnected ? '实时连接' : '离线'}</span>
+        <div className="flex items-center gap-1.5">
+          <span className={`w-2 h-2 md:w-2.5 md:h-2.5 rounded-full ${wsConnected ? 'bg-green-500' : 'bg-red-500'}`}></span>
+          <span className="text-xs md:text-sm text-gray-500">{wsConnected ? '实时连接' : '离线'}</span>
         </div>
       </div>
 
       {/* Stats Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard 
-          icon={HardDrive} 
-          label="总任务数" 
-          value={stats.total_tasks} 
-          color="blue" 
+      <div className="grid grid-cols-2 md:grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
+        <StatCard
+          icon={HardDrive}
+          label="总任务数"
+          value={stats.total_tasks}
+          color="blue"
         />
-        <StatCard 
-          icon={Activity} 
-          label="运行中" 
-          value={stats.running_tasks} 
-          color="green" 
+        <StatCard
+          icon={Activity}
+          label="运行中"
+          value={stats.running_tasks}
+          color="green"
         />
-        <StatCard 
-          icon={Clock} 
-          label="待机中" 
-          value={idleTasks.length} 
-          color="yellow" 
+        <StatCard
+          icon={Clock}
+          label="待机中"
+          value={idleTasks.length}
+          color="yellow"
         />
-        <StatCard 
-          icon={AlertCircle} 
-          label="异常" 
-          value={errorTasks.length} 
-          color="red" 
+        <StatCard
+          icon={AlertCircle}
+          label="异常"
+          value={errorTasks.length}
+          color="red"
         />
       </div>
 
       {/* Running Tasks */}
       {runningTasks.length > 0 && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-200">
-          <div className="px-6 py-4 border-b border-gray-100">
-            <h2 className="font-semibold text-gray-900 flex items-center gap-2">
-              <Play className="w-5 h-5 text-green-500" />
+          <div className="px-4 md:px-6 py-3 md:py-4 border-b border-gray-100">
+            <h2 className="font-semibold text-gray-900 flex items-center gap-2 text-sm md:text-base">
+              <Play className="w-4 h-4 md:w-5 md:h-5 text-green-500" />
               正在运行 ({runningTasks.length})
             </h2>
           </div>
           <div className="divide-y divide-gray-100">
             {runningTasks.map(task => (
-              <div key={task.id} className="px-6 py-4 flex items-center justify-between hover:bg-gray-50">
-                <div>
-                  <div className="font-medium text-gray-900">{task.name}</div>
-                  <div className="text-sm text-gray-500 mt-0.5">
+              <div key={task.id} className="px-4 md:px-6 py-3 md:py-4 flex items-center justify-between hover:bg-gray-50">
+                <div className="min-w-0 flex-1 mr-2">
+                  <div className="font-medium text-gray-900 text-sm md:text-base truncate">{task.name}</div>
+                  <div className="text-xs md:text-sm text-gray-500 mt-0.5 truncate">
                     {task.source_dir} → {task.remote_name}:{task.remote_dir}
                   </div>
                 </div>
-                <div className="flex items-center gap-3">
-                  <span className="px-2.5 py-1 bg-green-100 text-green-700 text-xs font-medium rounded-full">
+                <div className="flex items-center gap-2 md:gap-3 flex-shrink-0">
+                  <span className="px-2 md:px-2.5 py-0.5 md:py-1 bg-green-100 text-green-700 text-xs font-medium rounded-full">
                     运行中
                   </span>
-                  <Link 
+                  <Link
                     to={`/tasks/${task.id}`}
-                    className="text-blue-600 hover:text-blue-700 text-sm font-medium"
+                    className="text-blue-600 hover:text-blue-700 text-xs md:text-sm font-medium"
                   >
                     查看
                   </Link>
                   <button
                     onClick={() => handleStop(task.id)}
-                    className="p-1.5 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                    className="p-1 md:p-1.5 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
                   >
-                    <Square className="w-4 h-4" />
+                    <Square className="w-3.5 h-3.5 md:w-4 md:h-4" />
                   </button>
                 </div>
               </div>
@@ -183,68 +189,68 @@ const Dashboard = () => {
 
       {/* Task List */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200">
-        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-          <h2 className="font-semibold text-gray-900">任务列表</h2>
-          <Link 
+        <div className="px-4 md:px-6 py-3 md:py-4 border-b border-gray-100 flex items-center justify-between">
+          <h2 className="font-semibold text-gray-900 text-sm md:text-base">任务列表</h2>
+          <Link
             to="/tasks/new"
-            className="text-sm text-blue-600 hover:text-blue-700 font-medium"
+            className="text-xs md:text-sm text-blue-600 hover:text-blue-700 font-medium"
           >
             + 新建任务
           </Link>
         </div>
 
         {tasks.length === 0 ? (
-          <div className="px-6 py-12 text-center">
-            <HardDrive className="w-12 h-12 text-gray-300 mx-auto mb-3" />
-            <p className="text-gray-500">暂无任务，点击上方按钮创建</p>
+          <div className="px-4 md:px-6 py-8 md:py-12 text-center">
+            <HardDrive className="w-8 h-8 md:w-12 md:h-12 text-gray-300 mx-auto mb-2 md:mb-3" />
+            <p className="text-xs md:text-sm text-gray-500">暂无任务，点击上方按钮创建</p>
           </div>
         ) : (
           <div className="divide-y divide-gray-100">
             {tasks.map(task => (
-              <div key={task.id} className="px-6 py-4 flex items-center justify-between hover:bg-gray-50">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className={`w-2 h-2 rounded-full ${
-                      task.status === 'running' ? 'bg-green-500' : 
+              <div key={task.id} className="px-4 md:px-6 py-3 md:py-4 flex items-center justify-between hover:bg-gray-50">
+                <div className="flex-1 min-w-0 mr-2">
+                  <div className="flex items-center gap-1.5">
+                    <span className={`w-1.5 h-1.5 md:w-2 md:h-2 rounded-full flex-shrink-0 ${
+                      task.status === 'running' ? 'bg-green-500' :
                       task.status === 'error' ? 'bg-red-500' : 'bg-gray-400'
                     }`}></span>
-                    <span className="font-medium text-gray-900">{task.name}</span>
+                    <span className="font-medium text-gray-900 text-sm md:text-base truncate">{task.name}</span>
                   </div>
-                  <div className="text-sm text-gray-500 mt-0.5 truncate">
+                  <div className="text-xs md:text-sm text-gray-500 mt-0.5 truncate">
                     {task.source_dir} → {task.remote_name}:{task.remote_dir}
                   </div>
-                  <div className="flex items-center gap-3 mt-1.5 text-xs text-gray-400">
+                  <div className="flex items-center gap-2 md:gap-3 mt-1 text-xs text-gray-400">
                     <span>并发: {task.transfers}</span>
                     <span>检查: {task.checkers}</span>
-                    {task.watch_enabled && <span className="text-blue-500">目录监控</span>}
-                    {task.schedule_enabled && <span className="text-purple-500">定时执行</span>}
+                    {task.watch_enabled && <span className="text-blue-500">监控</span>}
+                    {task.schedule_enabled && <span className="text-purple-500">定时</span>}
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2 ml-4">
+                <div className="flex items-center gap-1 md:gap-2 ml-2 flex-shrink-0">
                   {task.status !== 'running' ? (
                     <button
                       onClick={() => handleStart(task.id)}
-                      className="p-2 text-green-600 hover:bg-green-50 rounded-lg transition-colors"
+                      className="p-1.5 md:p-2 text-green-600 hover:bg-green-50 rounded-lg transition-colors"
                       title="启动"
                     >
-                      <Play className="w-4 h-4" />
+                      <Play className="w-3.5 h-3.5 md:w-4 md:h-4" />
                     </button>
                   ) : (
                     <button
                       onClick={() => handleStop(task.id)}
-                      className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                      className="p-1.5 md:p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
                       title="停止"
                     >
-                      <Square className="w-4 h-4" />
+                      <Square className="w-3.5 h-3.5 md:w-4 md:h-4" />
                     </button>
                   )}
-                  <Link 
+                  <Link
                     to={`/tasks/${task.id}`}
-                    className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+                    className="p-1.5 md:p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
                     title="详情"
                   >
-                    <ArrowRight className="w-4 h-4" />
+                    <ArrowRight className="w-3.5 h-3.5 md:w-4 md:h-4" />
                   </Link>
                 </div>
               </div>
@@ -265,14 +271,14 @@ const StatCard = ({ icon: Icon, label, value, color }) => {
   };
 
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5">
+    <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-3 md:p-5">
       <div className="flex items-center justify-between">
         <div>
-          <p className="text-sm font-medium text-gray-500">{label}</p>
-          <p className="text-2xl font-bold text-gray-900 mt-1">{value}</p>
+          <p className="text-xs md:text-sm font-medium text-gray-500">{label}</p>
+          <p className="text-xl md:text-2xl font-bold text-gray-900 mt-0.5 md:mt-1">{value}</p>
         </div>
-        <div className={`p-3 rounded-lg ${colors[color]}`}>
-          <Icon className="w-6 h-6" />
+        <div className={`p-2 md:p-3 rounded-lg ${colors[color]}`}>
+          <Icon className="w-4 h-4 md:w-6 md:h-6" />
         </div>
       </div>
     </div>
