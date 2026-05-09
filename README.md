@@ -14,16 +14,22 @@
 - **实时日志** — WebSocket 推送任务执行日志，支持倒序查看和关键字高亮
 - **结构化转移记录** — 每条文件传输自动生成持久化记录，支持分页查询和筛选
 
-### OpenList 集成（v1.0 新增）
+### OpenList 集成
 
 - **自动目录刷新** — 任务转移成功后，自动调用 OpenList API 刷新目标目录缓存
 - **路径映射** — 支持配置路径映射关系，解决 OpenList 挂载路径与 rclone 目标路径不一致的问题
 - **刷新状态追踪** — 转移记录中展示每条文件的 OpenList 刷新结果（成功/失败）
 
+### 安全特性
+
+- **随机初始密码** — 首次部署自动生成随机管理员密码，告别硬编码默认密码
+- **密码重置命令** — 内置 `--reset-password` CLI 命令，随时重置管理员密码
+- **密码文件** — 初始/重置密码自动写入 `data/initial-password.txt`，方便查找
+- **Token 保护** — API 支持 Token 鉴权，防止未授权访问
+
 ### 系统特性
 
 - **去重操作** — 转移完成后自动执行 `rclone dedupe newest`
-- **Token 保护** — API 支持 Token 鉴权，防止未授权访问
 - **轻量日志** — 关闭 gin HTTP 请求日志，降低磁盘 IO，仅保留业务日志
 - **Docker 部署** — 一键启动，开箱即用
 
@@ -49,14 +55,45 @@
 ```bash
 git clone https://github.com/great99mm/zzmrclone-manager
 cd zzmrclone-manager
-vim docker-compose.yml #记得修改监控目录
-# 启动服务
+# 编辑 docker-compose.yml 配置需要监控的本地目录映射
+vim docker-compose.yml
+
+# 构建并启动
 docker compose up -d --build
 ```
 
-访问 `http://ip:7071`，默认账号 `admin` / `admin123`。
+### 获取管理员密码
 
-### 环境变量
+首次部署时系统会自动生成随机密码，通过以下方式获取：
+
+```bash
+# 方式一：查看容器内密码文件
+docker exec rclone-manager cat /app/data/initial-password.txt
+
+# 方式二：查看后端日志
+docker exec rclone-manager cat /app/logs/backend.log | grep -A5 "INITIAL ADMIN"
+
+# 方式三：在宿主机直接查看（data 目录已挂载）
+cat data/initial-password.txt
+```
+
+访问 `http://ip:7071`，使用用户名 `admin` 和上述方式获取的密码登录。
+
+### 重置管理员密码
+
+```bash
+# 方式一：使用 Makefile
+make reset-password
+
+# 方式二：直接执行命令
+docker exec rclone-manager /app/server --reset-password
+```
+
+执行后新密码会打印到屏幕并自动写入 `data/initial-password.txt`。
+
+---
+
+## 环境变量
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
@@ -145,6 +182,22 @@ zzmrclone-manager/
 
 ---
 
+## Makefile 命令
+
+| 命令 | 说明 |
+|------|------|
+| `make build` | 构建 Docker 镜像 |
+| `make up` | 后台启动服务 |
+| `make down` | 停止服务 |
+| `make restart` | 重启服务 |
+| `make logs` | 查看实时日志 |
+| `make status` | 查看容器状态 |
+| `make reset-password` | 重置管理员密码 |
+| `make clean` | 停止服务并清理 |
+| `make dev` | 前台启动（调试用） |
+
+---
+
 ## API 接口
 
 ### 认证
@@ -183,6 +236,13 @@ zzmrclone-manager/
 ---
 
 ## 更新日志
+
+### v1.1.0 (2026-05-09)
+
+- **新增** 首次部署自动生成随机管理员密码，密码写入日志及 `initial-password.txt`
+- **新增** `--reset-password` CLI 命令，支持在容器内一键重置管理员密码
+- **新增** `make reset-password` Makefile 快捷命令
+- **安全** 移除登录页面默认账号密码提示文字
 
 ### v1.0.1 (2026-05-01)
 
