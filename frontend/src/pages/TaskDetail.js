@@ -273,44 +273,44 @@ const TaskDetail = () => {
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-1.5 md:gap-2">
           {status.running ? (
             <button
               onClick={handleStop}
-              className="inline-flex items-center gap-2 px-4 py-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors font-medium"
+              className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors font-medium text-sm md:text-base"
             >
-              <Square className="w-4 h-4" />
-              停止
+              <Square className="w-3.5 h-3.5 md:w-4 md:h-4" />
+              <span className="hidden xs:inline">停止</span>
             </button>
           ) : (
             <button
               onClick={handleStart}
-              className="inline-flex items-center gap-2 px-4 py-2 bg-green-50 text-green-600 rounded-lg hover:bg-green-100 transition-colors font-medium"
+              className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-green-50 text-green-600 rounded-lg hover:bg-green-100 transition-colors font-medium text-sm md:text-base"
             >
-              <Play className="w-4 h-4" />
-              启动
+              <Play className="w-3.5 h-3.5 md:w-4 md:h-4" />
+              <span className="hidden xs:inline">启动</span>
             </button>
           )}
           <button
             onClick={handleDedupe}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-purple-50 text-purple-600 rounded-lg hover:bg-purple-100 transition-colors font-medium"
+            className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-purple-50 text-purple-600 rounded-lg hover:bg-purple-100 transition-colors font-medium text-sm md:text-base"
           >
-            <RotateCcw className="w-4 h-4" />
-            去重
+            <RotateCcw className="w-3.5 h-3.5 md:w-4 md:h-4" />
+            <span className="hidden xs:inline">去重</span>
           </button>
           <Link
             to={`/tasks/${id}/edit`}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100 transition-colors font-medium"
+            className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100 transition-colors font-medium text-sm md:text-base"
           >
-            <Pencil className="w-4 h-4" />
-            编辑
+            <Pencil className="w-3.5 h-3.5 md:w-4 md:h-4" />
+            <span className="hidden xs:inline">编辑</span>
           </Link>
           <button
             onClick={handleDelete}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-gray-50 text-gray-600 rounded-lg hover:bg-red-50 hover:text-red-600 transition-colors font-medium"
+            className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-gray-50 text-gray-600 rounded-lg hover:bg-red-50 hover:text-red-600 transition-colors font-medium text-sm md:text-base"
           >
-            <Trash2 className="w-4 h-4" />
-            删除
+            <Trash2 className="w-3.5 h-3.5 md:w-4 md:h-4" />
+            <span className="hidden xs:inline">删除</span>
           </button>
         </div>
       </div>
