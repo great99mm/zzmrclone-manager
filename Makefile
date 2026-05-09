@@ -24,3 +24,6 @@ restart:
 
 status:
 	docker-compose ps
+
+reset-password:
+	docker exec rclone-manager /app/server --reset-password
