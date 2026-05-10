@@ -2,9 +2,7 @@ version: "3.8"
 
 services:
   rclone-manager:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: dedehao/zzmrclone-manager:latest
     container_name: rclone-manager
     restart: unless-stopped
     ports:

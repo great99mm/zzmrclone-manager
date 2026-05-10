@@ -1,6 +1,13 @@
 # ZZMRClone Manager
 
-一款基于 Web 的 Rclone 自动化管理工具，支持任务调度、目录监控、实时日志、结构化转移记录，以及 **OpenList 目录自动刷新**。提供可视化界面和持久化数据库，让 Rclone 文件传输管理更加高效。
+基于 Web 的 Rclone 自动化管理工具，支持任务调度、目录监控、实时日志、结构化转移记录和 **OpenList 目录自动刷新**。提供可视化界面和持久化数据库，一条命令即可部署。
+
+<p align="center">
+  <a href="https://github.com/great99mm/zzmrclone-manager"><img src="https://img.shields.io/github/v/release/great99mm/zzmrclone-manager" alt="GitHub release"></a>
+  <a href="https://hub.docker.com/r/dedehao/zzmrclone-manager"><img src="https://img.shields.io/docker/v/dedehao/zzmrclone-manager?label=Docker%20Hub" alt="Docker Hub"></a>
+  <img src="https://img.shields.io/badge/arch-amd64%20%7C%20arm64-blue" alt="Architecture">
+  <a href="https://github.com/great99mm/zzmrclone-manager/blob/master/LICENSE"><img src="https://img.shields.io/github/license/great99mm/zzmrclone-manager" alt="License"></a>
+</p>
 
 ---
 
@@ -27,12 +34,6 @@
 - **密码文件** — 初始/重置密码自动写入 `data/initial-password.txt`，方便查找
 - **Token 保护** — API 支持 Token 鉴权，防止未授权访问
 
-### 系统特性
-
-- **去重操作** — 转移完成后自动执行 `rclone dedupe newest`
-- **轻量日志** — 关闭 gin HTTP 请求日志，降低磁盘 IO，仅保留业务日志
-- **Docker 部署** — 一键启动，开箱即用
-
 ---
 
 ## 技术栈
@@ -50,14 +51,30 @@
 
 ## 快速开始
 
-### Docker 部署（推荐）
+### Docker 部署（推荐，使用预构建镜像）
+
+已推送通用镜像到 Docker Hub，支持 `amd64` 和 `arm64` 架构，无需本地编译。
+
+```bash
+# 1. 下载 docker-compose.yml
+wget https://raw.githubusercontent.com/great99mm/zzmrclone-manager/master/docker-compose.yml
+
+# 2. 编辑 docker-compose.yml，配置需要监控的本地目录映射
+vim docker-compose.yml
+
+# 3. 启动
+docker compose up -d
+```
+
+> 首次启动会自动从 Docker Hub 拉取 `dedehao/zzmrclone-manager:latest` 镜像。
+
+### 从源码构建（适合二次开发）
 
 ```bash
 git clone https://github.com/great99mm/zzmrclone-manager
 cd zzmrclone-manager
-# 编辑 docker-compose.yml 配置需要监控的本地目录映射
+# 编辑 docker-compose.yml 中 volumes 映射你的本地目录
 vim docker-compose.yml
-
 # 构建并启动
 docker compose up -d --build
 ```
@@ -67,14 +84,14 @@ docker compose up -d --build
 首次部署时系统会自动生成随机密码，通过以下方式获取：
 
 ```bash
-# 方式一：查看容器内密码文件
+# 方式一：在宿主机直接查看（data 目录已挂载）
+cat data/initial-password.txt
+
+# 方式二：查看容器内密码文件
 docker exec rclone-manager cat /app/data/initial-password.txt
 
-# 方式二：查看后端日志
+# 方式三：查看后端日志
 docker exec rclone-manager cat /app/logs/backend.log | grep -A5 "INITIAL ADMIN"
-
-# 方式三：在宿主机直接查看（data 目录已挂载）
-cat data/initial-password.txt
 ```
 
 访问 `http://ip:7071`，使用用户名 `admin` 和上述方式获取的密码登录。
@@ -186,15 +203,11 @@ zzmrclone-manager/
 
 | 命令 | 说明 |
 |------|------|
-| `make build` | 构建 Docker 镜像 |
 | `make up` | 后台启动服务 |
-| `make down` | 停止服务 |
-| `make restart` | 重启服务 |
 | `make logs` | 查看实时日志 |
+| `make restart` | 重启服务 |
 | `make status` | 查看容器状态 |
 | `make reset-password` | 重置管理员密码 |
-| `make clean` | 停止服务并清理 |
-| `make dev` | 前台启动（调试用） |
 
 ---
 
@@ -237,20 +250,23 @@ zzmrclone-manager/
 
 ## 更新日志
 
+### v1.0.2 (2026-05-11)
+
+- **新增** Docker Hub 预构建镜像支持（amd64 + arm64），无需本地编译
+- **新增** GitHub Actions Release 自动构建推送镜像
+- **变更** 部署方式从"克隆→构建"改为"直接 pull 镜像启动"
+
 ### v1.1.0 (2026-05-09)
 
 - **新增** 首次部署自动生成随机管理员密码，密码写入日志及 `initial-password.txt`
 - **新增** `--reset-password` CLI 命令，支持在容器内一键重置管理员密码
-- **新增** `make reset-password` Makefile 快捷命令
 - **安全** 移除登录页面默认账号密码提示文字
 
 ### v1.0.1 (2026-05-01)
 
 - **新增** OpenList 目录自动刷新功能（支持路径映射和 API Token 认证）
 - **新增** 任务配置中 OpenList 刷新开关、地址、认证 Token、路径映射字段
-- **新增** 转移记录中展示 OpenList 刷新状态
 - **变更** 关闭 gin HTTP 请求日志输出，降低磁盘 IO
-- **优化** 前后端字段校验与 URL 规范化处理
 
 ---
 
