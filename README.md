@@ -6,7 +6,7 @@
 
 ## 功能特性
 
-### 核心功能
+### Rclone功能
 
 - **任务管理** — 创建、编辑、启停、删除 Rclone 传输任务
 - **目录监控** — 实时监听源目录变化，文件新增后自动触发传输
@@ -44,9 +44,8 @@
 
 ## 快速开始
 
-### Docker 部署（推荐，使用预构建镜像）
+### Docker 部署
 
-已推送通用镜像到 Docker Hub，支持 `amd64` 和 `arm64` 架构，无需本地编译。
 
 ```bash
 # 1. 下载 docker-compose.yml
@@ -59,18 +58,6 @@ vim docker-compose.yml
 docker compose up -d
 ```
 
-> 首次启动会自动从 Docker Hub 拉取 `dedehao/zzmrclone-manager:latest` 镜像。
-
-### 从源码构建（适合二次开发）
-
-```bash
-git clone https://github.com/great99mm/zzmrclone-manager
-cd zzmrclone-manager
-# 编辑 docker-compose.yml 中 volumes 映射你的本地目录
-vim docker-compose.yml
-# 构建并启动
-docker compose up -d --build
-```
 
 ### 获取管理员密码
 
@@ -134,28 +121,6 @@ Authorization: openlist-xxx...
 ```
 
 Token 在任务级别配置，每个任务可使用不同的 OpenList 实例和 Token。
-
-### 路径映射配置
-
-当 rclone 目标路径与 OpenList 实际挂载路径不一致时，可通过路径映射修正刷新目录。
-
-**配置格式：** JSON 对象，键为 rclone 路径前缀，值为 OpenList 对应路径。
-
-| 场景 | 映射配置 | 说明 |
-|------|---------|------|
-| rclone `op:s1` → OpenList `/s2` | `{"op:s1": "/s2"}` | 刷新 `/s2` 而非 `/s1` |
-| rclone `op:gdrive` → OpenList `/mount/gd` | `{"op:gdrive": "/mount/gd"}` | 刷新 `/mount/gd` |
-
-**示例流程：**
-
-文件从 `/mnt/a.txt` 转移到 `op:/s1/a.txt`，配置映射 `{"op:s1": "/s2"}`：
-
-1. 程序提取 rclone 目标目录：`/s1`
-2. 应用路径映射：`/s1` → `/s2`
-3. 调用 OpenList API：`POST https://fox.oplist.org/364155732e0/api/fs/list`
-4. 请求体：`{"path": "/s2", "refresh": true, "page": 1, "per_page": 0}`
-
----
 
 ## 项目结构
 
