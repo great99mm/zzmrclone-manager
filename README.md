@@ -2,13 +2,6 @@
 
 基于 Web 的 Rclone 自动化管理工具，支持任务调度、目录监控、实时日志、结构化转移记录和 **OpenList 目录自动刷新**。提供可视化界面和持久化数据库，一条命令即可部署。
 
-<p align="center">
-  <a href="https://github.com/great99mm/zzmrclone-manager"><img src="https://img.shields.io/github/v/release/great99mm/zzmrclone-manager" alt="GitHub release"></a>
-  <a href="https://hub.docker.com/r/dedehao/zzmrclone-manager"><img src="https://img.shields.io/docker/v/dedehao/zzmrclone-manager?label=Docker%20Hub" alt="Docker Hub"></a>
-  <img src="https://img.shields.io/badge/arch-amd64%20%7C%20arm64-blue" alt="Architecture">
-  <a href="https://github.com/great99mm/zzmrclone-manager/blob/master/LICENSE"><img src="https://img.shields.io/github/license/great99mm/zzmrclone-manager" alt="License"></a>
-</p>
-
 ---
 
 ## 功能特性
