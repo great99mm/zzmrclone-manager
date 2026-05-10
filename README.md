@@ -53,7 +53,7 @@
 ### Docker 部署（推荐）
 
 ```bash
-git clone https://github.com/great99mm/zzmrclone-manager
+git clone -b dev https://github.com/great99mm/zzmrclone-manager
 cd zzmrclone-manager
 # 编辑 docker-compose.yml 配置需要监控的本地目录映射
 vim docker-compose.yml
