@@ -18,7 +18,7 @@ import {
   Home,
   HardDrive
 } from 'lucide-react';
-import { createTask, updateTask, getTask, getRemotes, listRemoteDir } from '../services/api';
+import { createTask, updateTask, getTask, getRemotes, listRemoteDir, getOpenlistConfigs } from '../services/api';
 import toast from 'react-hot-toast';
 
 const TaskForm = () => {
@@ -51,9 +51,11 @@ const TaskForm = () => {
     openlist_url: '',
     openlist_mapping: '',
     openlist_token: '',
+    openlist_config_id: 0,
   });
 
   const [remotes, setRemotes] = useState([]);
+  const [openlistConfigs, setOpenlistConfigs] = useState([]);
   const [loading, setLoading] = useState(isEdit);
   const [saving, setSaving] = useState(false);
 
@@ -80,10 +82,20 @@ const TaskForm = () => {
     }
   }, []);
 
+  const loadOpenlistConfigs = useCallback(async () => {
+    try {
+      const res = await getOpenlistConfigs();
+      setOpenlistConfigs(res.data || []);
+    } catch (err) {
+      console.error('Failed to load OpenList configs');
+      setOpenlistConfigs([]);
+    }
+  }, []);
+
   const loadTask = useCallback(async () => {
     try {
       const res = await getTask(id);
-      setForm(res.data);
+      setForm({ ...res.data, openlist_config_id: res.data.openlist_config_id || 0 });
     } catch (err) {
       toast.error('加载任务失败');
       navigate('/tasks');
@@ -94,10 +106,11 @@ const TaskForm = () => {
 
   useEffect(() => {
     loadRemotes();
+    loadOpenlistConfigs();
     if (isEdit) {
       loadTask();
     }
-  }, [isEdit, loadRemotes, loadTask]);
+  }, [isEdit, loadRemotes, loadOpenlistConfigs, loadTask]);
 
   // Directory browser functions
   const parseRemotePath = (input) => {
@@ -197,6 +210,12 @@ const TaskForm = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+
+    if (form.openlist_enabled && !form.openlist_config_id) {
+      toast.error('启用 OpenList 刷新时，请选择一个 OpenList 配置');
+      return;
+    }
+
     setSaving(true);
 
     try {
@@ -257,7 +276,7 @@ const TaskForm = () => {
 
   const saveMapping = () => {
     if (!mapRclonePath.trim()) {
-      toast.error('请输入 rclone 路径前缀');
+      toast.error('请输入 rclone 传输路径');
       return;
     }
     if (!mapOpenlistPath.trim()) {
@@ -270,7 +289,7 @@ const TaskForm = () => {
     } else {
       const exists = entries.findIndex(e => e.rclone === mapRclonePath.trim());
       if (exists >= 0 && exists !== mapEditIndex) {
-        toast.error('该 rclone 路径前缀已存在');
+        toast.error('该 rclone 传输路径已存在');
         return;
       }
       entries.push({ rclone: mapRclonePath.trim(), openlist: mapOpenlistPath.trim() });
@@ -767,22 +786,28 @@ const TaskForm = () => {
               <div className="md:ml-4 p-4 border-l-2 border-orange-200 space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    OpenList 地址 <span className="text-red-500">*</span>
+                    OpenList 配置 <span className="text-red-500">*</span>
                   </label>
-                  <input
-                    type="text"
+                  <select
                     required={form.openlist_enabled}
-                    value={form.openlist_url}
-                    onChange={(e) => handleChange('openlist_url', e.target.value)}
-                    placeholder="http://localhost:5244"
+                    value={form.openlist_config_id || ''}
+                    onChange={(e) => handleChange('openlist_config_id', e.target.value ? Number(e.target.value) : 0)}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    填写 OpenList 的基础地址，程序会自动调用 /api/fs/list 接口刷新目录
-                  </p>
-                  <p className="text-xs text-gray-400 mt-0.5">
-                    例如：http://localhost:5244 或 https://your-domain.com
-                  </p>
+                  >
+                    <option value="">选择已有 OpenList 配置</option>
+                    {openlistConfigs.map((cfg) => (
+                      <option key={cfg.id} value={cfg.id}>{cfg.name}</option>
+                    ))}
+                  </select>
+                  {openlistConfigs.length === 0 && (
+                    <button
+                      type="button"
+                      onClick={() => navigate('/openlist-configs')}
+                      className="text-xs text-blue-600 hover:text-blue-700 mt-1"
+                    >
+                      暂无配置，前往添加
+                    </button>
+                  )}
                 </div>
 
                 <div>
@@ -831,25 +856,6 @@ const TaskForm = () => {
                   </button>
                 </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    认证 Token <span className="text-red-500">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    required={form.openlist_enabled}
-                    value={form.openlist_token}
-                    onChange={(e) => handleChange('openlist_token', e.target.value)}
-                    placeholder="openlist-xxx..."
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-sm"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    OpenList API 认证 Token，用于调用 /api/fs/list 接口
-                  </p>
-                  <p className="text-xs text-gray-400 mt-0.5">
-                    例如：openlist-4de0432a-f847-43a7-b6ef-f5d06ac7cbbf...（从 OpenList 管理后台获取）
-                  </p>
-                </div>
               </div>
             )}
           </div>
@@ -896,7 +902,7 @@ const TaskForm = () => {
             <div className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                  rclone 路径前缀 <span className="text-red-500">*</span>
+                  rclone 传输路径 <span className="text-red-500">*</span>
                 </label>
                 <input
                   type="text"
@@ -906,7 +912,6 @@ const TaskForm = () => {
                   autoFocus
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-sm"
                 />
-                <p className="text-xs text-gray-400 mt-1">rclone remote 名称，用于匹配目标路径前缀</p>
               </div>
 
               <div>

@@ -54,6 +54,7 @@ func InitDB(dataDir string) error {
 		&models.SystemSetting{},
 		&models.User{},
 		&models.OutputLog{},
+		&models.OpenlistConfig{},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to migrate database: %v", err)

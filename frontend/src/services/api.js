@@ -26,6 +26,7 @@ export const register = (data) => api.post('/register', data);
 export const changePassword = (data) => api.post('/change-password', data);
 
 export const getTasks = () => api.get('/tasks');
+export const getQuickTasks = () => api.get('/tasks/quick');
 export const getTask = (id) => api.get(`/tasks/${id}`);
 export const createTask = (data) => api.post('/tasks', data);
 export const updateTask = (id, data) => api.put(`/tasks/${id}`, data);
@@ -44,8 +45,23 @@ export const getSystemLogs = (file = 'system.log', lines = 100) =>
 export const cleanLogs = () => api.post('/system/logs/clean');
 
 export const getRemotes = () => api.get('/rclone/remotes');
+export const getRemoteDetails = () => api.get('/rclone/remotes/detail');
 export const getRcloneConfig = () => api.get('/rclone/config');
 export const listRemoteDir = (remote, path = '/') => api.get(`/rclone/ls?remote=${encodeURIComponent(remote)}&path=${encodeURIComponent(path)}`);
+export const createRemoteDir = (remote, path) => api.post('/rclone/mkdir', { remote, path });
+
+// File browser
+export const listLocalFiles = (path = '/') => api.get(`/files/local?path=${encodeURIComponent(path)}`);
+export const listRemoteFiles = (remote, path = '/') => api.get(`/files/remote?remote=${encodeURIComponent(remote)}&path=${encodeURIComponent(path)}`);
+
+// Quick task from file browser
+export const createQuickTask = (data) => api.post('/tasks/quick', data);
+
+// OpenList configs
+export const getOpenlistConfigs = () => api.get('/openlist-configs');
+export const createOpenlistConfig = (data) => api.post('/openlist-configs', data);
+export const updateOpenlistConfig = (id, data) => api.put(`/openlist-configs/${id}`, data);
+export const deleteOpenlistConfig = (id) => api.delete(`/openlist-configs/${id}`);
 
 // Output logs (structured persistent format) - requires ?token= query param
 export const getOutputLogs = (page = 1, pageSize = 20, taskId = '') => {

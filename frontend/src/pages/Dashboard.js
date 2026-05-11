@@ -7,9 +7,11 @@ import {
   Clock, 
   Activity,
   ArrowRight,
-  AlertCircle
+  AlertCircle,
+  X,
+  Loader2,
 } from 'lucide-react';
-import { getTasks, getSystemStats, startTask, stopTask } from '../services/api';
+import { getTasks, getSystemStats, startTask, stopTask, getQuickTasks, deleteTask } from '../services/api';
 import { createWebSocket } from '../services/api';
 import toast from 'react-hot-toast';
 
@@ -18,6 +20,9 @@ const Dashboard = () => {
   const [stats, setStats] = useState({ total_tasks: 0, running_tasks: 0 });
   const [loading, setLoading] = useState(true);
   const [wsConnected, setWsConnected] = useState(false);
+  const [quickTasks, setQuickTasks] = useState([]);
+  const [quickTaskProgress, setQuickTaskProgress] = useState({});
+  const [deletingQuickTaskId, setDeletingQuickTaskId] = useState(null);
 
   useEffect(() => {
     loadData();
@@ -34,19 +39,67 @@ const Dashboard = () => {
     };
 
     ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.type === 'task_complete' || data.type === 'task_error' ||
-          data.type === 'task_started' || data.type === 'task_stopped') {
-        loadData();
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'file_progress' && data.task_id) {
+          setQuickTaskProgress((prev) => ({
+            ...prev,
+            [data.task_id]: {
+              progress: data.progress || 0,
+              fileName: data.file_name || '',
+              bytes: data.bytes || 0,
+              size: data.size || 0,
+              speed: data.speed || 0,
+            },
+          }));
+          setQuickTasks((prev) => prev.map((task) => (
+            task.id === data.task_id ? { ...task, status: 'running' } : task
+          )));
+          return;
+        }
+        if (!data.task_id) return;
+        if (data.type === 'task_started') {
+          setQuickTasks((prev) => prev.map((task) => (
+            task.id === data.task_id ? { ...task, status: 'running', last_error: '' } : task
+          )));
+        } else if (data.type === 'task_complete') {
+          setQuickTasks((prev) => prev.map((task) => (
+            task.id === data.task_id ? { ...task, status: 'idle', last_error: '' } : task
+          )));
+          setQuickTaskProgress((prev) => ({
+            ...prev,
+            [data.task_id]: { ...(prev[data.task_id] || {}), progress: 100, speed: 0 },
+          }));
+          loadQuickTasks();
+        } else if (data.type === 'task_error') {
+          setQuickTasks((prev) => prev.map((task) => (
+            task.id === data.task_id ? { ...task, status: 'error', last_error: data.error || '任务失败' } : task
+          )));
+          loadQuickTasks();
+        } else if (data.type === 'task_stopped') {
+          setQuickTasks((prev) => prev.map((task) => (
+            task.id === data.task_id ? { ...task, status: 'idle' } : task
+          )));
+          loadQuickTasks();
+        }
+        if (data.type === 'task_complete' || data.type === 'task_error' ||
+            data.type === 'task_started' || data.type === 'task_stopped') {
+          loadData();
+        }
+      } catch {
+        // ignore malformed messages
       }
     };
 
     // Refresh every 2 seconds (was 5s — too slow to feel real-time)
     const interval = setInterval(loadData, 2000);
+    loadQuickTasks();
+    const quickInterval = setInterval(loadQuickTasks, 3000);
 
     return () => {
       ws.close();
       clearInterval(interval);
+      clearInterval(quickInterval);
     };
   }, []);
 
@@ -62,6 +115,15 @@ const Dashboard = () => {
       console.error('Failed to load data:', err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadQuickTasks = async () => {
+    try {
+      const res = await getQuickTasks();
+      setQuickTasks(res.data || []);
+    } catch {
+      setQuickTasks([]);
     }
   };
 
@@ -91,6 +153,24 @@ const Dashboard = () => {
     }
   };
 
+  const handleDeleteQuickTask = async (taskId) => {
+    setDeletingQuickTaskId(taskId);
+    try {
+      await deleteTask(taskId);
+      setQuickTasks((prev) => prev.filter((task) => task.id !== taskId));
+      setQuickTaskProgress((prev) => {
+        const next = { ...prev };
+        delete next[taskId];
+        return next;
+      });
+      toast.success('已删除');
+    } catch (err) {
+      toast.error(err.response?.data?.error || '删除失败');
+    } finally {
+      setDeletingQuickTaskId(null);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -102,6 +182,9 @@ const Dashboard = () => {
   const runningTasks = tasks.filter(t => t.status === 'running');
   const idleTasks = tasks.filter(t => t.status === 'idle');
   const errorTasks = tasks.filter(t => t.status === 'error');
+
+  const runningQuickTasks = quickTasks.filter((task) => task.status === 'running');
+  const finishedQuickTasks = quickTasks.filter((task) => task.status !== 'running' && (task.last_run || task.status === 'error'));
 
   return (
     <div className="space-y-6">
@@ -257,6 +340,69 @@ const Dashboard = () => {
           </div>
         )}
       </div>
+
+      {/* Quick Tasks */}
+      {(runningQuickTasks.length > 0 || finishedQuickTasks.length > 0) && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+          <div className="px-4 md:px-6 py-3 md:py-4 border-b border-gray-100 flex items-center justify-between">
+            <h2 className="font-semibold text-gray-900 text-sm md:text-base">文件浏览器任务</h2>
+            <Link to="/files" className="text-xs md:text-sm text-blue-600 hover:text-blue-700 font-medium">前往文件浏览器</Link>
+          </div>
+
+          {runningQuickTasks.length > 0 && (
+            <div className="p-4 space-y-3">
+              {runningQuickTasks.map((task) => {
+                const progressInfo = quickTaskProgress[task.id] || {};
+                const progress = Math.max(0, Math.min(100, Number(progressInfo.progress || 0)));
+                return (
+                  <div key={task.id} className="rounded-xl border border-blue-100 bg-blue-50/50 p-4">
+                    <div className="flex items-start justify-between gap-3 mb-2">
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold text-gray-900 truncate">{task.name}</div>
+                        <div className="text-xs text-gray-500 mt-1 break-all">{task.source_dir} → {task.dest_type === 'local' ? task.remote_dir : `${task.remote_name}:${task.remote_dir}`}</div>
+                      </div>
+                      <div className="text-sm font-semibold text-blue-700 shrink-0">{progress.toFixed(0)}%</div>
+                    </div>
+                    <div className="h-2 rounded-full bg-blue-100 overflow-hidden">
+                      <div className="h-full bg-blue-600 rounded-full transition-all duration-300" style={{ width: `${progress}%` }} />
+                    </div>
+                    <div className="mt-2 text-xs text-gray-500 truncate">{progressInfo.fileName || '传输中'}</div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {finishedQuickTasks.length > 0 && (
+            <div className={`${runningQuickTasks.length > 0 ? 'border-t' : ''} p-4 space-y-2`}>
+              {finishedQuickTasks.map((task) => {
+                const isError = task.status === 'error';
+                return (
+                  <div
+                    key={task.id}
+                    className={`flex items-center gap-3 rounded-xl border px-3 py-2.5 ${isError ? 'border-red-200 bg-red-50' : 'border-green-200 bg-green-50'}`}
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className={`text-sm font-medium truncate ${isError ? 'text-red-700' : 'text-green-700'}`}>{task.name}</div>
+                      <div className={`text-xs mt-0.5 truncate ${isError ? 'text-red-500' : 'text-green-600'}`}>
+                        {isError ? (task.last_error || '任务失败') : '100%'}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteQuickTask(task.id)}
+                      disabled={deletingQuickTaskId === task.id}
+                      className={`p-1.5 rounded-lg transition-colors ${isError ? 'text-red-500 hover:bg-red-100' : 'text-green-600 hover:bg-green-100'} disabled:opacity-50`}
+                    >
+                      {deletingQuickTaskId === task.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <X className="w-4 h-4" />}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 };

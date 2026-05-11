@@ -58,9 +58,25 @@ type Task struct {
 	OpenlistURL     string `json:"openlist_url" gorm:"default:''"`
 	OpenlistMapping string `json:"openlist_mapping" gorm:"default:''"`
 	OpenlistToken   string `json:"openlist_token" gorm:"default:''"`
+	OpenlistConfigID uint   `json:"openlist_config_id" gorm:"default:0"`
+	// Optional: explicit OpenList refresh directory (overrides auto-extraction)
+	OpenlistRefreshDir string `json:"openlist_refresh_dir" gorm:"default:''"`
+
+	// Quick task: created from file browser, auto-hides after completion
+	IsQuickTask bool `json:"is_quick_task" gorm:"default:false"`
 
 	// Cascading: when a Task is deleted, all its OutputLogs are deleted
 	OutputLogs []OutputLog `json:"-" gorm:"constraint:OnDelete:CASCADE;"`
+}
+
+type OpenlistConfig struct {
+	ID        uint           `json:"id" gorm:"primaryKey"`
+	Name      string         `json:"name" gorm:"not null"`
+	URL       string         `json:"url" gorm:"not null"`
+	Token     string         `json:"token"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `json:"-" gorm:"index"`
 }
 
 type TaskLog struct {

@@ -33,6 +33,14 @@ const RcloneRCAddr = "http://127.0.0.1:5572"
 //   INFO  : filename.mkv: Checked (rclone already there)
 var fileLineRegex = regexp.MustCompile(`INFO\s*:\s*(.+?)\s*:\s*(Copied|Deleted|Moved|Transferred|Checked)`)
 
+// statsLineRegex matches rclone --stats output like:
+//   Transferred:    1.234 GiB / 5.678 GiB, 22%, 10.234 MiB/s, ETA 4m32s
+var statsLineRegex = regexp.MustCompile(`Transferred:\s+[^,]+,\s*([\d\.]+)%`)
+
+// transferringLineRegex matches rclone per-file progress like:
+//   * filename.mkv: 22% /5.678Gi, 10.234Mi/s, 4m32s
+var transferringLineRegex = regexp.MustCompile(`\*\s+(.+?):\s*([\d\.]+)%`)
+
 type Executor struct {
 	runningTasks  map[uint]*exec.Cmd
 	mu            sync.RWMutex
@@ -443,6 +451,34 @@ func (e *Executor) streamOutput(task *models.Task, reader io.Reader, logFile *os
 
 		// Parse and enqueue structured output log for async persistence
 		e.parseAndSaveLog(task, line)
+
+		// Parse stats progress from stderr and broadcast via WebSocket
+		// (rclone --stats output goes to stderr)
+		if streamType == "stderr" {
+			e.parseStatsProgress(task, line)
+		}
+	}
+}
+
+// parseStatsProgress extracts transfer percentage from rclone --stats output
+// and broadcasts file_progress WebSocket messages.
+func (e *Executor) parseStatsProgress(task *models.Task, line string) {
+	// Try overall progress: "Transferred: 1.234 GiB / 5.678 GiB, 22%, ..."
+	if matches := statsLineRegex.FindStringSubmatch(line); len(matches) >= 2 {
+		percentage, _ := strconv.ParseFloat(matches[1], 64)
+		msg := fmt.Sprintf(`{"type":"file_progress","task_id":%d,"file_name":"%s","progress":%.1f,"bytes":0,"size":0,"speed":0}`,
+			task.ID, "", percentage)
+		e.hub.Broadcast(msg)
+		return
+	}
+
+	// Try per-file progress: "* filename.mkv: 22% /5.678Gi, 10.234Mi/s, 4m32s"
+	if matches := transferringLineRegex.FindStringSubmatch(line); len(matches) >= 3 {
+		percentage, _ := strconv.ParseFloat(matches[2], 64)
+		fileName := strings.TrimSpace(matches[1])
+		msg := fmt.Sprintf(`{"type":"file_progress","task_id":%d,"file_name":"%s","progress":%.1f,"bytes":0,"size":0,"speed":0}`,
+			task.ID, strings.ReplaceAll(fileName, `"`, `\"`), percentage)
+		e.hub.Broadcast(msg)
 	}
 }
 
@@ -822,6 +858,24 @@ func (e *Executor) refreshOpenListForTask(task *models.Task) {
 	e.db.Where("task_id = ? AND status = ? AND date > ?", task.ID, true, recent).Find(&logs)
 
 	logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("[DEBUG] OpenList refresh found %d output log records", len(logs)))
+
+	// If explicit refresh dir is set, use it directly
+	if task.OpenlistRefreshDir != "" {
+		dir := task.OpenlistRefreshDir
+		if task.OpenlistMapping != "" {
+			var mappings map[string]string
+			if err := json.Unmarshal([]byte(task.OpenlistMapping), &mappings); err == nil {
+				dir = applyOpenListMapping(task.RemoteName+":"+task.RemoteDir, dir, mappings)
+			}
+		}
+		success, msg := refreshOpenList(task.OpenlistURL, dir, task.OpenlistToken)
+		if success {
+			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("OpenList refresh [%s]: %s", dir, msg))
+		} else {
+			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("OpenList refresh [%s] failed: %s", dir, msg))
+		}
+		return
+	}
 
 	if len(logs) == 0 {
 		logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), "[DEBUG] No output logs found for OpenList refresh, falling back to task remote dir")

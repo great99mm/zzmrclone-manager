@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -39,6 +40,7 @@ const (
 	maxCheckers       = 32   // old default was 32, keep same cap
 	maxBufferSize     = "512M" // hard ceiling; most users will run at 64M
 	maxDriveChunkSize = "256M" // hard ceiling
+	localBrowserRoot  = "/opt"
 )
 
 func SetupRouter(cfg *config.Config) *gin.Engine {
@@ -105,6 +107,8 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		{
 			tasks.GET("", listTasks)
 			tasks.POST("", createTask)
+			tasks.GET("/quick", listQuickTasks)
+			tasks.POST("/quick", createQuickTask)
 			tasks.GET("/:id", getTask)
 			tasks.PUT("/:id", updateTask)
 			tasks.DELETE("/:id", deleteTask)
@@ -124,8 +128,20 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 
 		// Rclone config
 		api.GET("/rclone/remotes", listRemotes)
+		api.GET("/rclone/remotes/detail", listRemoteDetails)
 		api.GET("/rclone/config", getRcloneConfig)
 		api.GET("/rclone/ls", listRemoteDir)
+		api.POST("/rclone/mkdir", createRemoteDir)
+
+		// File browser
+		api.GET("/files/local", listLocalFiles)
+		api.GET("/files/remote", listRemoteFiles)
+
+		// OpenList configs
+		api.GET("/openlist-configs", listOpenlistConfigs)
+		api.POST("/openlist-configs", createOpenlistConfig)
+		api.PUT("/openlist-configs/:id", updateOpenlistConfig)
+		api.DELETE("/openlist-configs/:id", deleteOpenlistConfig)
 
 		// Output logs (structured persistent format) - protected by token query
 		api.GET("/output-logs", requireTokenQuery, getOutputLogs)
@@ -327,9 +343,36 @@ func parseSize(s string) int64 {
 }
 
 // Task handlers
+func applyRuntimeStatus(task *models.Task) {
+	if task == nil {
+		return
+	}
+	if executor.IsRunning(task.ID) {
+		task.Status = "running"
+		return
+	}
+	if task.LastError != "" {
+		task.Status = "error"
+		return
+	}
+	task.Status = "idle"
+}
+
 func listTasks(c *gin.Context) {
-	var tasks []models.Task
-	db.Find(&tasks)
+	tasks := make([]models.Task, 0)
+	db.Where("is_quick_task = ?", false).Order("created_at desc").Find(&tasks)
+	for i := range tasks {
+		applyRuntimeStatus(&tasks[i])
+	}
+	c.JSON(http.StatusOK, tasks)
+}
+
+func listQuickTasks(c *gin.Context) {
+	tasks := make([]models.Task, 0)
+	db.Where("is_quick_task = ?", true).Order("created_at desc").Limit(50).Find(&tasks)
+	for i := range tasks {
+		applyRuntimeStatus(&tasks[i])
+	}
 	c.JSON(http.StatusOK, tasks)
 }
 
@@ -360,6 +403,10 @@ func createTask(c *gin.Context) {
 			return
 		}
 	}
+	if err := applyOpenlistConfigToTask(&task); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
 	if err := db.Create(&task).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -372,6 +419,114 @@ func createTask(c *gin.Context) {
 	}
 	if task.ScheduleEnabled {
 		sched.AddTask(&task)
+	}
+
+	c.JSON(http.StatusCreated, task)
+}
+
+// createQuickTask creates a one-off task from file browser and starts it immediately.
+func createQuickTask(c *gin.Context) {
+	var req struct {
+		Name               string `json:"name" binding:"required"`
+		Source             string `json:"source" binding:"required"`
+		SourceType         string `json:"source_type" binding:"required"`
+		Dest               string `json:"dest" binding:"required"`
+		DestType           string `json:"dest_type" binding:"required"`
+		TransferMode       string `json:"transfer_mode"`
+		OpenlistEnabled    bool   `json:"openlist_enabled"`
+		OpenlistConfigID   uint   `json:"openlist_config_id"`
+		OpenlistURL        string `json:"openlist_url"`
+		OpenlistToken      string `json:"openlist_token"`
+		OpenlistMapping    string `json:"openlist_mapping"`
+		OpenlistRefreshDir string `json:"openlist_refresh_dir"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	mode := req.TransferMode
+	if mode == "" {
+		mode = "copy"
+	}
+	if req.OpenlistMapping != "" && !isValidJSON(req.OpenlistMapping) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "OpenList mapping must be a valid JSON object like '{\"op:s1\":\"/s2\"}'"})
+		return
+	}
+
+	var sourceDir, sourceRemoteName string
+	if req.SourceType == "remote" {
+		parts := strings.SplitN(req.Source, ":", 2)
+		if len(parts) == 2 {
+			sourceRemoteName = parts[0]
+			sourceDir = parts[1]
+		} else {
+			sourceDir = req.Source
+		}
+	} else {
+		sourceDir = req.Source
+	}
+
+	var destDir, destRemoteName string
+	if req.DestType == "remote" {
+		parts := strings.SplitN(req.Dest, ":", 2)
+		if len(parts) == 2 {
+			destRemoteName = parts[0]
+			destDir = parts[1]
+		} else {
+			destDir = req.Dest
+		}
+	} else {
+		destDir = req.Dest
+	}
+
+	task := models.Task{
+		Name:               req.Name,
+		SourceType:         req.SourceType,
+		SourceDir:          sourceDir,
+		DestType:           req.DestType,
+		RemoteName:         destRemoteName,
+		RemoteDir:          destDir,
+		TransferMode:       mode,
+		Transfers:          8,
+		Checkers:           16,
+		MinAge:             "0s",
+		DriveChunkSize:     "64M",
+		BufferSize:         "64M",
+		Retries:            3,
+		Enabled:            true,
+		AutoDedupe:         false,
+		WatchEnabled:       false,
+		ScheduleEnabled:    false,
+		IsQuickTask:        true,
+		OpenlistEnabled:    req.OpenlistEnabled,
+		OpenlistConfigID:   req.OpenlistConfigID,
+		OpenlistURL:        strings.TrimRight(req.OpenlistURL, "/"),
+		OpenlistToken:      req.OpenlistToken,
+		OpenlistMapping:    req.OpenlistMapping,
+		OpenlistRefreshDir: req.OpenlistRefreshDir,
+	}
+
+	// If source is remote but we parsed the remote name, store full path in source_dir
+	if req.SourceType == "remote" && sourceRemoteName != "" {
+		task.SourceDir = sourceRemoteName + ":" + sourceDir
+	}
+
+	clampRcloneParams(&task)
+	if err := applyOpenlistConfigToTask(&task); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := db.Create(&task).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Start immediately
+	if err := executor.ExecuteMove(&task); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 
 	c.JSON(http.StatusCreated, task)
@@ -415,6 +570,10 @@ func updateTask(c *gin.Context) {
 			return
 		}
 	}
+	if err := applyOpenlistConfigToTask(&updates); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
 	// Stop existing watchers/schedules
 	watch.StopTaskWatch(uint(id))
@@ -422,7 +581,23 @@ func updateTask(c *gin.Context) {
 
 	// Update
 	updates.ID = uint(id)
-	db.Model(&task).Updates(updates)
+	if err := db.Model(&task).Updates(updates).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	// GORM struct updates ignore zero values. Persist OpenList fields explicitly so
+	// disabling refresh, clearing mappings, or clearing config IDs works reliably.
+	if err := db.Model(&task).Updates(map[string]interface{}{
+		"openlist_enabled":     updates.OpenlistEnabled,
+		"openlist_config_id":   updates.OpenlistConfigID,
+		"openlist_url":         updates.OpenlistURL,
+		"openlist_token":       updates.OpenlistToken,
+		"openlist_mapping":     updates.OpenlistMapping,
+		"openlist_refresh_dir": updates.OpenlistRefreshDir,
+	}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 
 	// Restart if enabled
 	if updates.WatchEnabled || task.WatchEnabled {
@@ -433,6 +608,7 @@ func updateTask(c *gin.Context) {
 		db.First(&task, id)
 		sched.AddTask(&task)
 	}
+	db.First(&task, id)
 
 	c.JSON(http.StatusOK, task)
 }
@@ -455,6 +631,10 @@ func startTask(c *gin.Context) {
 	var task models.Task
 	if err := db.First(&task, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		return
+	}
+	if task.IsQuickTask {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "quick task cannot be started again"})
 		return
 	}
 
@@ -548,10 +728,10 @@ func getTaskStatus(c *gin.Context) {
 // System handlers
 func getSystemStats(c *gin.Context) {
 	var taskCount, runningCount int64
-	db.Model(&models.Task{}).Count(&taskCount)
+	db.Model(&models.Task{}).Where("is_quick_task = ?", false).Count(&taskCount)
 
 	var tasks []models.Task
-	db.Find(&tasks)
+	db.Where("is_quick_task = ?", false).Find(&tasks)
 	for _, t := range tasks {
 		if executor.IsRunning(t.ID) {
 			runningCount++
@@ -613,6 +793,81 @@ func cleanLogs(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "logs cleaned"})
 }
 
+// OpenList config handlers
+func applyOpenlistConfigToTask(task *models.Task) error {
+	if !task.OpenlistEnabled || task.OpenlistConfigID == 0 {
+		return nil
+	}
+	var cfg models.OpenlistConfig
+	if err := db.First(&cfg, task.OpenlistConfigID).Error; err != nil {
+		return fmt.Errorf("OpenList config not found")
+	}
+	task.OpenlistURL = strings.TrimRight(cfg.URL, "/")
+	task.OpenlistToken = cfg.Token
+	return nil
+}
+
+func listOpenlistConfigs(c *gin.Context) {
+	configs := make([]models.OpenlistConfig, 0)
+	db.Order("created_at desc").Find(&configs)
+	c.JSON(http.StatusOK, configs)
+}
+
+func createOpenlistConfig(c *gin.Context) {
+	var cfg models.OpenlistConfig
+	if err := c.ShouldBindJSON(&cfg); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	cfg.Name = strings.TrimSpace(cfg.Name)
+	cfg.URL = strings.TrimRight(strings.TrimSpace(cfg.URL), "/")
+	if cfg.Name == "" || cfg.URL == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "配置名和 OpenList 地址不能为空"})
+		return
+	}
+	if err := db.Create(&cfg).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusCreated, cfg)
+}
+
+func updateOpenlistConfig(c *gin.Context) {
+	id, _ := strconv.Atoi(c.Param("id"))
+	var cfg models.OpenlistConfig
+	if err := db.First(&cfg, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "OpenList config not found"})
+		return
+	}
+	var updates models.OpenlistConfig
+	if err := c.ShouldBindJSON(&updates); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	updates.Name = strings.TrimSpace(updates.Name)
+	updates.URL = strings.TrimRight(strings.TrimSpace(updates.URL), "/")
+	if updates.Name == "" || updates.URL == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "配置名和 OpenList 地址不能为空"})
+		return
+	}
+	if err := db.Model(&cfg).Updates(map[string]interface{}{
+		"name":  updates.Name,
+		"url":   updates.URL,
+		"token": updates.Token,
+	}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	db.First(&cfg, id)
+	c.JSON(http.StatusOK, cfg)
+}
+
+func deleteOpenlistConfig(c *gin.Context) {
+	id, _ := strconv.Atoi(c.Param("id"))
+	db.Delete(&models.OpenlistConfig{}, id)
+	c.JSON(http.StatusOK, gin.H{"message": "OpenList config deleted"})
+}
+
 // Rclone handlers
 func listRemotes(c *gin.Context) {
 	configPath := "/root/.config/rclone/rclone.conf"
@@ -628,6 +883,47 @@ func listRemotes(c *gin.Context) {
 		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
 			remote := strings.TrimPrefix(strings.TrimSuffix(line, "]"), "[")
 			remotes = append(remotes, remote)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"remotes": remotes})
+}
+
+func listRemoteDetails(c *gin.Context) {
+	configPath := "/root/.config/rclone/rclone.conf"
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"remotes": []map[string]string{}})
+		return
+	}
+
+	type remoteDetail struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+	}
+
+	var remotes []remoteDetail
+	var current *remoteDetail
+	lines := strings.Split(string(content), "\n")
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			name := strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")
+			remotes = append(remotes, remoteDetail{Name: name, Type: ""})
+			current = &remotes[len(remotes)-1]
+			continue
+		}
+		if current == nil {
+			continue
+		}
+		if strings.HasPrefix(strings.ToLower(line), "type") {
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				current.Type = strings.TrimSpace(parts[1])
+			}
 		}
 	}
 
@@ -687,6 +983,36 @@ func listRemoteDir(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"items": result})
 }
 
+func createRemoteDir(c *gin.Context) {
+	var req struct {
+		Remote string `json:"remote" binding:"required"`
+		Path   string `json:"path" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	remote := strings.TrimSpace(req.Remote)
+	path := strings.TrimSpace(req.Path)
+	if remote == "" || path == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "remote and path are required"})
+		return
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+
+	remotePath := fmt.Sprintf("%s:%s", remote, path)
+	cmd := exec.Command("rclone", "mkdir", remotePath, "--config", "/root/.config/rclone/rclone.conf")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("rclone mkdir failed: %v %s", err, strings.TrimSpace(string(output)))})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "directory created", "remote": remote, "path": path})
+}
+
 func getRcloneConfig(c *gin.Context) {
 	configPath := "/root/.config/rclone/rclone.conf"
 	content, err := os.ReadFile(configPath)
@@ -696,6 +1022,117 @@ func getRcloneConfig(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"content": string(content)})
+}
+
+// File browser types
+type FileItem struct {
+	Name    string    `json:"name"`
+	Size    int64     `json:"size"`
+	IsDir   bool      `json:"is_dir"`
+	Path    string    `json:"path"`
+	ModTime time.Time `json:"mod_time"`
+}
+
+// listLocalFiles lists a local directory.
+func listLocalFiles(c *gin.Context) {
+	path := c.Query("path")
+	if path == "" {
+		path = localBrowserRoot
+	}
+	path = filepath.Clean(path)
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(localBrowserRoot, path)
+	}
+
+	rootAbs, err := filepath.Abs(localBrowserRoot)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to resolve local root: %v", err)})
+		return
+	}
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid path: %v", err)})
+		return
+	}
+	rel, err := filepath.Rel(rootAbs, pathAbs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "local browsing is limited to /opt"})
+		return
+	}
+
+	entries, err := os.ReadDir(pathAbs)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read directory: %v", err)})
+		return
+	}
+
+	var items []FileItem
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		itemPath := filepath.Join(pathAbs, entry.Name())
+		items = append(items, FileItem{
+			Name:    entry.Name(),
+			Size:    info.Size(),
+			IsDir:   entry.IsDir(),
+			Path:    itemPath,
+			ModTime: info.ModTime(),
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"path": pathAbs, "items": items})
+}
+
+// listRemoteFiles lists a remote directory via rclone lsjson.
+func listRemoteFiles(c *gin.Context) {
+	remote := c.Query("remote")
+	if remote == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "remote query param required"})
+		return
+	}
+	path := c.Query("path")
+	if path == "" {
+		path = "/"
+	}
+
+	remotePath := fmt.Sprintf("%s:%s", remote, path)
+	args := []string{"lsjson", remotePath, "--config", "/root/.config/rclone/rclone.conf"}
+
+	cmd := exec.Command("rclone", args...)
+	output, err := cmd.Output()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("rclone lsjson failed: %v", err)})
+		return
+	}
+
+	var rawItems []map[string]interface{}
+	if err := json.Unmarshal(output, &rawItems); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to parse rclone output: %v", err)})
+		return
+	}
+
+	var items []FileItem
+	for _, item := range rawItems {
+		name, _ := item["Name"].(string)
+		size, _ := item["Size"].(float64)
+		isDir, _ := item["IsDir"].(bool)
+		modTimeStr, _ := item["ModTime"].(string)
+		var modTime time.Time
+		if modTimeStr != "" {
+			modTime, _ = time.Parse(time.RFC3339, modTimeStr)
+		}
+		items = append(items, FileItem{
+			Name:    name,
+			Size:    int64(size),
+			IsDir:   isDir,
+			Path:    strings.TrimRight(path, "/") + "/" + name,
+			ModTime: modTime,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"path": path, "remote": remote, "items": items})
 }
 
 // ============================
