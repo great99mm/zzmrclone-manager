@@ -349,7 +349,7 @@ const TaskForm = () => {
                     key={mode.value}
                     type="button"
                     onClick={() => handleChange('transfer_mode', mode.value)}
-                    className={`flex-1 p-3 rounded-lg border-2 text-left transition-colors ${
+                    className={`flex-1 flex flex-col items-start p-3 rounded-lg border-2 text-left transition-colors ${
                       form.transfer_mode === mode.value
                         ? 'border-blue-500 bg-blue-50'
                         : 'border-gray-200 hover:border-gray-300'
