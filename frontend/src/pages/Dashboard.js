@@ -7,7 +7,6 @@ import {
   Clock, 
   Activity,
   ArrowRight,
-  CheckCircle2,
   AlertCircle
 } from 'lucide-react';
 import { getTasks, getSystemStats, startTask, stopTask } from '../services/api';

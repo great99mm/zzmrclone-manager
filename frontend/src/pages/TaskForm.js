@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { 
   ArrowLeft, 
@@ -71,23 +71,16 @@ const TaskForm = () => {
   const [browserLoading, setBrowserLoading] = useState(false);
   const [browserBreadcrumbs, setBrowserBreadcrumbs] = useState([{ name: '/', path: '/' }]);
 
-  useEffect(() => {
-    loadRemotes();
-    if (isEdit) {
-      loadTask();
-    }
-  }, []);
-
-  const loadRemotes = async () => {
+  const loadRemotes = useCallback(async () => {
     try {
       const res = await getRemotes();
       setRemotes(res.data.remotes || []);
     } catch (err) {
       console.error('Failed to load remotes');
     }
-  };
+  }, []);
 
-  const loadTask = async () => {
+  const loadTask = useCallback(async () => {
     try {
       const res = await getTask(id);
       setForm(res.data);
@@ -97,7 +90,14 @@ const TaskForm = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [id, navigate]);
+
+  useEffect(() => {
+    loadRemotes();
+    if (isEdit) {
+      loadTask();
+    }
+  }, [isEdit, loadRemotes, loadTask]);
 
   // Directory browser functions
   const parseRemotePath = (input) => {

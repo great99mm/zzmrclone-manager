@@ -20,7 +20,7 @@ function App() {
   useEffect(() => {
     checkAuth();
     setAuthChecked(true);
-  }, []);
+  }, [checkAuth]);
 
   // Close sidebar on mobile
   useEffect(() => {

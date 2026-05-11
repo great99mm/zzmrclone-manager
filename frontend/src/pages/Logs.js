@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { FileText, Trash2, RotateCcw, Search, List, ChevronLeft, ChevronRight, LayoutList, HardDrive, CheckCircle2, RefreshCw } from 'lucide-react';
 import { getTaskLogs, getOutputLogs, deleteOutputLog, cleanOutputLogs } from '../services/api';
 import { createWebSocket } from '../services/api';
@@ -21,9 +21,53 @@ const Logs = () => {
   const [transferProgress, setTransferProgress] = useState({});
   const wsRef = useRef(null);
 
+  const loadTaskList = useCallback(async () => {
+    try {
+      const res = await fetch('/api/tasks').then(r => r.json());
+      setTasks(res);
+    } catch (err) {
+      console.error('Failed to load tasks');
+    }
+  }, []);
+
+  const loadTaskLog = useCallback(async (taskId) => {
+    if (!taskId) return;
+    setLoading(true);
+    try {
+      const res = await getTaskLogs(taskId, 500);
+      const content = res.data.logs[0] || '';
+      setLogs(content.split('\n').filter(l => l.trim()));
+    } catch (err) {
+      toast.error('加载任务日志失败');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const loadOutputLogs = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await getOutputLogs(outputLogsPage, 20, selectedTask);
+      if (res.data && res.data.success) {
+        const list = res.data.data.list || [];
+        setOutputLogs(list);
+        setOutputLogsTotal(res.data.data.total || 0);
+      } else {
+        setOutputLogs([]);
+        setOutputLogsTotal(0);
+      }
+    } catch (err) {
+      toast.error('加载转移记录失败');
+      setOutputLogs([]);
+      setOutputLogsTotal(0);
+    } finally {
+      setLoading(false);
+    }
+  }, [outputLogsPage, selectedTask]);
+
   useEffect(() => {
     loadTaskList();
-  }, []);
+  }, [loadTaskList]);
 
   useEffect(() => {
     if (activeTab === 'task') {
@@ -33,7 +77,7 @@ const Logs = () => {
     } else if (activeTab === 'records') {
       loadOutputLogs();
     }
-  }, [activeTab, outputLogsPage, selectedTask]);
+  }, [activeTab, selectedTask, loadTaskLog, loadOutputLogs]);
 
   // WebSocket for real-time file progress
   useEffect(() => {
@@ -69,51 +113,7 @@ const Logs = () => {
     return () => {
       ws.close();
     };
-  }, [activeTab]);
-
-  const loadTaskList = async () => {
-    try {
-      const res = await fetch('/api/tasks').then(r => r.json());
-      setTasks(res);
-    } catch (err) {
-      console.error('Failed to load tasks');
-    }
-  };
-
-  const loadTaskLog = async (taskId) => {
-    if (!taskId) return;
-    setLoading(true);
-    try {
-      const res = await getTaskLogs(taskId, 500);
-      const content = res.data.logs[0] || '';
-      setLogs(content.split('\n').filter(l => l.trim()));
-    } catch (err) {
-      toast.error('加载任务日志失败');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const loadOutputLogs = async () => {
-    setLoading(true);
-    try {
-      const res = await getOutputLogs(outputLogsPage, 20, selectedTask);
-      if (res.data && res.data.success) {
-        const list = res.data.data.list || [];
-        setOutputLogs(list);
-        setOutputLogsTotal(res.data.data.total || 0);
-      } else {
-        setOutputLogs([]);
-        setOutputLogsTotal(0);
-      }
-    } catch (err) {
-      toast.error('加载转移记录失败');
-      setOutputLogs([]);
-      setOutputLogsTotal(0);
-    } finally {
-      setLoading(false);
-    }
-  };
+  }, [activeTab, loadOutputLogs]);
 
   const handleDeleteOutputLog = async (id) => {
     if (!window.confirm('确定删除这条记录吗？')) return;

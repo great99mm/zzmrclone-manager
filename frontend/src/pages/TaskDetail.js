@@ -11,7 +11,6 @@ import {
   Activity,
   Clock,
   CheckCircle2,
-  AlertCircle,
   ExternalLink,
   Upload,
   File
@@ -80,6 +79,27 @@ const TaskDetail = () => {
     showLogsRef.current = showLogs;
   }, [showLogs]);
 
+  const loadTask = useCallback(async () => {
+    try {
+      const res = await getTask(id);
+      setTask(res.data);
+    } catch (err) {
+      toast.error('加载任务失败');
+      navigate('/tasks');
+    } finally {
+      setLoading(false);
+    }
+  }, [id, navigate]);
+
+  const loadStatus = useCallback(async () => {
+    try {
+      const res = await getTaskStatus(id);
+      setStatus(res.data);
+    } catch (err) {
+      console.error('Failed to load status');
+    }
+  }, [id]);
+
   useEffect(() => {
     loadTask();
     loadStatus();
@@ -146,25 +166,13 @@ const TaskDetail = () => {
       clearInterval(interval);
       if (progressTimerRef.current) clearInterval(progressTimerRef.current);
     };
-  }, [id, cleanupStaleProgresses, parseLogProgress]);
+  }, [id, cleanupStaleProgresses, parseLogProgress, loadTask, loadStatus]);
 
   useEffect(() => {
     if (autoScroll && logContainerRef.current) {
       logContainerRef.current.scrollTop = 0;
     }
   }, [logs, autoScroll]);
-
-  const loadTask = async () => {
-    try {
-      const res = await getTask(id);
-      setTask(res.data);
-    } catch (err) {
-      toast.error('加载任务失败');
-      navigate('/tasks');
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const loadLogs = async () => {
     try {
@@ -179,15 +187,6 @@ const TaskDetail = () => {
       setLogs(lines.reverse());
     } catch (err) {
       // Ignore log load errors
-    }
-  };
-
-  const loadStatus = async () => {
-    try {
-      const res = await getTaskStatus(id);
-      setStatus(res.data);
-    } catch (err) {
-      console.error('Failed to load status');
     }
   };
 
