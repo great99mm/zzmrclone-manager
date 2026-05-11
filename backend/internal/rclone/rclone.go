@@ -177,30 +177,67 @@ func (e *Executor) IsRunning(taskID uint) bool {
 	return cmd.Process != nil && cmd.ProcessState == nil
 }
 
+// buildSourcePath returns the rclone source path based on task's source_type.
+func buildSourcePath(task *models.Task) string {
+	if task.SourceType == "remote" {
+		return task.SourceDir // e.g. "op:/videos"
+	}
+	return task.SourceDir // local path
+}
+
+// buildDestPath returns the rclone destination path based on task's dest_type.
+func buildDestPath(task *models.Task) string {
+	if task.DestType == "local" {
+		return task.RemoteDir // local path stored in remote_dir
+	}
+	// remote destination (default)
+	return fmt.Sprintf("%s:%s", task.RemoteName, task.RemoteDir)
+}
+
+// transferMode returns the rclone subcommand: "move", "copy", or "sync".
+func transferMode(task *models.Task) string {
+	switch task.TransferMode {
+	case "copy", "sync":
+		return task.TransferMode
+	default:
+		return "move"
+	}
+}
+
 func (e *Executor) ExecuteMove(task *models.Task) error {
 	if e.IsRunning(task.ID) {
 		return fmt.Errorf("task %d is already running", task.ID)
 	}
 
-	// Build rclone move command
+	mode := transferMode(task)
+	src := buildSourcePath(task)
+	dst := buildDestPath(task)
+
 	args := []string{
-		"move",
-		task.SourceDir,
-		fmt.Sprintf("%s:%s", task.RemoteName, task.RemoteDir),
+		mode,
+		src,
+		dst,
 		"--config", getRcloneConfig(task),
 		"--fast-list",
 		"--min-age", task.MinAge,
 		"--stats", "3s",
 		"--log-level", "INFO",
 		"--ignore-errors",
-		"--delete-empty-src-dirs",
-		"--use-mmap",
-		"--no-traverse",
 		"--transfers", strconv.Itoa(task.Transfers),
 		"--checkers", strconv.Itoa(task.Checkers),
 		"--drive-chunk-size", task.DriveChunkSize,
 		"--buffer-size", task.BufferSize,
 		"--retries", strconv.Itoa(task.Retries),
+	}
+
+	// move-specific flags
+	if mode == "move" {
+		args = append(args, "--delete-empty-src-dirs")
+	}
+
+	// use-mmap and no-traverse are safe for move and copy, but not sync
+	if mode != "sync" {
+		args = append(args, "--use-mmap", "--no-traverse")
 	}
 
 	if task.BindIP != "" {
@@ -338,6 +375,11 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 }
 
 func (e *Executor) ExecuteDedupe(task *models.Task) error {
+	// Dedupe only makes sense for remote destinations
+	if task.DestType == "local" {
+		return nil
+	}
+
 	args := []string{
 		"dedupe",
 		fmt.Sprintf("%s:%s", task.RemoteName, task.RemoteDir),
@@ -423,19 +465,41 @@ func (e *Executor) parseAndSaveLog(task *models.Task, line string) {
 		fileName := strings.TrimSpace(matches[1])
 		action := matches[2]
 
-		// Resolve full source path
+		// Resolve full source path based on source_type
 		var srcPath string
-		if filepath.IsAbs(fileName) {
-			srcPath = fileName
-		} else {
-			srcPath = filepath.Join(task.SourceDir, fileName)
-		}
-		destPath := fmt.Sprintf("%s:%s/%s", task.RemoteName, strings.TrimSuffix(task.RemoteDir, "/"), fileName)
-
-		// Get file size if source file still exists
+		var srcStorage string
 		var fileSize int64
-		if info, err := os.Stat(srcPath); err == nil {
-			fileSize = info.Size()
+		if task.SourceType == "remote" {
+			// source_dir is "remote:/path" — file is relative to remote dir
+			srcPath = fmt.Sprintf("%s/%s", strings.TrimRight(task.SourceDir, "/"), fileName)
+			// Extract remote name for storage field
+			if idx := strings.Index(task.SourceDir, ":"); idx >= 0 {
+				srcStorage = task.SourceDir[:idx]
+			} else {
+				srcStorage = "remote"
+			}
+		} else {
+			if filepath.IsAbs(fileName) {
+				srcPath = fileName
+			} else {
+				srcPath = filepath.Join(task.SourceDir, fileName)
+			}
+			srcStorage = "local"
+			// Get file size if source file still exists (local only)
+			if info, err := os.Stat(srcPath); err == nil {
+				fileSize = info.Size()
+			}
+		}
+
+		// Resolve dest path based on dest_type
+		var destPath string
+		var destStorage string
+		if task.DestType == "local" {
+			destPath = filepath.Join(task.RemoteDir, fileName) // local dest
+			destStorage = "local"
+		} else {
+			destPath = fmt.Sprintf("%s:%s/%s", task.RemoteName, strings.TrimSuffix(task.RemoteDir, "/"), fileName)
+			destStorage = task.RemoteName
 		}
 
 		fileExt := strings.TrimPrefix(filepath.Ext(fileName), ".")
@@ -451,9 +515,9 @@ func (e *Executor) parseAndSaveLog(task *models.Task, line string) {
 		log := &models.OutputLog{
 			TaskID:      task.ID,
 			Src:         srcPath,
-			SrcStorage:  "local",
+			SrcStorage:  srcStorage,
 			Dest:        destPath,
-			DestStorage: task.RemoteName,
+			DestStorage: destStorage,
 			Mode:        action,
 			FileName:    fileName,
 			FileSize:    fileSize,
@@ -744,6 +808,11 @@ func (e *Executor) updateOutputLogOpenListStatus(taskID uint, fileName string, s
 // and calls the OpenList refresh API for each file's directory.
 func (e *Executor) refreshOpenListForTask(task *models.Task) {
 	if e.db == nil || task.OpenlistURL == "" {
+		return
+	}
+
+	// OpenList refresh only makes sense for remote destinations
+	if task.DestType == "local" {
 		return
 	}
 

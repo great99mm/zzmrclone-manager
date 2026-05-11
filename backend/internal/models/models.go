@@ -9,9 +9,22 @@ import (
 type Task struct {
 	ID               uint           `json:"id" gorm:"primaryKey"`
 	Name             string         `json:"name" gorm:"not null"`
+	// Source: type determines how source_dir is interpreted
+	//   "local"  → source_dir is a local filesystem path
+	//   "remote" → source_dir is a rclone remote path (e.g. "op:/videos")
+	SourceType       string         `json:"source_type" gorm:"default:local"`
 	SourceDir        string         `json:"source_dir" gorm:"not null"`
-	RemoteName       string         `json:"remote_name" gorm:"not null"`
-	RemoteDir        string         `json:"remote_dir" gorm:"not null"`
+	// Destination: type determines how remote_name / remote_dir are interpreted
+	//   "remote" → remote_name:remote_dir  (default, backward-compatible)
+	//   "local"  → remote_dir is a local filesystem path, remote_name is ignored
+	DestType         string         `json:"dest_type" gorm:"default:remote"`
+	RemoteName       string         `json:"remote_name"`
+	RemoteDir        string         `json:"remote_dir"`
+	// Operation mode
+	//   "move" → rclone move  (default)
+	//   "copy" → rclone copy
+	//   "sync" → rclone sync
+	TransferMode     string         `json:"transfer_mode" gorm:"default:move"`
 	// ---- memory-safe defaults ----
 	// Old: transfers=16  => with buffer-size 512M that's 8GB RAM.
 	// New: transfers=8   => with buffer-size 64M that's 512MB peak.

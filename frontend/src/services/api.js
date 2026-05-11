@@ -45,6 +45,7 @@ export const cleanLogs = () => api.post('/system/logs/clean');
 
 export const getRemotes = () => api.get('/rclone/remotes');
 export const getRcloneConfig = () => api.get('/rclone/config');
+export const listRemoteDir = (remote, path = '/') => api.get(`/rclone/ls?remote=${encodeURIComponent(remote)}&path=${encodeURIComponent(path)}`);
 
 // Output logs (structured persistent format) - requires ?token= query param
 export const getOutputLogs = (page = 1, pageSize = 20, taskId = '') => {

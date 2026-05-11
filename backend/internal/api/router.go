@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -124,6 +125,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// Rclone config
 		api.GET("/rclone/remotes", listRemotes)
 		api.GET("/rclone/config", getRcloneConfig)
+		api.GET("/rclone/ls", listRemoteDir)
 
 		// Output logs (structured persistent format) - protected by token query
 		api.GET("/output-logs", requireTokenQuery, getOutputLogs)
@@ -630,6 +632,59 @@ func listRemotes(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"remotes": remotes})
+}
+
+// listRemoteDir lists a remote directory using rclone lsjson.
+// Query params: remote (required), path (optional, defaults to "/")
+// Returns an array of items with Name, Size, IsDir, ModTime.
+func listRemoteDir(c *gin.Context) {
+	remote := c.Query("remote")
+	if remote == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "remote query param required"})
+		return
+	}
+	path := c.Query("path")
+	if path == "" {
+		path = "/"
+	}
+
+	remotePath := fmt.Sprintf("%s:%s", remote, path)
+	args := []string{"lsjson", remotePath, "--config", "/root/.config/rclone/rclone.conf"}
+
+	cmd := exec.Command("rclone", args...)
+	output, err := cmd.Output()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("rclone lsjson failed: %v", err)})
+		return
+	}
+
+	var items []map[string]interface{}
+	if err := json.Unmarshal(output, &items); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to parse rclone output: %v", err)})
+		return
+	}
+
+	// Return simplified list: name, size, is_dir
+	type DirItem struct {
+		Name  string `json:"name"`
+		Size  int64  `json:"size"`
+		IsDir bool   `json:"is_dir"`
+		Path  string `json:"path"`
+	}
+	var result []DirItem
+	for _, item := range items {
+		name, _ := item["Name"].(string)
+		size, _ := item["Size"].(float64)
+		isDir, _ := item["IsDir"].(bool)
+		result = append(result, DirItem{
+			Name:  name,
+			Size:  int64(size),
+			IsDir: isDir,
+			Path:  strings.TrimRight(path, "/") + "/" + name,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"items": result})
 }
 
 func getRcloneConfig(c *gin.Context) {

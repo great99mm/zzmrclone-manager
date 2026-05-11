@@ -31,6 +31,11 @@ func (w *Watcher) StartTaskWatch(task *models.Task, executor *rclone.Executor) e
 	if !task.WatchEnabled {
 		return nil
 	}
+	// Watching only works for local source directories
+	if task.SourceType == "remote" {
+		log.Printf("Skipping watch for task %d: source is remote", task.ID)
+		return nil
+	}
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {

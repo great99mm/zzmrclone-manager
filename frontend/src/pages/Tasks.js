@@ -80,7 +80,8 @@ const Tasks = () => {
   const filteredTasks = tasks.filter(task => {
     const matchesSearch = task.name.toLowerCase().includes(search.toLowerCase()) ||
                          task.source_dir.toLowerCase().includes(search.toLowerCase()) ||
-                         task.remote_name.toLowerCase().includes(search.toLowerCase());
+                         (task.remote_name || '').toLowerCase().includes(search.toLowerCase()) ||
+                         (task.remote_dir || '').toLowerCase().includes(search.toLowerCase());
     const matchesFilter = filter === 'all' || task.status === filter;
     return matchesSearch && matchesFilter;
   });
@@ -176,8 +177,14 @@ const Tasks = () => {
                       <div className="text-xs text-gray-500 mt-0.5">ID: {task.id}</div>
                     </td>
                     <td className="px-6 py-4">
-                      <div className="text-sm text-gray-700">{task.source_dir}</div>
-                      <div className="text-sm text-gray-500">→ {task.remote_name}:{task.remote_dir}</div>
+                      <div className="text-sm text-gray-700">
+                        {(task.source_type === 'remote' ? '☁ ' : '📂 ') + task.source_dir}
+                      </div>
+                      <div className="text-sm text-gray-500">→ {
+                        task.dest_type === 'local'
+                          ? '📂 ' + (task.remote_dir || '')
+                          : '☁ ' + (task.remote_name || '') + ':' + (task.remote_dir || '')
+                      }</div>
                     </td>
                     <td className="px-6 py-4">
                       <div className="text-xs space-y-0.5 text-gray-500">
@@ -276,11 +283,17 @@ const Tasks = () => {
               <div className="bg-gray-50 rounded-lg p-3 space-y-1.5 mb-3">
                 <div className="flex items-start gap-2 text-sm">
                   <FolderOpen className="w-3.5 h-3.5 text-gray-400 mt-0.5 flex-shrink-0" />
-                  <span className="text-gray-700 break-all">{task.source_dir}</span>
+                  <span className="text-gray-700 break-all">
+                    {(task.source_type === 'remote' ? '☁ ' : '') + task.source_dir}
+                  </span>
                 </div>
                 <div className="flex items-start gap-2 text-sm">
                   <HardDrive className="w-3.5 h-3.5 text-gray-400 mt-0.5 flex-shrink-0" />
-                  <span className="text-gray-700 break-all">{task.remote_name}:{task.remote_dir}</span>
+                  <span className="text-gray-700 break-all">{
+                    task.dest_type === 'local'
+                      ? task.remote_dir || ''
+                      : (task.remote_name || '') + ':' + (task.remote_dir || '')
+                  }</span>
                 </div>
               </div>
 

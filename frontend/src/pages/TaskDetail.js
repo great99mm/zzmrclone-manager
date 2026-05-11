@@ -268,7 +268,11 @@ const TaskDetail = () => {
               <StatusBadge status={status.status} />
             </div>
             <p className="text-gray-500 mt-1">
-              {task.source_dir} → {task.remote_name}:{task.remote_dir}
+              {(task.source_type === 'remote' ? '☁ ' : '📂 ') + task.source_dir}
+              {' → '}
+              {task.dest_type === 'local'
+                ? '📂 ' + (task.remote_dir || '')
+                : '☁ ' + (task.remote_name || '') + ':' + (task.remote_dir || '')}
             </p>
           </div>
         </div>
