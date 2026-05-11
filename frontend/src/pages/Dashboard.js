@@ -344,29 +344,29 @@ const Dashboard = () => {
       {/* Quick Tasks */}
       {(runningQuickTasks.length > 0 || finishedQuickTasks.length > 0) && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-          <div className="px-4 md:px-6 py-3 md:py-4 border-b border-gray-100 flex items-center justify-between">
+          <div className="px-4 md:px-5 py-2.5 md:py-3 border-b border-gray-100 flex items-center justify-between">
             <h2 className="font-semibold text-gray-900 text-sm md:text-base">文件浏览器任务</h2>
             <Link to="/files" className="text-xs md:text-sm text-blue-600 hover:text-blue-700 font-medium">前往文件浏览器</Link>
           </div>
 
           {runningQuickTasks.length > 0 && (
-            <div className="p-4 space-y-3">
+            <div className="p-3 space-y-2">
               {runningQuickTasks.map((task) => {
                 const progressInfo = quickTaskProgress[task.id] || {};
                 const progress = Math.max(0, Math.min(100, Number(progressInfo.progress || 0)));
                 return (
-                  <div key={task.id} className="rounded-xl border border-blue-100 bg-blue-50/50 p-4">
-                    <div className="flex items-start justify-between gap-3 mb-2">
+                  <div key={task.id} className="rounded-lg border border-blue-100 bg-blue-50/50 px-3 py-2.5">
+                    <div className="flex items-start justify-between gap-3 mb-1.5">
                       <div className="min-w-0">
-                        <div className="text-sm font-semibold text-gray-900 truncate">{task.name}</div>
-                        <div className="text-xs text-gray-500 mt-1 break-all">{task.source_dir} → {task.dest_type === 'local' ? task.remote_dir : `${task.remote_name}:${task.remote_dir}`}</div>
+                        <div className="text-sm font-semibold text-gray-900 truncate leading-5">{task.name}</div>
+                        <div className="text-[11px] text-gray-500 mt-0.5 break-all leading-4">{task.source_dir} → {task.dest_type === 'local' ? task.remote_dir : `${task.remote_name}:${task.remote_dir}`}</div>
                       </div>
-                      <div className="text-sm font-semibold text-blue-700 shrink-0">{progress.toFixed(0)}%</div>
+                      <div className="text-xs font-semibold text-blue-700 shrink-0">{progress.toFixed(0)}%</div>
                     </div>
-                    <div className="h-2 rounded-full bg-blue-100 overflow-hidden">
+                    <div className="h-1.5 rounded-full bg-blue-100 overflow-hidden">
                       <div className="h-full bg-blue-600 rounded-full transition-all duration-300" style={{ width: `${progress}%` }} />
                     </div>
-                    <div className="mt-2 text-xs text-gray-500 truncate">{progressInfo.fileName || '传输中'}</div>
+                    <div className="mt-1.5 text-[11px] text-gray-500 truncate leading-4">{progressInfo.fileName || '传输中'}</div>
                   </div>
                 );
               })}
@@ -374,17 +374,17 @@ const Dashboard = () => {
           )}
 
           {finishedQuickTasks.length > 0 && (
-            <div className={`${runningQuickTasks.length > 0 ? 'border-t' : ''} p-4 space-y-2`}>
+            <div className={`${runningQuickTasks.length > 0 ? 'border-t' : ''} p-3 space-y-1.5`}>
               {finishedQuickTasks.map((task) => {
                 const isError = task.status === 'error';
                 return (
                   <div
                     key={task.id}
-                    className={`flex items-center gap-3 rounded-xl border px-3 py-2.5 ${isError ? 'border-red-200 bg-red-50' : 'border-green-200 bg-green-50'}`}
+                    className={`flex items-center gap-2.5 rounded-lg border px-3 py-2 ${isError ? 'border-red-200 bg-red-50' : 'border-green-200 bg-green-50'}`}
                   >
                     <div className="flex-1 min-w-0">
-                      <div className={`text-sm font-medium truncate ${isError ? 'text-red-700' : 'text-green-700'}`}>{task.name}</div>
-                      <div className={`text-xs mt-0.5 truncate ${isError ? 'text-red-500' : 'text-green-600'}`}>
+                      <div className={`text-sm font-medium truncate leading-5 ${isError ? 'text-red-700' : 'text-green-700'}`}>{task.name}</div>
+                      <div className={`text-[11px] mt-0.5 truncate leading-4 ${isError ? 'text-red-500' : 'text-green-600'}`}>
                         {isError ? (task.last_error || '任务失败') : '100%'}
                       </div>
                     </div>
