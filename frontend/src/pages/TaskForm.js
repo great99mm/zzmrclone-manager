@@ -109,6 +109,16 @@ const TaskForm = () => {
     return { remote: '', path: '/' };
   };
 
+  const updateSourceRemote = (remote) => {
+    const { path } = parseRemotePath(form.source_dir);
+    handleChange('source_dir', remote ? `${remote}:${path || '/'}` : '');
+  };
+
+  const updateSourceRemotePath = (path) => {
+    const { remote } = parseRemotePath(form.source_dir);
+    handleChange('source_dir', remote ? `${remote}:${path || '/'}` : path);
+  };
+
   const openBrowser = (target) => {
     let remote, currentPath;
     if (target === 'source') {
@@ -354,133 +364,187 @@ const TaskForm = () => {
 
             {/* Source section */}
             <div className="border-t pt-4">
-              <div className="flex items-center gap-3 mb-3">
-                <span className="text-sm font-medium text-gray-700">源目录</span>
-                <div className="flex bg-gray-100 rounded-lg p-0.5">
-                  <button
-                    type="button"
-                    onClick={() => handleChange('source_type', 'local')}
-                    className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                      form.source_type === 'local' ? 'bg-white shadow text-blue-600' : 'text-gray-500'
-                    }`}
-                  >
-                    <HardDrive className="w-3 h-3 inline mr-1" />本地
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleChange('source_type', 'remote')}
-                    className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                      form.source_type === 'remote' ? 'bg-white shadow text-blue-600' : 'text-gray-500'
-                    }`}
-                  >
-                    <Cloud className="w-3 h-3 inline mr-1" />云盘
-                  </button>
+              <div className="grid grid-cols-1 md:grid-cols-[170px_minmax(0,1fr)] gap-3 items-start">
+                <div>
+                  <div className="text-sm font-medium text-gray-700 mb-2">源目录</div>
+                  <div className="inline-flex bg-gray-100 rounded-lg p-0.5">
+                    <button
+                      type="button"
+                      onClick={() => handleChange('source_type', 'local')}
+                      className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                        form.source_type === 'local' ? 'bg-white shadow text-blue-600' : 'text-gray-500'
+                      }`}
+                    >
+                      <HardDrive className="w-3 h-3 inline mr-1" />本地
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleChange('source_type', 'remote')}
+                      className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                        form.source_type === 'remote' ? 'bg-white shadow text-blue-600' : 'text-gray-500'
+                      }`}
+                    >
+                      <Cloud className="w-3 h-3 inline mr-1" />云盘
+                    </button>
+                  </div>
+                </div>
+
+                <div className="min-w-0">
+                  {form.source_type === 'local' ? (
+                    <div>
+                      <div className="text-xs text-gray-500 mb-1">本地路径</div>
+                      <input
+                        type="text"
+                        required
+                        value={form.source_dir}
+                        onChange={(e) => handleChange('source_dir', e.target.value)}
+                        placeholder="/home/media"
+                        className="w-full h-10 px-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      />
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <div className="grid grid-cols-1 md:grid-cols-[220px_minmax(0,1fr)_92px] gap-2 items-start">
+                        <div>
+                          <div className="text-xs text-gray-500 mb-1">远程盘符</div>
+                          <div className="relative">
+                            <select
+                              required
+                              value={parseRemotePath(form.source_dir).remote}
+                              onChange={(e) => updateSourceRemote(e.target.value)}
+                              className="w-full h-10 px-3 pr-9 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none"
+                            >
+                              <option value="">选择远程盘符</option>
+                              {remotes.map(remote => (
+                                <option key={remote} value={remote}>{remote}</option>
+                              ))}
+                            </select>
+                            <Cloud className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-xs text-gray-500 mb-1">云盘路径</div>
+                          <input
+                            type="text"
+                            required
+                            value={parseRemotePath(form.source_dir).path}
+                            onChange={(e) => updateSourceRemotePath(e.target.value)}
+                            placeholder="/videos"
+                            className="w-full h-10 px-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                          />
+                        </div>
+                        <div>
+                          <div className="hidden md:block text-xs text-transparent mb-1">操作</div>
+                          <button
+                            type="button"
+                            onClick={() => openBrowser('source')}
+                            className="w-full h-10 px-3 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-1"
+                          >
+                            <Folder className="w-4 h-4" /> 浏览
+                          </button>
+                        </div>
+                      </div>
+                      {remotes.length === 0 && (
+                        <p className="text-xs text-orange-500">未检测到 rclone 配置，请确保配置文件已挂载</p>
+                      )}
+                      <p className="text-xs text-gray-400">
+                        保存时会自动组合为 rclone 路径：{form.source_dir || 'remote:/path'}
+                      </p>
+                    </div>
+                  )}
                 </div>
               </div>
-
-              {form.source_type === 'local' ? (
-                <input
-                  type="text"
-                  required
-                  value={form.source_dir}
-                  onChange={(e) => handleChange('source_dir', e.target.value)}
-                  placeholder="/home/media"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-              ) : (
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    required
-                    value={form.source_dir}
-                    onChange={(e) => handleChange('source_dir', e.target.value)}
-                    placeholder="op:/videos (盘符:路径)"
-                    className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => openBrowser('source')}
-                    className="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium transition-colors flex items-center gap-1"
-                  >
-                    <Folder className="w-4 h-4" /> 浏览
-                  </button>
-                </div>
-              )}
             </div>
 
             {/* Destination section */}
             <div className="border-t pt-4">
-              <div className="flex items-center gap-3 mb-3">
-                <span className="text-sm font-medium text-gray-700">目标目录</span>
-                <div className="flex bg-gray-100 rounded-lg p-0.5">
-                  <button
-                    type="button"
-                    onClick={() => handleChange('dest_type', 'remote')}
-                    className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                      form.dest_type === 'remote' ? 'bg-white shadow text-blue-600' : 'text-gray-500'
-                    }`}
-                  >
-                    <Cloud className="w-3 h-3 inline mr-1" />云盘
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleChange('dest_type', 'local')}
-                    className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                      form.dest_type === 'local' ? 'bg-white shadow text-blue-600' : 'text-gray-500'
-                    }`}
-                  >
-                    <HardDrive className="w-3 h-3 inline mr-1" />本地
-                  </button>
-                </div>
-              </div>
-
-              {form.dest_type === 'remote' ? (
-                <div className="space-y-3">
-                  <div className="relative">
-                    <select
-                      required
-                      value={form.remote_name}
-                      onChange={(e) => handleChange('remote_name', e.target.value)}
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none"
-                    >
-                      <option value="">选择远程盘符</option>
-                      {remotes.map(remote => (
-                        <option key={remote} value={remote}>{remote}</option>
-                      ))}
-                    </select>
-                    <Cloud className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
-                  </div>
-                  {remotes.length === 0 && (
-                    <p className="text-xs text-orange-500">未检测到 rclone 配置，请确保配置文件已挂载</p>
-                  )}
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      required
-                      value={form.remote_dir}
-                      onChange={(e) => handleChange('remote_dir', e.target.value)}
-                      placeholder="media"
-                      className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                    />
+              <div className="grid grid-cols-1 md:grid-cols-[170px_minmax(0,1fr)] gap-3 items-start">
+                <div>
+                  <div className="text-sm font-medium text-gray-700 mb-2">目标目录</div>
+                  <div className="inline-flex bg-gray-100 rounded-lg p-0.5">
                     <button
                       type="button"
-                      onClick={() => openBrowser('dest')}
-                      className="px-3 py-2 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium transition-colors flex items-center gap-1"
+                      onClick={() => handleChange('dest_type', 'remote')}
+                      className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                        form.dest_type === 'remote' ? 'bg-white shadow text-blue-600' : 'text-gray-500'
+                      }`}
                     >
-                      <Folder className="w-4 h-4" /> 浏览
+                      <Cloud className="w-3 h-3 inline mr-1" />云盘
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleChange('dest_type', 'local')}
+                      className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                        form.dest_type === 'local' ? 'bg-white shadow text-blue-600' : 'text-gray-500'
+                      }`}
+                    >
+                      <HardDrive className="w-3 h-3 inline mr-1" />本地
                     </button>
                   </div>
                 </div>
-              ) : (
-                <input
-                  type="text"
-                  required
-                  value={form.remote_dir}
-                  onChange={(e) => handleChange('remote_dir', e.target.value)}
-                  placeholder="/backup/media"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-              )}
+
+                <div className="min-w-0">
+                  {form.dest_type === 'remote' ? (
+                    <div className="space-y-2">
+                      <div className="grid grid-cols-1 md:grid-cols-[220px_minmax(0,1fr)_92px] gap-2 items-start">
+                        <div>
+                          <div className="text-xs text-gray-500 mb-1">远程盘符</div>
+                          <div className="relative">
+                            <select
+                              required
+                              value={form.remote_name}
+                              onChange={(e) => handleChange('remote_name', e.target.value)}
+                              className="w-full h-10 px-3 pr-9 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none"
+                            >
+                              <option value="">选择远程盘符</option>
+                              {remotes.map(remote => (
+                                <option key={remote} value={remote}>{remote}</option>
+                              ))}
+                            </select>
+                            <Cloud className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-xs text-gray-500 mb-1">云盘路径</div>
+                          <input
+                            type="text"
+                            required
+                            value={form.remote_dir}
+                            onChange={(e) => handleChange('remote_dir', e.target.value)}
+                            placeholder="/media"
+                            className="w-full h-10 px-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                          />
+                        </div>
+                        <div>
+                          <div className="hidden md:block text-xs text-transparent mb-1">操作</div>
+                          <button
+                            type="button"
+                            onClick={() => openBrowser('dest')}
+                            className="w-full h-10 px-3 bg-gray-100 hover:bg-gray-200 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-1"
+                          >
+                            <Folder className="w-4 h-4" /> 浏览
+                          </button>
+                        </div>
+                      </div>
+                      {remotes.length === 0 && (
+                        <p className="text-xs text-orange-500">未检测到 rclone 配置，请确保配置文件已挂载</p>
+                      )}
+                    </div>
+                  ) : (
+                    <div>
+                      <div className="text-xs text-gray-500 mb-1">本地路径</div>
+                      <input
+                        type="text"
+                        required
+                        value={form.remote_dir}
+                        onChange={(e) => handleChange('remote_dir', e.target.value)}
+                        placeholder="/backup/media"
+                        className="w-full h-10 px-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                      />
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           </div>
         </div>
