@@ -4,6 +4,8 @@ import {
   ArrowLeft,
   Play,
   Square,
+  Pause,
+  Ban,
   RotateCcw,
   Pencil,
   Trash2,
@@ -15,7 +17,7 @@ import {
   Upload,
   File
 } from 'lucide-react';
-import { getTask, getTaskStatus, getTaskLogs, startTask, stopTask, dedupeTask, deleteTask } from '../services/api';
+import { getTask, getTaskStatus, getTaskLogs, startTask, stopTask, pauseTask, cancelTask, dedupeTask, deleteTask } from '../services/api';
 import { createWebSocket } from '../services/api';
 import toast from 'react-hot-toast';
 
@@ -212,6 +214,29 @@ const TaskDetail = () => {
     }
   };
 
+  const handlePause = async () => {
+    try {
+      await pauseTask(id);
+      toast.success('任务已暂停');
+      setFileProgresses({});
+      setTimeout(loadStatus, 300);
+    } catch (err) {
+      toast.error(err.response?.data?.error || '暂停失败');
+    }
+  };
+
+  const handleCancel = async () => {
+    try {
+      await cancelTask(id);
+      toast.success('任务已停止');
+      setFileProgresses({});
+      setTimeout(loadStatus, 300);
+      setTimeout(loadTask, 300);
+    } catch (err) {
+      toast.error(err.response?.data?.error || '停止失败');
+    }
+  };
+
   const handleDedupe = async () => {
     try {
       await dedupeTask(id);
@@ -250,13 +275,16 @@ const TaskDetail = () => {
     );
   }
 
+  const isQuickTask = !!task.is_quick_task;
+  const canContinueQuickTask = isQuickTask && (status.status === 'paused' || status.status === 'error');
+
   return (
     <div className="space-y-6">
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="flex items-center gap-4">
           <button
-            onClick={() => navigate('/tasks')}
+            onClick={() => navigate(isQuickTask ? '/files' : '/tasks')}
             className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
           >
             <ArrowLeft className="w-5 h-5" />
@@ -277,37 +305,79 @@ const TaskDetail = () => {
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5 md:gap-2">
-          {status.running ? (
-            <button
-              onClick={handleStop}
-              className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors font-medium text-sm md:text-base"
-            >
-              <Square className="w-3.5 h-3.5 md:w-4 md:h-4" />
-              <span className="hidden xs:inline">停止</span>
-            </button>
+          {isQuickTask ? (
+            <>
+              {status.running ? (
+                <>
+                  <button
+                    onClick={handlePause}
+                    className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-amber-50 text-amber-600 rounded-lg hover:bg-amber-100 transition-colors font-medium text-sm md:text-base"
+                  >
+                    <Pause className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                    <span className="hidden xs:inline">暂停</span>
+                  </button>
+                  <button
+                    onClick={handleCancel}
+                    className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors font-medium text-sm md:text-base"
+                  >
+                    <Ban className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                    <span className="hidden xs:inline">停止</span>
+                  </button>
+                </>
+              ) : canContinueQuickTask ? (
+                <>
+                  <button
+                    onClick={handleStart}
+                    className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-green-50 text-green-600 rounded-lg hover:bg-green-100 transition-colors font-medium text-sm md:text-base"
+                  >
+                    <Play className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                    <span className="hidden xs:inline">继续</span>
+                  </button>
+                  <button
+                    onClick={handleCancel}
+                    className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors font-medium text-sm md:text-base"
+                  >
+                    <Ban className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                    <span className="hidden xs:inline">停止</span>
+                  </button>
+                </>
+              ) : null}
+            </>
           ) : (
-            <button
-              onClick={handleStart}
-              className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-green-50 text-green-600 rounded-lg hover:bg-green-100 transition-colors font-medium text-sm md:text-base"
-            >
-              <Play className="w-3.5 h-3.5 md:w-4 md:h-4" />
-              <span className="hidden xs:inline">启动</span>
-            </button>
+            <>
+              {status.running ? (
+                <button
+                  onClick={handleStop}
+                  className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors font-medium text-sm md:text-base"
+                >
+                  <Square className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                  <span className="hidden xs:inline">停止</span>
+                </button>
+              ) : (
+                <button
+                  onClick={handleStart}
+                  className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-green-50 text-green-600 rounded-lg hover:bg-green-100 transition-colors font-medium text-sm md:text-base"
+                >
+                  <Play className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                  <span className="hidden xs:inline">启动</span>
+                </button>
+              )}
+              <button
+                onClick={handleDedupe}
+                className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-purple-50 text-purple-600 rounded-lg hover:bg-purple-100 transition-colors font-medium text-sm md:text-base"
+              >
+                <RotateCcw className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                <span className="hidden xs:inline">去重</span>
+              </button>
+              <Link
+                to={`/tasks/${id}/edit`}
+                className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100 transition-colors font-medium text-sm md:text-base"
+              >
+                <Pencil className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                <span className="hidden xs:inline">编辑</span>
+              </Link>
+            </>
           )}
-          <button
-            onClick={handleDedupe}
-            className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-purple-50 text-purple-600 rounded-lg hover:bg-purple-100 transition-colors font-medium text-sm md:text-base"
-          >
-            <RotateCcw className="w-3.5 h-3.5 md:w-4 md:h-4" />
-            <span className="hidden xs:inline">去重</span>
-          </button>
-          <Link
-            to={`/tasks/${id}/edit`}
-            className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100 transition-colors font-medium text-sm md:text-base"
-          >
-            <Pencil className="w-3.5 h-3.5 md:w-4 md:h-4" />
-            <span className="hidden xs:inline">编辑</span>
-          </Link>
           <button
             onClick={handleDelete}
             className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-gray-50 text-gray-600 rounded-lg hover:bg-red-50 hover:text-red-600 transition-colors font-medium text-sm md:text-base"
@@ -375,9 +445,6 @@ const TaskDetail = () => {
                     <span className="text-sm font-medium text-gray-700 truncate" title={fileName}>
                       {fileName}
                     </span>
-                  </div>
-                  <div className="text-xs text-gray-500 flex-shrink-0 ml-3">
-                    {data.sizeStr} @ {data.speedStr || '0 B/s'}
                   </div>
                 </div>
                 <div className="flex items-center gap-3">
@@ -512,6 +579,8 @@ const StatusBadge = ({ status }) => {
   const configs = {
     running: { text: '运行中', class: 'bg-green-100 text-green-700' },
     idle: { text: '当前空闲', class: 'bg-gray-100 text-gray-600' },
+    paused: { text: '已暂停', class: 'bg-amber-100 text-amber-700' },
+    canceled: { text: '已停止', class: 'bg-slate-100 text-slate-600' },
     error: { text: '异常', class: 'bg-red-100 text-red-700' },
   };
 

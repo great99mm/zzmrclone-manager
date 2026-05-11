@@ -355,7 +355,11 @@ const Dashboard = () => {
                 const progressInfo = quickTaskProgress[task.id] || {};
                 const progress = Math.max(0, Math.min(100, Number(progressInfo.progress || 0)));
                 return (
-                  <div key={task.id} className="rounded-lg border border-blue-100 bg-blue-50/50 px-3 py-2.5">
+                  <Link
+                    key={task.id}
+                    to={`/tasks/${task.id}`}
+                    className="block rounded-lg border border-blue-100 bg-blue-50/50 px-3 py-2.5 hover:border-blue-200 hover:bg-blue-50 transition-colors"
+                  >
                     <div className="flex items-start justify-between gap-3 mb-1.5">
                       <div className="min-w-0">
                         <div className="text-sm font-semibold text-gray-900 truncate leading-5">{task.name}</div>
@@ -367,7 +371,7 @@ const Dashboard = () => {
                       <div className="h-full bg-blue-600 rounded-full transition-all duration-300" style={{ width: `${progress}%` }} />
                     </div>
                     <div className="mt-1.5 text-[11px] text-gray-500 truncate leading-4">{progressInfo.fileName || '传输中'}</div>
-                  </div>
+                  </Link>
                 );
               })}
             </div>
@@ -377,17 +381,47 @@ const Dashboard = () => {
             <div className={`${runningQuickTasks.length > 0 ? 'border-t' : ''} p-3 space-y-1.5`}>
               {finishedQuickTasks.map((task) => {
                 const isError = task.status === 'error';
+                const isPaused = task.status === 'paused';
+                const isCanceled = task.status === 'canceled';
+                const cardClass = isError
+                  ? 'border-red-200 bg-red-50'
+                  : isPaused
+                    ? 'border-amber-200 bg-amber-50'
+                    : isCanceled
+                      ? 'border-slate-200 bg-slate-50'
+                      : 'border-green-200 bg-green-50';
+                const textClass = isError
+                  ? 'text-red-700'
+                  : isPaused
+                    ? 'text-amber-700'
+                    : isCanceled
+                      ? 'text-slate-700'
+                      : 'text-green-700';
+                const subClass = isError
+                  ? 'text-red-500'
+                  : isPaused
+                    ? 'text-amber-600'
+                    : isCanceled
+                      ? 'text-slate-500'
+                      : 'text-green-600';
+                const statusText = isError
+                  ? (task.last_error || '任务失败')
+                  : isPaused
+                    ? '已暂停'
+                    : isCanceled
+                      ? '已停止'
+                      : '100%';
                 return (
                   <div
                     key={task.id}
-                    className={`flex items-center gap-2.5 rounded-lg border px-3 py-2 ${isError ? 'border-red-200 bg-red-50' : 'border-green-200 bg-green-50'}`}
+                    className={`flex items-center gap-2.5 rounded-lg border px-3 py-2 ${cardClass}`}
                   >
-                    <div className="flex-1 min-w-0">
-                      <div className={`text-sm font-medium truncate leading-5 ${isError ? 'text-red-700' : 'text-green-700'}`}>{task.name}</div>
-                      <div className={`text-[11px] mt-0.5 truncate leading-4 ${isError ? 'text-red-500' : 'text-green-600'}`}>
-                        {isError ? (task.last_error || '任务失败') : '100%'}
+                    <Link to={`/tasks/${task.id}`} className="flex-1 min-w-0">
+                      <div className={`text-sm font-medium truncate leading-5 ${textClass}`}>{task.name}</div>
+                      <div className={`text-[11px] mt-0.5 truncate leading-4 ${subClass}`}>
+                        {statusText}
                       </div>
-                    </div>
+                    </Link>
                     <button
                       type="button"
                       onClick={() => handleDeleteQuickTask(task.id)}

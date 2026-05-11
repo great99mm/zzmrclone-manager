@@ -713,7 +713,11 @@ const FileBrowser = () => {
                   : `${task.remote_name}:${task.remote_dir}`;
 
                 return (
-                  <div key={task.id} className="rounded-xl border border-blue-100 bg-blue-50/50 p-4">
+                  <div
+                    key={task.id}
+                    onClick={() => navigate(`/tasks/${task.id}`)}
+                    className="rounded-xl border border-blue-100 bg-blue-50/50 p-4 cursor-pointer hover:border-blue-200 hover:bg-blue-50 transition-colors"
+                  >
                     <div className="flex items-start justify-between gap-3 mb-2">
                       <div className="min-w-0">
                         <div className="text-sm font-semibold text-gray-900 truncate">{task.name}</div>
@@ -737,15 +741,48 @@ const FileBrowser = () => {
             <div className={`${runningQuickTasks.length > 0 ? 'border-t' : ''} p-4 space-y-2`}>
               {finishedQuickTasks.map((task) => {
                 const isError = task.status === 'error';
+                const isPaused = task.status === 'paused';
+                const isCanceled = task.status === 'canceled';
+                const cardClass = isError
+                  ? 'border-red-200 bg-red-50'
+                  : isPaused
+                    ? 'border-amber-200 bg-amber-50'
+                    : isCanceled
+                      ? 'border-slate-200 bg-slate-50'
+                      : 'border-green-200 bg-green-50';
+                const textClass = isError
+                  ? 'text-red-700'
+                  : isPaused
+                    ? 'text-amber-700'
+                    : isCanceled
+                      ? 'text-slate-700'
+                      : 'text-green-700';
+                const subClass = isError
+                  ? 'text-red-500'
+                  : isPaused
+                    ? 'text-amber-600'
+                    : isCanceled
+                      ? 'text-slate-500'
+                      : 'text-green-600';
+                const statusText = isError
+                  ? (task.last_error || '任务失败')
+                  : isPaused
+                    ? '已暂停'
+                    : isCanceled
+                      ? '已停止'
+                      : '100%';
                 return (
                   <div
                     key={task.id}
-                    className={`flex items-center gap-3 rounded-xl border px-3 py-2.5 ${isError ? 'border-red-200 bg-red-50' : 'border-green-200 bg-green-50'}`}
+                    className={`flex items-center gap-3 rounded-xl border px-3 py-2.5 ${cardClass}`}
                   >
-                    <div className="flex-1 min-w-0">
-                      <div className={`text-sm font-medium truncate ${isError ? 'text-red-700' : 'text-green-700'}`}>{task.name}</div>
-                      <div className={`text-xs mt-0.5 truncate ${isError ? 'text-red-500' : 'text-green-600'}`}>
-                        {isError ? (task.last_error || '任务失败') : '100%'}
+                    <div
+                      className="flex-1 min-w-0 cursor-pointer"
+                      onClick={() => navigate(`/tasks/${task.id}`)}
+                    >
+                      <div className={`text-sm font-medium truncate ${textClass}`}>{task.name}</div>
+                      <div className={`text-xs mt-0.5 truncate ${subClass}`}>
+                        {statusText}
                       </div>
                     </div>
                     <button

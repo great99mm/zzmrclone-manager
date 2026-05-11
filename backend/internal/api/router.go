@@ -113,6 +113,8 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			tasks.PUT("/:id", updateTask)
 			tasks.DELETE("/:id", deleteTask)
 			tasks.POST("/:id/start", startTask)
+			tasks.POST("/:id/pause", pauseTask)
+			tasks.POST("/:id/cancel", cancelTask)
 			tasks.POST("/:id/stop", stopTask)
 			tasks.POST("/:id/dedupe", dedupeTask)
 			tasks.GET("/:id/logs", getTaskLogs)
@@ -349,6 +351,9 @@ func applyRuntimeStatus(task *models.Task) {
 	}
 	if executor.IsRunning(task.ID) {
 		task.Status = "running"
+		return
+	}
+	if task.Status == "paused" || task.Status == "canceled" {
 		return
 	}
 	if task.LastError != "" {
@@ -634,8 +639,14 @@ func startTask(c *gin.Context) {
 		return
 	}
 	if task.IsQuickTask {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "quick task cannot be started again"})
-		return
+		if task.Status == "canceled" || (task.Status == "idle" && task.LastRun != nil && task.LastError == "") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "quick task already finished"})
+			return
+		}
+		if task.Status != "paused" && task.Status != "error" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "quick task cannot continue in current state"})
+			return
+		}
 	}
 
 	if executor.IsRunning(uint(id)) {
@@ -651,6 +662,52 @@ func startTask(c *gin.Context) {
 	// ExecuteMove now updates status / last_run internally (covers both
 	// API-triggered and watcher/scheduler-triggered paths).
 	c.JSON(http.StatusOK, gin.H{"message": "task started"})
+}
+
+func pauseTask(c *gin.Context) {
+	id, _ := strconv.Atoi(c.Param("id"))
+	var task models.Task
+	if err := db.First(&task, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		return
+	}
+	if !task.IsQuickTask {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "only quick task supports pause"})
+		return
+	}
+	if !executor.IsRunning(uint(id)) {
+		c.JSON(http.StatusConflict, gin.H{"error": "task is not running"})
+		return
+	}
+
+	executor.StopTask(uint(id))
+	db.Model(&task).Updates(map[string]interface{}{
+		"status":     "paused",
+		"last_error": "",
+	})
+	hub.Broadcast(fmt.Sprintf(`{"type":"task_stopped","task_id":%d}`, id))
+	c.JSON(http.StatusOK, gin.H{"message": "task paused"})
+}
+
+func cancelTask(c *gin.Context) {
+	id, _ := strconv.Atoi(c.Param("id"))
+	var task models.Task
+	if err := db.First(&task, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		return
+	}
+	if !task.IsQuickTask {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "only quick task supports stop"})
+		return
+	}
+
+	executor.StopTask(uint(id))
+	db.Model(&task).Updates(map[string]interface{}{
+		"status":     "canceled",
+		"last_error": "已停止",
+	})
+	hub.Broadcast(fmt.Sprintf(`{"type":"task_stopped","task_id":%d}`, id))
+	c.JSON(http.StatusOK, gin.H{"message": "task canceled"})
 }
 
 func stopTask(c *gin.Context) {
@@ -712,6 +769,8 @@ func getTaskStatus(c *gin.Context) {
 	status := "idle"
 	if isRunning {
 		status = "running"
+	} else if task.Status == "paused" || task.Status == "canceled" {
+		status = task.Status
 	} else if task.LastError != "" {
 		status = "error"
 	}
