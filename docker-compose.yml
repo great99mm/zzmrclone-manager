@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   rclone-manager:
     image: dedehao/zzmrclone-manager:latest

@@ -1,29 +1,31 @@
 .PHONY: build up down logs clean dev
 
 build:
-	docker-compose build
+	docker build -t dedehao/zzmrclone-manager:latest .
 
 up:
-	docker-compose up -d
+	docker build -t dedehao/zzmrclone-manager:latest .
+	docker compose up -d --force-recreate
 
 down:
-	docker-compose down
+	docker compose down
 
 logs:
-	docker-compose logs -f
+	docker compose logs -f
 
 clean:
-	docker-compose down -v
+	docker compose down -v
 	docker system prune -f
 
 dev:
-	docker-compose up
+	docker build -t dedehao/zzmrclone-manager:latest .
+	docker compose up
 
 restart:
-	docker-compose restart
+	docker compose restart
 
 status:
-	docker-compose ps
+	docker compose ps
 
 reset-password:
 	docker exec rclone-manager /app/server --reset-password
