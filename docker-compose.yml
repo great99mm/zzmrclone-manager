@@ -3,15 +3,27 @@ services:
     image: dedehao/zzmrclone-manager:latest
     container_name: rclone-manager
     restart: unless-stopped
+    devices:
+      - /dev/fuse:/dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
     ports:
       - "7071:80"
     volumes:
       - ./data:/app/data
       - /root/.config/rclone:/root/.config/rclone
       - ./logs:/app/logs
-      #别忘了映射你要监控的本机目录
-      #示例：
+      # 映射你要监控的本机目录
+      # 示例：
       #- /opt:/opt
+      # 云盘挂载如果要让宿主机可见，请自行映射，例如：
+      #- type: bind
+      #  source: /data/cloud-mount
+      #  target: /data/cloud-mount
+      #  bind:
+      #    propagation: rshared
     environment:
       - TZ=Asia/Shanghai
       - RCLONE_MANAGER_DATA_DIR=/app/data

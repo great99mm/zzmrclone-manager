@@ -10,6 +10,7 @@ type Config struct {
 	Port         string
 	RcloneConfig string
 	APIToken     string
+	MountRoot    string
 }
 
 func Load() *Config {
@@ -19,6 +20,7 @@ func Load() *Config {
 		Port:         getEnv("RCLONE_MANAGER_PORT", "7070"),
 		RcloneConfig: getEnv("RCLONE_CONFIG", "/root/.config/rclone/rclone.conf"),
 		APIToken:     getEnv("RCLONE_MANAGER_API_TOKEN", ""),
+		MountRoot:    getEnv("RCLONE_MANAGER_MOUNT_ROOT", ""),
 	}
 }
 

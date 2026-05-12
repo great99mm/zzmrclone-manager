@@ -18,6 +18,7 @@ import (
 	"rclone-manager/internal/config"
 	"rclone-manager/internal/logger"
 	"rclone-manager/internal/models"
+	mountsvc "rclone-manager/internal/mounts"
 	"rclone-manager/internal/rclone"
 	"rclone-manager/internal/scheduler"
 	"rclone-manager/internal/watcher"
@@ -30,17 +31,19 @@ var (
 	watch     *watcher.Watcher
 	hub       *websocket.Hub
 	cfgGlobal *config.Config
+	mountMgr  *mountsvc.Manager
 )
 
 // Hard caps for memory-hungry rclone flags.  These act as guardrails:
 // a user (or the old defaults) cannot request so much per-transfer RAM
 // that the host OOMs.  The caps are still high enough for fast transfers.
 const (
-	maxTransfers      = 16   // old default was 16, keep same cap
-	maxCheckers       = 32   // old default was 32, keep same cap
+	maxTransfers      = 16     // old default was 16, keep same cap
+	maxCheckers       = 32     // old default was 32, keep same cap
 	maxBufferSize     = "512M" // hard ceiling; most users will run at 64M
 	maxDriveChunkSize = "256M" // hard ceiling
-	localBrowserRoot  = "/opt"
+	localBrowserRoot  = "/"
+	localBrowserStart = "/"
 )
 
 func SetupRouter(cfg *config.Config) *gin.Engine {
@@ -77,6 +80,10 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 
 	// Init watcher
 	watch = watcher.NewWatcher(executor)
+
+	// Init mount manager and auto-mount enabled mount configs
+	mountMgr = mountsvc.NewManager(db, cfg.MountRoot, cfg.DataDir)
+	go mountMgr.RestoreAndStartEnabled()
 
 	// Load existing tasks and start watchers/schedules
 	var tasks []models.Task
@@ -127,6 +134,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		api.POST("/system/log-level", setLogLevel)
 		api.GET("/system/logs", getSystemLogs)
 		api.POST("/system/logs/clean", cleanLogs)
+		api.GET("/mounts/system", getMountSystemInfo)
 
 		// Rclone config
 		api.GET("/rclone/remotes", listRemotes)
@@ -134,6 +142,18 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		api.GET("/rclone/config", getRcloneConfig)
 		api.GET("/rclone/ls", listRemoteDir)
 		api.POST("/rclone/mkdir", createRemoteDir)
+
+		// Mounts
+		mounts := api.Group("/mounts")
+		{
+			mounts.GET("", listMounts)
+			mounts.POST("", createMount)
+			mounts.GET("/:id", getMount)
+			mounts.PUT("/:id", updateMount)
+			mounts.DELETE("/:id", deleteMount)
+			mounts.POST("/:id/start", startMount)
+			mounts.POST("/:id/stop", stopMount)
+		}
 
 		// File browser
 		api.GET("/files/local", listLocalFiles)
@@ -1096,7 +1116,7 @@ type FileItem struct {
 func listLocalFiles(c *gin.Context) {
 	path := c.Query("path")
 	if path == "" {
-		path = localBrowserRoot
+		path = localBrowserStart
 	}
 	path = filepath.Clean(path)
 	if !filepath.IsAbs(path) {
@@ -1115,7 +1135,7 @@ func listLocalFiles(c *gin.Context) {
 	}
 	rel, err := filepath.Rel(rootAbs, pathAbs)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "local browsing is limited to /opt"})
+		c.JSON(http.StatusForbidden, gin.H{"error": fmt.Sprintf("local browsing is limited to %s", localBrowserRoot)})
 		return
 	}
 

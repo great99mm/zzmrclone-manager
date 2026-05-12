@@ -18,13 +18,13 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o server ./cmd/server
 
 FROM alpine:latest
 
-RUN apk add --no-cache ca-certificates rclone bash curl tzdata
+RUN apk add --no-cache ca-certificates rclone bash curl tzdata fuse3 \
+    && mkdir -p /app/data /app/logs \
+    && printf 'user_allow_other\n' > /etc/fuse.conf
 
 WORKDIR /app
 
 COPY --from=builder /app/server /app/server
-
-RUN mkdir -p /app/data /app/logs
 
 EXPOSE 7070
 

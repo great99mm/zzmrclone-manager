@@ -3,8 +3,6 @@ import { useNavigate } from 'react-router-dom';
 import {
   Folder,
   File,
-  HardDrive,
-  Cloud,
   ChevronRight,
   Home,
   ArrowLeft,
@@ -12,8 +10,6 @@ import {
   Copy,
   X,
   Loader2,
-  Globe,
-  Server,
   AlertTriangle,
 } from 'lucide-react';
 import {
@@ -29,34 +25,8 @@ import {
 } from '../services/api';
 import toast from 'react-hot-toast';
 
-const LOCAL_ROOT_PATH = '/opt';
-
-const GoogleDriveIcon = ({ className = 'w-6 h-6' }) => (
-  <svg viewBox="0 0 24 24" className={className} fill="none" aria-hidden="true">
-    <path d="M7.3 3.5h4.7l4.2 7.2h-4.7L7.3 3.5Z" fill="#0F9D58" />
-    <path d="M5.4 7.1 7.8 3l4.2 7.2-2.4 4.1L5.4 7.1Z" fill="#F4B400" />
-    <path d="M14.1 14.3H9.3l2.4-4.1h4.8l-2.4 4.1Z" fill="#4285F4" />
-    <path d="M9.3 14.3H14l2.4 4.1H4.6l4.7-4.1Z" fill="#4285F4" opacity=".95" />
-    <path d="M16.5 18.4 19 14.3l-4.7-8.1-2.4 4.1 4.6 8.1Z" fill="#0F9D58" opacity=".95" />
-  </svg>
-);
-
-const rootIconByType = (type, large = false) => {
-  const className = large ? 'w-10 h-10' : 'w-5 h-5';
-  switch ((type || '').toLowerCase()) {
-    case 'local':
-      return <HardDrive className={`${className} text-blue-600`} />;
-    case 'drive':
-      return <GoogleDriveIcon className={className} />;
-    case 'webdav':
-      return <Globe className={`${className} text-emerald-600`} />;
-    case 'ftp':
-    case 'sftp':
-      return <Server className={`${className} text-amber-600`} />;
-    default:
-      return <Cloud className={`${className} text-sky-600`} />;
-  }
-};
+const LOCAL_ROOT_PATH = '/';
+const LOCAL_DEFAULT_PATH = '/';
 
 const normalizeRemotePath = (path) => {
   if (!path) return '/';
@@ -83,7 +53,7 @@ const buildPathCrumbs = (path, rootName) => {
 
 const FileBrowser = () => {
   const navigate = useNavigate();
-  const [roots, setRoots] = useState([{ key: 'local', type: 'local', remoteType: 'local', name: '容器/opt目录', path: LOCAL_ROOT_PATH }]);
+  const [roots, setRoots] = useState([{ key: 'local', type: 'local', name: '本地目录', path: LOCAL_ROOT_PATH, startPath: LOCAL_DEFAULT_PATH }]);
   const [currentRoot, setCurrentRoot] = useState(null);
   const [currentPath, setCurrentPath] = useState('/');
   const [items, setItems] = useState([]);
@@ -116,14 +86,13 @@ const FileBrowser = () => {
         const remotes = ((res.data || {}).remotes || []).map((r) => ({
           key: r.name,
           type: 'remote',
-          remoteType: r.type || 'remote',
           name: r.name,
           path: '/',
         }));
-        setRoots([{ key: 'local', type: 'local', remoteType: 'local', name: '容器/opt目录', path: LOCAL_ROOT_PATH }, ...remotes]);
+        setRoots([{ key: 'local', type: 'local', name: '本地目录', path: LOCAL_ROOT_PATH, startPath: LOCAL_DEFAULT_PATH }, ...remotes]);
       })
       .catch(() => {
-        setRoots([{ key: 'local', type: 'local', remoteType: 'local', name: '容器/opt目录', path: LOCAL_ROOT_PATH }]);
+        setRoots([{ key: 'local', type: 'local', name: '本地目录', path: LOCAL_ROOT_PATH, startPath: LOCAL_DEFAULT_PATH }]);
       });
   }, []);
 
@@ -305,7 +274,7 @@ const FileBrowser = () => {
 
   const openRoot = (root) => {
     setCurrentRoot(root.key);
-    setCurrentPath(root.path || '/');
+    setCurrentPath(root.startPath || root.path || '/');
     setSelectedItems(new Set());
   };
 
@@ -316,7 +285,7 @@ const FileBrowser = () => {
 
   const goUp = () => {
     const rootPath = currentRootMeta?.path || '/';
-    if (currentPath === rootPath || currentPath === '/') return;
+    if (currentPath === '/' || (currentRootMeta?.type !== 'local' && currentPath === rootPath)) return;
     const parts = currentPath.split('/').filter(Boolean);
     parts.pop();
     const nextPath = parts.length ? `/${parts.join('/')}` : '/';
@@ -531,61 +500,24 @@ const FileBrowser = () => {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-[220px_1fr] gap-4">
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 space-y-2">
-          <div className="text-sm font-medium text-gray-500 mb-2">存储列表</div>
-          <button
-            onClick={() => {
-              setCurrentRoot(null);
-              setCurrentPath('/');
-              setSelectedItems(new Set());
-            }}
-            className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left transition-colors ${
-              isRootHome ? 'bg-blue-50 text-blue-700' : 'hover:bg-gray-50 text-gray-700'
-            }`}
-          >
-            <Home className="w-4 h-4" />
-            <span className="text-sm font-medium">存储列表</span>
-          </button>
-
-          {roots.map((root) => (
-            <button
-              key={root.key}
-              onClick={() => openRoot(root)}
-              className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left transition-colors ${
-                currentRoot === root.key ? 'bg-blue-50 text-blue-700' : 'hover:bg-gray-50 text-gray-700'
-              }`}
-            >
-              {rootIconByType(root.remoteType)}
-              <span className="text-sm font-medium truncate">{root.name}</span>
-            </button>
-          ))}
-        </div>
-
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden min-h-[420px]">
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden min-h-[420px]">
           {isRootHome ? (
             <div className="p-6 md:p-8">
               <div className="mb-5">
                 <h2 className="text-lg font-semibold text-gray-900">存储列表</h2>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+              <div className="flex flex-wrap gap-3">
                 {roots.map((root) => (
                   <button
                     key={root.key}
                     onClick={() => openRoot(root)}
-                    className="group rounded-2xl border border-gray-200 bg-white hover:bg-gray-50 hover:border-blue-300 hover:shadow-sm transition-all p-5 text-left"
+                    className="group inline-flex items-center gap-2.5 rounded-xl border border-gray-200 bg-white hover:bg-gray-50 hover:border-blue-300 hover:shadow-sm transition-all px-4 py-2.5"
                   >
-                    <div className="flex items-center justify-between mb-4">
-                      <div className="w-14 h-14 rounded-2xl bg-blue-50 flex items-center justify-center">
-                        {rootIconByType(root.remoteType, true)}
-                      </div>
-                      <Folder className="w-6 h-6 text-gray-300 group-hover:text-blue-400 transition-colors" />
+                    <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center shrink-0">
+                      <Folder className="w-4 h-4 text-blue-600" />
                     </div>
-                    <div className="font-semibold text-gray-900 text-base truncate">{root.name}</div>
-                    <div className="text-sm text-gray-500 mt-1">
-                      {root.type === 'local' ? '容器中/opt所映射目录' : `浏览 ${root.remoteType || 'remote'} 文件`}
-                    </div>
+                    <div className="font-semibold text-gray-900 text-sm">{root.name}</div>
                   </button>
                 ))}
               </div>
@@ -694,7 +626,6 @@ const FileBrowser = () => {
               </div>
             </>
           )}
-        </div>
       </div>
 
       {(runningQuickTasks.length > 0 || finishedQuickTasks.length > 0) && (

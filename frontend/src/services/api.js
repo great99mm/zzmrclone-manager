@@ -52,6 +52,16 @@ export const getRcloneConfig = () => api.get('/rclone/config');
 export const listRemoteDir = (remote, path = '/') => api.get(`/rclone/ls?remote=${encodeURIComponent(remote)}&path=${encodeURIComponent(path)}`);
 export const createRemoteDir = (remote, path) => api.post('/rclone/mkdir', { remote, path });
 
+// Mounts
+export const getMountSystemInfo = () => api.get('/mounts/system');
+export const getMounts = () => api.get('/mounts');
+export const getMount = (id) => api.get(`/mounts/${id}`);
+export const createMount = (data) => api.post('/mounts', data);
+export const updateMount = (id, data) => api.put(`/mounts/${id}`, data);
+export const deleteMount = (id) => api.delete(`/mounts/${id}`);
+export const startMount = (id) => api.post(`/mounts/${id}/start`);
+export const stopMount = (id) => api.post(`/mounts/${id}/stop`);
+
 // File browser
 export const listLocalFiles = (path = '/') => api.get(`/files/local?path=${encodeURIComponent(path)}`);
 export const listRemoteFiles = (remote, path = '/') => api.get(`/files/remote?remote=${encodeURIComponent(remote)}&path=${encodeURIComponent(path)}`);

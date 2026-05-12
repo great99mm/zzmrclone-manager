@@ -1,6 +1,6 @@
 # ZZMRClone Manager
 
-基于 Web 的 Rclone 自动化管理工具，支持任务调度、目录监控、实时日志、结构化转移记录和 **OpenList 目录自动刷新**。提供可视化界面和持久化数据库，一条命令即可部署。
+基于 Web 的 Rclone 自动化管理工具，支持任务调度、目录监控、实时日志、结构化转移记录、**云盘本地挂载** 和 **OpenList 目录自动刷新**。提供可视化界面和持久化数据库，一条命令即可部署。
 
 ---
 
@@ -13,6 +13,7 @@
 - **定时执行** — 支持按固定间隔（分钟）自动执行任务
 - **实时日志** — WebSocket 推送任务执行日志，支持倒序查看和关键字高亮
 - **结构化转移记录** — 每条文件传输自动生成持久化记录，支持分页查询和筛选
+- **云盘本地挂载** — 参考 CloudDrive2 的使用方式，将远程云盘挂载到容器本地目录
 
 ### OpenList 集成
 
@@ -58,6 +59,8 @@ vim docker-compose.yml
 docker compose up -d
 ```
 
+> 云盘挂载功能依赖 FUSE。当前 `docker-compose.yml` 已包含 `/dev/fuse`、`SYS_ADMIN`、`apparmor:unconfined`；宿主机目录映射请按你自己的路径自行添加。
+
 
 ### 获取管理员密码
 
@@ -99,6 +102,59 @@ docker exec rclone-manager /app/server --reset-password
 | `RCLONE_MANAGER_PORT` | `7070` | HTTP 服务端口 |
 | `RCLONE_CONFIG` | `/root/.config/rclone/rclone.conf` | Rclone 配置文件路径 |
 | `RCLONE_MANAGER_API_TOKEN` | `""` | API Token（空表示不启用） |
+| `RCLONE_MANAGER_MOUNT_ROOT` | `""` | 可选：限制挂载目录根路径；留空表示不限制 |
+
+---
+
+## 云盘挂载说明
+
+### 运行条件
+
+云盘挂载基于 `rclone mount` + FUSE，需要满足：
+
+1. 容器映射 `/dev/fuse`
+2. 容器增加 `SYS_ADMIN` 能力
+3. 容器增加 `apparmor:unconfined`
+4. 如果希望宿主机直接看到挂载结果，请把你自己的宿主机目录 bind 到容器，并启用 `rshared` 传播
+
+推荐 compose 片段：
+
+```yaml
+devices:
+  - /dev/fuse:/dev/fuse
+cap_add:
+  - SYS_ADMIN
+security_opt:
+  - apparmor:unconfined
+volumes:
+  - type: bind
+    source: /你的宿主机目录
+    target: /你准备在容器里使用的挂载目录
+    bind:
+      propagation: rshared
+```
+
+如果你想限制所有挂载只能落在某个目录下，可以额外设置：
+
+```env
+RCLONE_MANAGER_MOUNT_ROOT=/data/cloud-mount
+```
+
+不设置则不限制，页面里直接填写完整挂载路径即可。
+
+### 使用方式
+
+1. 打开左侧 **云盘挂载** 页面
+2. 新建挂载，选择远程盘符和远程路径
+3. 设置本地挂载目录（现在需要你自己填写完整容器内路径）
+4. 点击 **挂载**
+5. 挂载成功后，可在 **文件浏览器** 或任务配置里把它当成本地目录使用
+
+### 典型场景
+
+- `alist:/影视` 挂载到 `/data/cloud-mount/movies`
+- 然后创建任务：`/data/cloud-mount/movies` → 其它本地目录 / 其它远程盘
+- 或直接在文件浏览器里浏览挂载后的云盘内容
 
 ---
 
@@ -133,6 +189,7 @@ zzmrclone-manager/
 │   │   ├── auth/             # 认证相关
 │   │   ├── config/           # 环境配置
 │   │   ├── logger/           # 文件日志
+│   │   ├── mounts/           # 云盘挂载管理
 │   │   ├── models/           # GORM 数据模型
 │   │   ├── rclone/           # Rclone 执行器 + OpenList 刷新
 │   │   ├── scheduler/        # 定时任务调度
@@ -142,7 +199,7 @@ zzmrclone-manager/
 │   └── Dockerfile
 ├── frontend/                 # React 前端
 │   ├── src/
-│   │   ├── pages/            # 页面组件
+│   │   ├── pages/            # 页面组件（含 Mounts.js 云盘挂载页）
 │   │   ├── components/       # 公共组件
 │   │   ├── services/         # API 封装
 │   │   └── hooks/            # 状态管理
@@ -195,6 +252,16 @@ zzmrclone-manager/
 - `GET /api/system/logs` — 获取系统日志
 - `POST /api/system/logs/clean` — 清空日志
 
+### 云盘挂载
+- `GET /api/mounts/system` — 获取挂载运行环境信息
+- `GET /api/mounts` — 获取挂载配置列表
+- `POST /api/mounts` — 创建挂载配置
+- `GET /api/mounts/:id` — 获取挂载配置详情
+- `PUT /api/mounts/:id` — 更新挂载配置
+- `DELETE /api/mounts/:id` — 删除挂载配置
+- `POST /api/mounts/:id/start` — 执行挂载
+- `POST /api/mounts/:id/stop` — 执行卸载
+
 ### 转移记录（需 Token）
 - `GET /api/output-logs?token=xxx` — 获取结构化转移记录
 - `DELETE /api/output-logs/:id?token=xxx` — 删除单条记录
@@ -207,6 +274,12 @@ zzmrclone-manager/
 ---
 
 ## 更新日志
+
+### v1.1.1 (2026-05-12)
+
+- **新增** 云盘本地挂载页面，支持创建、挂载、卸载、编辑、删除挂载配置
+- **新增** 基于 `rclone mount` 的后端挂载管理与开机自挂载能力
+- **新增** FUSE 运行环境检测与 Docker 部署说明
 
 ### v1.0.2 (2026-05-11)
 

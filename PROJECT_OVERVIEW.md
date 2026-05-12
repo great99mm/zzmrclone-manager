@@ -18,6 +18,7 @@
 │         │            │  :data   │                          │
 │         │            └────┬────┘                          │
 │         │                 │                                 │
+│         │          FUSE Mounts (user defined path)         │
 │    WebSocket ◄────────────┘                                │
 │    (实时日志)                                               │
 │                                                              │
@@ -30,6 +31,7 @@
 |-----------|---------|---------|
 | 交互式配置 (setup_config) | Web 表单 + REST API | `frontend/src/pages/TaskForm.js` |
 | rclone move 传输 | Go exec.Command | `backend/internal/rclone/rclone.go` |
+| 云盘本地挂载 | rclone mount + FUSE | `backend/internal/mounts/manager.go` |
 | rclone dedupe 去重 | 自动/手动触发 | `backend/internal/rclone/rclone.go` |
 | systemd path 目录监控 | fsnotify | `backend/internal/watcher/watcher.go` |
 | systemd timer 定时任务 | robfig/cron | `backend/internal/scheduler/scheduler.go` |

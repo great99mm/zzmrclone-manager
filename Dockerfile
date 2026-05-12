@@ -16,10 +16,11 @@ RUN npm run build
 
 FROM alpine:latest
 
-RUN apk add --no-cache ca-certificates rclone bash curl tzdata nginx supervisor
+RUN apk add --no-cache ca-certificates rclone bash curl tzdata nginx supervisor fuse3 \
+    && mkdir -p /run/nginx /var/log/nginx /app/data /app/logs \
+    && printf 'user_allow_other\n' > /etc/fuse.conf
 
 # Setup nginx
-RUN mkdir -p /run/nginx /var/log/nginx
 COPY frontend/nginx.conf /etc/nginx/nginx.conf
 
 # Copy backend binary
@@ -28,9 +29,6 @@ COPY --from=go-builder /app/backend/server /app/server
 
 # Copy frontend build
 COPY --from=node-builder /app/frontend/build /usr/share/nginx/html
-
-# Create directories
-RUN mkdir -p /app/data /app/logs
 
 # Setup supervisord
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf

@@ -55,9 +55,13 @@ func InitDB(dataDir string) error {
 		&models.User{},
 		&models.OutputLog{},
 		&models.OpenlistConfig{},
+		&models.MountConfig{},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to migrate database: %v", err)
+	}
+	if err := ensureMountConfigColumns(db); err != nil {
+		return fmt.Errorf("failed to migrate mount config columns: %v", err)
 	}
 
 	// Create default admin if no users exist
@@ -106,6 +110,60 @@ func InitDB(dataDir string) error {
 	}()
 
 	return nil
+}
+
+func ensureMountConfigColumns(db *gorm.DB) error {
+	columns := map[string]string{
+		"name":            "text",
+		"remote_name":     "text",
+		"remote_path":     "text DEFAULT '/'",
+		"mount_path":      "text",
+		"rclone_config":   "text",
+		"enabled":         "numeric DEFAULT 0",
+		"allow_other":     "numeric DEFAULT 1",
+		"read_only":       "numeric DEFAULT 0",
+		"vfs_cache_mode":  "text DEFAULT 'writes'",
+		"dir_cache_time":  "text DEFAULT '5m'",
+		"poll_interval":   "text DEFAULT '1m'",
+		"uid":             "integer DEFAULT 0",
+		"gid":             "integer DEFAULT 0",
+		"extra_args":      "text",
+		"status":          "text DEFAULT 'stopped'",
+		"last_error":      "text",
+		"last_mounted_at": "datetime",
+		"created_at":      "datetime",
+		"updated_at":      "datetime",
+		"deleted_at":      "datetime",
+	}
+	for name, definition := range columns {
+		exists, err := sqliteColumnExists(db, "mount_configs", name)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if err := db.Exec(fmt.Sprintf("ALTER TABLE mount_configs ADD COLUMN %s %s", name, definition)).Error; err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+type sqliteColumnInfo struct {
+	Name string `gorm:"column:name"`
+}
+
+func sqliteColumnExists(db *gorm.DB, table string, column string) (bool, error) {
+	var columns []sqliteColumnInfo
+	if err := db.Raw(fmt.Sprintf("PRAGMA table_info(%s)", table)).Scan(&columns).Error; err != nil {
+		return false, err
+	}
+	for _, info := range columns {
+		if info.Name == column {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // generateRandomPassword creates a cryptographically random alphanumeric string of the given length.
