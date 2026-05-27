@@ -250,6 +250,11 @@ func applySystemSetting(cfg *config.Config, key, value string) {
 		if parsed, err := strconv.Atoi(value); err == nil {
 			cfg.WebhookMaxRcloneLogSize = parsed
 		}
+	case "webhook_tag_dirs":
+		var tagDirs map[string]string
+		if err := json.Unmarshal([]byte(value), &tagDirs); err == nil {
+			cfg.WebhookTagDirs = tagDirs
+		}
 	case "webhook_allowed_callback_hosts":
 		cfg.AllowedCallbackHosts = splitSettingList(value)
 	case "webhook_allowed_curl_hosts":

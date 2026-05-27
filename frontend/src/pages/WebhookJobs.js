@@ -49,6 +49,7 @@ const defaultWebhookConfig = {
   job_timeout: '0s',
   http_timeout: '30s',
   max_rclone_log_bytes: 1048576,
+  tag_dirs: [],
   allowed_callback_hosts: '',
   allowed_curl_hosts: '',
 };
@@ -64,6 +65,7 @@ const configToForm = (data) => ({
   job_timeout: data?.job_timeout || defaultWebhookConfig.job_timeout,
   http_timeout: data?.http_timeout || defaultWebhookConfig.http_timeout,
   max_rclone_log_bytes: data?.max_rclone_log_bytes ?? defaultWebhookConfig.max_rclone_log_bytes,
+  tag_dirs: Array.isArray(data?.tag_dirs) ? data.tag_dirs : [],
   allowed_callback_hosts: Array.isArray(data?.allowed_callback_hosts) ? data.allowed_callback_hosts.join(', ') : '',
   allowed_curl_hosts: Array.isArray(data?.allowed_curl_hosts) ? data.allowed_curl_hosts.join(', ') : '',
 });
@@ -77,6 +79,7 @@ const WebhookJobs = ({ mode = 'all' }) => {
   const [savingConfig, setSavingConfig] = useState(false);
   const [form, setForm] = useState({
     path: '',
+    tag: '',
     callback_url: '',
     curl_url: '',
     curl_headers: '',
@@ -88,7 +91,7 @@ const WebhookJobs = ({ mode = 'all' }) => {
   const showTasks = mode === 'all' || mode === 'tasks';
   const pageTitle = showConfig && !showTasks ? 'Webhook 配置' : 'Webhook 任务';
   const pageDescription = showConfig && !showTasks
-    ? '配置 /webhook 接入参数、下载根目录、远端、白名单、并发和超时。'
+    ? '配置 /webhook 接入参数、远端、Tag 保存目录、白名单、并发和超时。'
     : '查看外部 POST /webhook 创建的一次性下载任务，跟踪下载、校验、回调和刷新详情。';
 
   const loadData = async () => {
@@ -151,7 +154,7 @@ const WebhookJobs = ({ mode = 'all' }) => {
       }
       const res = await createWebhookJob(payload);
       toast.success(`一次性任务已创建：${res.data.job_id}`);
-      setForm({ path: '', callback_url: '', curl_url: '', curl_headers: '' });
+      setForm({ path: '', tag: '', callback_url: '', curl_url: '', curl_headers: '' });
       await loadJobs();
       await loadJob(res.data.job_id);
     } catch (err) {
@@ -172,6 +175,7 @@ const WebhookJobs = ({ mode = 'all' }) => {
         retries: Number(configForm.retries),
         low_level_retries: Number(configForm.low_level_retries),
         max_rclone_log_bytes: Number(configForm.max_rclone_log_bytes),
+        tag_dirs: configForm.tag_dirs,
         allowed_callback_hosts: splitHosts(configForm.allowed_callback_hosts),
         allowed_curl_hosts: splitHosts(configForm.allowed_curl_hosts),
       };
@@ -205,6 +209,21 @@ const WebhookJobs = ({ mode = 'all' }) => {
     } catch (err) {
       toast.error('复制失败');
     }
+  };
+
+  const updateTagDir = (index, field, value) => {
+    setConfigForm((prev) => ({
+      ...prev,
+      tag_dirs: prev.tag_dirs.map((item, itemIndex) => (itemIndex === index ? { ...item, [field]: value } : item)),
+    }));
+  };
+
+  const addTagDir = () => {
+    setConfigForm((prev) => ({ ...prev, tag_dirs: [...prev.tag_dirs, { tag: '', dir: '' }] }));
+  };
+
+  const removeTagDir = (index) => {
+    setConfigForm((prev) => ({ ...prev, tag_dirs: prev.tag_dirs.filter((_, itemIndex) => itemIndex !== index) }));
   };
 
   if (loading) {
@@ -260,6 +279,7 @@ const WebhookJobs = ({ mode = 'all' }) => {
                   placeholder="/app/data/downloads"
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-sm"
                 />
+                <p className="mt-1 text-xs text-gray-500">兼容旧配置；新 Webhook 任务按下方 Tag 保存目录落盘。</p>
               </Field>
               <div className="grid grid-cols-2 gap-3">
                 <Field label="传输并发数">
@@ -339,6 +359,52 @@ const WebhookJobs = ({ mode = 'all' }) => {
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 />
               </Field>
+              <div className="space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-medium text-gray-700">Tag 保存目录</div>
+                    <p className="text-xs text-gray-500 mt-1">Webhook 传入 tag 后，会保存到对应目录下的最后一级文件夹。</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={addTagDir}
+                    className="px-3 py-1.5 text-sm rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100"
+                  >
+                    添加 Tag
+                  </button>
+                </div>
+                {configForm.tag_dirs.length === 0 ? (
+                  <div className="rounded-lg border border-dashed border-gray-200 px-3 py-4 text-sm text-gray-500">
+                    暂未配置 tag。未配置的 tag 会被拒绝。
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {configForm.tag_dirs.map((item, index) => (
+                      <div key={`${index}-${item.tag}`} className="grid grid-cols-1 md:grid-cols-[120px,1fr,auto] gap-2">
+                        <input
+                          value={item.tag}
+                          onChange={(event) => updateTagDir(index, 'tag', event.target.value)}
+                          placeholder="动画电影"
+                          className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                        />
+                        <input
+                          value={item.dir}
+                          onChange={(event) => updateTagDir(index, 'dir', event.target.value)}
+                          placeholder="/opt/adjak"
+                          className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-sm"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => removeTagDir(index)}
+                          className="px-3 py-2 text-sm rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200"
+                        >
+                          删除
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
               <Field label="Callback host 白名单（逗号分隔，留空允许全部）">
                 <input
                   value={configForm.allowed_callback_hosts}
@@ -386,6 +452,15 @@ const WebhookJobs = ({ mode = 'all' }) => {
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 />
               </Field>
+              <Field label="Tag">
+                <input
+                  value={form.tag}
+                  onChange={(event) => setForm((prev) => ({ ...prev, tag: event.target.value }))}
+                  placeholder="动画电影"
+                  required
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </Field>
               <Field label="Callback URL">
                 <input
                   value={form.callback_url}
@@ -400,7 +475,6 @@ const WebhookJobs = ({ mode = 'all' }) => {
                   value={form.curl_url}
                   onChange={(event) => setForm((prev) => ({ ...prev, curl_url: event.target.value }))}
                   placeholder="http://localhost:5244/api/fs/list?path=/&refresh=true"
-                  required
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 />
               </Field>
@@ -433,10 +507,10 @@ const WebhookJobs = ({ mode = 'all' }) => {
             </h2>
             <Info label="Endpoint" value={webhookEndpoint} mono />
             <Info label="Remote" value={config?.rclone_remote || '未配置，请在本页 Webhook 运行配置中填写'} mono />
-            <Info label="Local Base" value={config?.local_base_dir || '-'} mono />
+            <Info label="Tag Dirs" value={formatTagDirs(config?.tag_dirs)} mono />
             <Info label="Token" value={config?.api_token_enabled ? '已配置：Authorization: Bearer <token>' : '未配置，/webhook 会拒绝请求'} />
             <div className="mt-4 text-xs text-slate-400 leading-6">
-              请求体只需要包含 path。本地目录会按 “本地下载根目录 / 远端名 / 远端路径” 自动创建。callback/curl host 白名单为空时允许所有 HTTP(S) 主机。
+              请求体必须包含 path、tag、callback_url。系统按 tag 映射目录保存，例如 tag=动画电影、目录=/opt/adjak、path=/up1/电影/绝命毒师，会保存到 /opt/adjak/绝命毒师。
             </div>
           </div>
           )}
@@ -512,6 +586,7 @@ const JobCard = ({ job, active, onDetail, onRetry, onCopy }) => {
 
         <div className="space-y-2 text-sm">
           <CardLine icon={MapPin} label="远端" value={formatRemote(job)} mono />
+          <CardLine icon={FileText} label="Tag" value={job.tag || '未设置'} />
           <CardLine icon={FileText} label="本地" value={job.local_path || '等待生成'} mono muted={!job.local_path} />
           <CardLine icon={Bell} label="Callback" value={hostOf(job.callback_url)} />
           <CardLine icon={ExternalLink} label="Curl" value={hostOf(job.curl_url)} />
@@ -549,6 +624,7 @@ const JobDetail = ({ job }) => (
       <DetailItem label="Job ID" value={job.id} mono />
       <DetailItem label="任务类型" value={job.job_type || 'one_time'} />
       <DetailItem label="远端名" value={job.remote || '-'} mono />
+      <DetailItem label="Tag" value={job.tag || '-'} />
       <DetailItem label="远端路径" value={job.remote_path} mono />
       <DetailItem label="本地路径" value={job.local_path || '-'} mono />
       <DetailItem label="创建时间" value={formatTime(job.created_at)} />
@@ -583,7 +659,7 @@ const Field = ({ label, children }) => (
 const Info = ({ label, value, mono }) => (
   <div className="py-2 border-b border-slate-800 last:border-b-0">
     <div className="text-xs uppercase tracking-wide text-slate-500">{label}</div>
-    <div className={`mt-1 text-sm break-all ${mono ? 'font-mono' : ''}`}>{value}</div>
+    <div className={`mt-1 text-sm break-all whitespace-pre-wrap ${mono ? 'font-mono' : ''}`}>{value}</div>
   </div>
 );
 
@@ -664,6 +740,11 @@ const hostOf = (value) => {
 };
 
 const formatRemote = (job) => (job.remote ? `${job.remote}:${job.remote_path || ''}` : job.remote_path);
+
+const formatTagDirs = (items) => {
+  if (!Array.isArray(items) || items.length === 0) return '未配置';
+  return items.map((item) => `${item.tag || '-'} => ${item.dir || '-'}`).join('\n');
+};
 
 const formatTime = (value) => {
   if (!value) return '-';

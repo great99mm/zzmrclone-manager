@@ -119,6 +119,7 @@ func InitDB(dataDir string) error {
 func ensureWebhookJobColumns(db *gorm.DB) error {
 	columns := map[string]string{
 		"remote_name": "text DEFAULT ''",
+		"tag":         "text DEFAULT ''",
 	}
 	for name, definition := range columns {
 		exists, err := sqliteColumnExists(db, "webhook_jobs", name)

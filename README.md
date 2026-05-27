@@ -126,9 +126,10 @@ Docker 部署默认无需额外 Webhook 环境变量，镜像默认使用上海�
 启动后在 WebUI 配置：
 
 1. **系统设置**：配置 API/Webhook 共用 Token。
-2. **Webhook 配置**：配置 rclone 远端名、本地下载根目录、callback/curl host 白名单、并发和超时。
+2. **Webhook 配置**：配置 rclone 远端名、Tag 保存目录、callback/curl host 白名单、并发和超时。
 
 远端名在 WebUI 中配置，只写远端名，不带冒号；例如 `webdav`，服务会拼成 `webdav:/remote/folder/a`。
+Tag 保存目录在 WebUI 中配置，例如 `动画电影 => /opt/adjak`。
 
 ### 调用示例
 
@@ -139,16 +140,14 @@ curl -X POST http://ip:6050/webhook \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer <api-token>' \
   -d '{
-    "path": "/remote/folder/a",
+    "path": "/up1/电影/绝命毒师",
+    "tag": "动画电影",
     "callback_url": "https://sender.example.com/download-finished",
-    "curl_url": "http://localhost:5244/api/fs/list?path=/&refresh=true",
-    "curl_headers": {
-      "Authorization": "openlist-xxx"
-    }
+    "curl_url": "http://localhost:5244/api/fs/list?path=/&refresh=true"
   }'
 ```
 
-`curl_headers` 可选，用于需要额外请求头的刷新接口，例如 OpenList：
+`curl_url` 和 `curl_headers` 可选。`curl_headers` 用于需要额外请求头的刷新接口，例如 OpenList：
 
 ```bash
 curl -X GET "http://localhost:5244/api/fs/list?path=/&refresh=true" \
@@ -161,7 +160,9 @@ curl -X GET "http://localhost:5244/api/fs/list?path=/&refresh=true" \
 {"job_id":"job_xxx","job_type":"one_time","status":"pending"}
 ```
 
-这是一次性任务。任务会写入 SQLite，并在 WebUI 左侧 **Webhook 任务** 页面以任务卡片展示；点击卡片 **详情** 可查看远端名、远端路径、本地路径、callback/curl URL、curl headers、错误和 rclone 日志。
+这是一次性任务。任务会写入 SQLite，并在 WebUI 左侧 **Webhook 任务** 页面以任务卡片展示；点击卡片 **详情** 可查看 Tag、远端名、远端路径、本地路径、callback/curl URL、curl headers、错误和 rclone 日志。
+
+保存路径规则：按 `tag` 找 WebUI 配置的保存目录，再拼接远端路径最后一级名称。例如 `tag=动画电影`、保存目录 `/opt/adjak`、`path=/up1/电影/绝命毒师`，最终保存到 `/opt/adjak/绝命毒师`。
 
 `/webhook` 必须使用系统里的 API Token。推荐使用 `Authorization: Bearer <api-token>`；同时兼容 `X-API-Token`、`X-Webhook-Token` 或 `?token=`。
 
@@ -180,7 +181,8 @@ curl -X GET "http://localhost:5244/api/fs/list?path=/&refresh=true" \
 
 - rclone 使用 `exec.CommandContext`，不走 shell。
 - path 拒绝空值、`..`、反斜杠、NUL 字节。
-- 本地路径固定为 `本地下载根目录/远端名/远端路径`，并拒绝已存在 symlink 路径组件。
+- tag 必填且必须已在 WebUI 中配置保存目录。
+- 本地路径固定为 `tag保存目录/path最后一级名称`，并拒绝已存在 symlink 路径组件。
 - `callback_url` / `curl_url` 建议配置域名白名单。
 
 ---

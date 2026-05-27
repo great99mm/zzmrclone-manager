@@ -26,6 +26,7 @@ type Config struct {
 	WebhookJobTimeout       string
 	WebhookHTTPTimeout      string
 	WebhookMaxRcloneLogSize int
+	WebhookTagDirs          map[string]string
 	AllowedCallbackHosts    []string
 	AllowedCurlHosts        []string
 }
@@ -52,6 +53,7 @@ func Load() *Config {
 		WebhookJobTimeout:       getEnv("RCLONE_MANAGER_WEBHOOK_JOB_TIMEOUT", "0s"),
 		WebhookHTTPTimeout:      getEnv("RCLONE_MANAGER_WEBHOOK_HTTP_TIMEOUT", "30s"),
 		WebhookMaxRcloneLogSize: getEnvInt("RCLONE_MANAGER_WEBHOOK_MAX_RCLONE_LOG_BYTES", 1048576),
+		WebhookTagDirs:          map[string]string{},
 		AllowedCallbackHosts:    getEnvList("RCLONE_MANAGER_WEBHOOK_ALLOWED_CALLBACK_HOSTS"),
 		AllowedCurlHosts:        getEnvList("RCLONE_MANAGER_WEBHOOK_ALLOWED_CURL_HOSTS"),
 	}

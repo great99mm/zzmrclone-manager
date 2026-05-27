@@ -40,8 +40,9 @@ const (
 
 type CreateRequest struct {
 	Path        string            `json:"path" binding:"required"`
+	Tag         string            `json:"tag" binding:"required"`
 	CallbackURL string            `json:"callback_url" binding:"required"`
-	CurlURL     string            `json:"curl_url" binding:"required"`
+	CurlURL     string            `json:"curl_url"`
 	CurlHeaders map[string]string `json:"curl_headers"`
 }
 
@@ -126,14 +127,24 @@ func (s *Service) CreateJob(ctx context.Context, req CreateRequest) (*models.Web
 	if strings.TrimSpace(req.Path) == "" {
 		return nil, errors.New("path is required")
 	}
-	if _, _, err := cleanRemotePath(req.Path); err != nil {
+	_, relPath, err := cleanRemotePath(req.Path)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := remotePathLeaf(relPath); err != nil {
+		return nil, err
+	}
+	tag, _, err := s.resolveTagDir(req.Tag)
+	if err != nil {
 		return nil, err
 	}
 	if _, err := validateOutboundURL(req.CallbackURL, s.cfg.AllowedCallbackHosts); err != nil {
 		return nil, fmt.Errorf("invalid callback_url: %w", err)
 	}
-	if _, err := validateOutboundURL(req.CurlURL, s.cfg.AllowedCurlHosts); err != nil {
-		return nil, fmt.Errorf("invalid curl_url: %w", err)
+	if strings.TrimSpace(req.CurlURL) != "" {
+		if _, err := validateOutboundURL(req.CurlURL, s.cfg.AllowedCurlHosts); err != nil {
+			return nil, fmt.Errorf("invalid curl_url: %w", err)
+		}
 	}
 	curlHeaders, err := cleanHeaders(req.CurlHeaders)
 	if err != nil {
@@ -152,6 +163,7 @@ func (s *Service) CreateJob(ctx context.Context, req CreateRequest) (*models.Web
 		ID:          jobID,
 		JobType:     "one_time",
 		RemoteName:  remoteName,
+		Tag:         tag,
 		RemotePath:  req.Path,
 		CallbackURL: req.CallbackURL,
 		CurlURL:     req.CurlURL,
@@ -277,16 +289,27 @@ func (s *Service) process(ctx context.Context, jobID string) {
 		s.fail(job.ID, "validate path", err, job.RcloneLog)
 		return
 	}
-	localPath, err := buildLocalPath(s.cfg.WebhookLocalBaseDir, path.Join(remoteName, relPath))
+	tag, tagDir, err := s.resolveTagDir(job.Tag)
+	if err != nil {
+		s.fail(job.ID, "resolve tag", err, job.RcloneLog)
+		return
+	}
+	leafName, err := remotePathLeaf(relPath)
+	if err != nil {
+		s.fail(job.ID, "validate path", err, job.RcloneLog)
+		return
+	}
+	localPath, err := buildLocalPath(tagDir, leafName)
 	if err != nil {
 		s.fail(job.ID, "build local path", err, job.RcloneLog)
 		return
 	}
 	remoteSpec := remoteSpec(remoteName, cleanPath)
 	job.RemoteName = remoteName
+	job.Tag = tag
 	job.RemotePath = cleanPath
 	job.LocalPath = localPath
-	s.db.Model(job).Updates(map[string]interface{}{"remote_name": remoteName, "remote_path": cleanPath, "local_path": localPath})
+	s.db.Model(job).Updates(map[string]interface{}{"remote_name": remoteName, "tag": tag, "remote_path": cleanPath, "local_path": localPath})
 
 	rcloneLog := job.RcloneLog
 	if err := s.setStatus(job.ID, StatusCopying); err != nil {
@@ -328,20 +351,22 @@ func (s *Service) process(ctx context.Context, jobID string) {
 		return
 	}
 
-	if err := s.setStatus(job.ID, StatusCallingCurlURL); err != nil {
-		return
-	}
-	curlHeaders, err := decodeHeaders(job.CurlHeaders)
-	if err != nil {
-		s.fail(job.ID, "curl_url headers", err, rcloneLog)
-		return
-	}
-	if err := s.callCurlURL(jobCtx, job.CurlURL, curlHeaders); err != nil {
-		if ctx.Err() != nil {
+	if strings.TrimSpace(job.CurlURL) != "" {
+		if err := s.setStatus(job.ID, StatusCallingCurlURL); err != nil {
 			return
 		}
-		s.fail(job.ID, "curl_url", err, rcloneLog)
-		return
+		curlHeaders, err := decodeHeaders(job.CurlHeaders)
+		if err != nil {
+			s.fail(job.ID, "curl_url headers", err, rcloneLog)
+			return
+		}
+		if err := s.callCurlURL(jobCtx, job.CurlURL, curlHeaders); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			s.fail(job.ID, "curl_url", err, rcloneLog)
+			return
+		}
 	}
 
 	now := time.Now()
@@ -432,6 +457,7 @@ func (s *Service) postCallback(ctx context.Context, job *models.WebhookJob) erro
 		"job_id":      job.ID,
 		"status":      StatusSuccess,
 		"remote":      job.RemoteName,
+		"tag":         job.Tag,
 		"remote_path": job.RemotePath,
 		"local_path":  job.LocalPath,
 	})
@@ -552,6 +578,14 @@ func cleanRemotePath(raw string) (cleaned string, relative string, err error) {
 	return cleaned, relative, nil
 }
 
+func remotePathLeaf(relative string) (string, error) {
+	leafName := path.Base(relative)
+	if leafName == "" || leafName == "." || leafName == "/" {
+		return "", errors.New("path must include a final file or directory name")
+	}
+	return leafName, nil
+}
+
 func cleanRemoteName(raw string) (string, error) {
 	value := strings.TrimSuffix(strings.TrimSpace(raw), ":")
 	if value == "" {
@@ -563,13 +597,33 @@ func cleanRemoteName(raw string) (string, error) {
 	return value, nil
 }
 
+func (s *Service) resolveTagDir(raw string) (string, string, error) {
+	tag := strings.TrimSpace(raw)
+	if tag == "" {
+		return "", "", errors.New("tag is required")
+	}
+	dir, ok := s.cfg.WebhookTagDirs[tag]
+	if !ok || strings.TrimSpace(dir) == "" {
+		return "", "", fmt.Errorf("tag %q is not configured", tag)
+	}
+	dir = strings.TrimSpace(dir)
+	if strings.ContainsAny(dir, "\x00\r\n") {
+		return "", "", fmt.Errorf("tag %q directory contains invalid characters", tag)
+	}
+	if !filepath.IsAbs(dir) {
+		return "", "", fmt.Errorf("tag %q directory must be absolute", tag)
+	}
+	dir, err := ensureDirectoryNoSymlink(dir)
+	if err != nil {
+		return "", "", err
+	}
+	return tag, dir, nil
+}
+
 func buildLocalPath(baseDir, remoteRelativePath string) (string, error) {
-	baseAbs, err := filepath.Abs(baseDir)
+	baseAbs, err := ensureDirectoryNoSymlink(baseDir)
 	if err != nil {
 		return "", err
-	}
-	if evaluated, err := filepath.EvalSymlinks(baseAbs); err == nil {
-		baseAbs = evaluated
 	}
 	targetAbs, err := filepath.Abs(filepath.Join(baseAbs, filepath.FromSlash(remoteRelativePath)))
 	if err != nil {
@@ -582,19 +636,36 @@ func buildLocalPath(baseDir, remoteRelativePath string) (string, error) {
 	if rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 		return "", errors.New("local path escapes local base dir")
 	}
-	if err := rejectExistingSymlinkPath(baseAbs, targetAbs); err != nil {
+	if err := rejectExistingSymlinkComponents(targetAbs); err != nil {
 		return "", err
 	}
 	return targetAbs, nil
 }
 
-func rejectExistingSymlinkPath(baseAbs, targetAbs string) error {
-	rel, err := filepath.Rel(baseAbs, targetAbs)
-	if err != nil || rel == "." {
-		return err
+func ensureDirectoryNoSymlink(dir string) (string, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
 	}
-	current := baseAbs
-	for _, part := range strings.Split(rel, string(os.PathSeparator)) {
+	if err := rejectExistingSymlinkComponents(abs); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(abs, 0o755); err != nil {
+		return "", err
+	}
+	if err := rejectExistingSymlinkComponents(abs); err != nil {
+		return "", err
+	}
+	return abs, nil
+}
+
+func rejectExistingSymlinkComponents(absPath string) error {
+	absPath = filepath.Clean(absPath)
+	if !filepath.IsAbs(absPath) {
+		return errors.New("path must be absolute")
+	}
+	current := string(os.PathSeparator)
+	for _, part := range strings.Split(strings.TrimPrefix(absPath, string(os.PathSeparator)), string(os.PathSeparator)) {
 		if part == "" || part == "." {
 			continue
 		}

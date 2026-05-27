@@ -1,10 +1,13 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -26,8 +29,14 @@ type webhookConfigRequest struct {
 	JobTimeout           string   `json:"job_timeout"`
 	HTTPTimeout          string   `json:"http_timeout"`
 	MaxRcloneLogBytes    int      `json:"max_rclone_log_bytes"`
+	TagDirs              []tagDir `json:"tag_dirs"`
 	AllowedCallbackHosts []string `json:"allowed_callback_hosts"`
 	AllowedCurlHosts     []string `json:"allowed_curl_hosts"`
+}
+
+type tagDir struct {
+	Tag string `json:"tag"`
+	Dir string `json:"dir"`
 }
 
 func webhookAuthMiddleware(c *gin.Context) {
@@ -129,6 +138,7 @@ func getWebhookConfig(c *gin.Context) {
 		"job_timeout":            cfgGlobal.WebhookJobTimeout,
 		"http_timeout":           cfgGlobal.WebhookHTTPTimeout,
 		"max_rclone_log_bytes":   cfgGlobal.WebhookMaxRcloneLogSize,
+		"tag_dirs":               tagDirsToList(cfgGlobal.WebhookTagDirs),
 		"allowed_callback_hosts": cfgGlobal.AllowedCallbackHosts,
 		"allowed_curl_hosts":     cfgGlobal.AllowedCurlHosts,
 		"token_required":         webhookJobs.AuthEnabled(),
@@ -186,12 +196,21 @@ func applyWebhookConfigRequest(req *webhookConfigRequest) error {
 	cfgGlobal.WebhookJobTimeout = defaultString(req.JobTimeout, "0s")
 	cfgGlobal.WebhookHTTPTimeout = defaultString(req.HTTPTimeout, "30s")
 	cfgGlobal.WebhookMaxRcloneLogSize = clampInt(req.MaxRcloneLogBytes, 1024, 10485760, 1048576)
+	tagDirs, err := cleanTagDirs(req.TagDirs)
+	if err != nil {
+		return err
+	}
+	cfgGlobal.WebhookTagDirs = tagDirs
 	cfgGlobal.AllowedCallbackHosts = cleanHostList(req.AllowedCallbackHosts)
 	cfgGlobal.AllowedCurlHosts = cleanHostList(req.AllowedCurlHosts)
 	return nil
 }
 
 func saveWebhookConfigRequest(req *webhookConfigRequest) error {
+	tagDirsJSON, err := json.Marshal(cfgGlobal.WebhookTagDirs)
+	if err != nil {
+		return err
+	}
 	settings := map[string]string{
 		"webhook_local_base_dir":         cfgGlobal.WebhookLocalBaseDir,
 		"webhook_rclone_remote":          cfgGlobal.WebhookRcloneRemote,
@@ -203,6 +222,7 @@ func saveWebhookConfigRequest(req *webhookConfigRequest) error {
 		"webhook_job_timeout":            cfgGlobal.WebhookJobTimeout,
 		"webhook_http_timeout":           cfgGlobal.WebhookHTTPTimeout,
 		"webhook_max_rclone_log_bytes":   strconv.Itoa(cfgGlobal.WebhookMaxRcloneLogSize),
+		"webhook_tag_dirs":               string(tagDirsJSON),
 		"webhook_allowed_callback_hosts": strings.Join(cfgGlobal.AllowedCallbackHosts, ","),
 		"webhook_allowed_curl_hosts":     strings.Join(cfgGlobal.AllowedCurlHosts, ","),
 	}
@@ -217,6 +237,76 @@ func saveWebhookConfigRequest(req *webhookConfigRequest) error {
 		}
 	}
 	return nil
+}
+
+func cleanTagDirs(values []tagDir) (map[string]string, error) {
+	items := make(map[string]string, len(values))
+	for _, item := range values {
+		tag := strings.TrimSpace(item.Tag)
+		dir := strings.TrimSpace(item.Dir)
+		if tag == "" && dir == "" {
+			continue
+		}
+		if tag == "" || dir == "" {
+			return nil, errors.New("tag and dir are required for each tag mapping")
+		}
+		if strings.ContainsAny(tag, "\x00\r\n") {
+			return nil, fmt.Errorf("tag %q contains invalid characters", tag)
+		}
+		if strings.ContainsAny(dir, "\x00\r\n") {
+			return nil, fmt.Errorf("tag %q dir contains invalid characters", tag)
+		}
+		if !filepath.IsAbs(dir) {
+			return nil, fmt.Errorf("tag %q dir must be absolute", tag)
+		}
+		dir = filepath.Clean(dir)
+		if err := rejectExistingSymlinkComponents(dir); err != nil {
+			return nil, err
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, err
+		}
+		if err := rejectExistingSymlinkComponents(dir); err != nil {
+			return nil, err
+		}
+		items[tag] = dir
+	}
+	return items, nil
+}
+
+func rejectExistingSymlinkComponents(absPath string) error {
+	if !filepath.IsAbs(absPath) {
+		return errors.New("path must be absolute")
+	}
+	current := string(os.PathSeparator)
+	for _, part := range strings.Split(strings.TrimPrefix(absPath, string(os.PathSeparator)), string(os.PathSeparator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("local path component %q is a symlink", current)
+		}
+	}
+	return nil
+}
+
+func tagDirsToList(values map[string]string) []tagDir {
+	items := make([]tagDir, 0, len(values))
+	for tag, dir := range values {
+		items = append(items, tagDir{Tag: tag, Dir: dir})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].Tag < items[j].Tag
+	})
+	return items
 }
 
 func cleanHostList(values []string) []string {
