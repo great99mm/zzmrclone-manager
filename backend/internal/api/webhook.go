@@ -17,6 +17,7 @@ import (
 
 type webhookConfigRequest struct {
 	LocalBaseDir         string   `json:"local_base_dir"`
+	RcloneRemote         string   `json:"rclone_remote"`
 	Transfers            int      `json:"transfers"`
 	Checkers             int      `json:"checkers"`
 	Retries              int      `json:"retries"`
@@ -117,6 +118,7 @@ func getWebhookConfig(c *gin.Context) {
 		"local_base_dir":         cfgGlobal.WebhookLocalBaseDir,
 		"rclone_path":            cfgGlobal.WebhookRclonePath,
 		"rclone_config":          cfgGlobal.RcloneConfig,
+		"rclone_remote":          cfgGlobal.WebhookRcloneRemote,
 		"transfers":              cfgGlobal.WebhookTransfers,
 		"checkers":               cfgGlobal.WebhookCheckers,
 		"retries":                cfgGlobal.WebhookRetries,
@@ -175,6 +177,7 @@ func applyWebhookConfigRequest(req *webhookConfigRequest) error {
 	}
 
 	cfgGlobal.WebhookLocalBaseDir = localBaseDir
+	cfgGlobal.WebhookRcloneRemote = strings.TrimSuffix(strings.TrimSpace(req.RcloneRemote), ":")
 	cfgGlobal.WebhookTransfers = clampInt(req.Transfers, 1, 64, 4)
 	cfgGlobal.WebhookCheckers = clampInt(req.Checkers, 1, 128, 8)
 	cfgGlobal.WebhookRetries = clampInt(req.Retries, 0, 20, 3)
@@ -191,6 +194,7 @@ func applyWebhookConfigRequest(req *webhookConfigRequest) error {
 func saveWebhookConfigRequest(req *webhookConfigRequest) error {
 	settings := map[string]string{
 		"webhook_local_base_dir":         cfgGlobal.WebhookLocalBaseDir,
+		"webhook_rclone_remote":          cfgGlobal.WebhookRcloneRemote,
 		"webhook_transfers":              strconv.Itoa(cfgGlobal.WebhookTransfers),
 		"webhook_checkers":               strconv.Itoa(cfgGlobal.WebhookCheckers),
 		"webhook_retries":                strconv.Itoa(cfgGlobal.WebhookRetries),

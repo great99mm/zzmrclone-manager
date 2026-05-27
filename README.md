@@ -125,9 +125,9 @@ Docker 部署默认无需额外 Webhook 环境变量，镜像默认使用上海�
 启动后在 WebUI 配置：
 
 1. **系统设置**：配置 API/Webhook 共用 Token。
-2. **Webhook 下载**：配置本地下载根目录、callback/curl host 白名单、并发和超时。
+2. **Webhook 下载**：配置 rclone 远端名、本地下载根目录、callback/curl host 白名单、并发和超时。
 
-远端名由每次 Webhook 请求传入，支持多个 rclone 远端。远端名只写远端名，不带冒号；例如 `webdav`，服务会拼成 `webdav:/remote/folder/a`。
+远端名在 WebUI 中配置，只写远端名，不带冒号；例如 `webdav`，服务会拼成 `webdav:/remote/folder/a`。
 
 ### 调用示例
 
@@ -138,7 +138,6 @@ curl -X POST http://ip:6050/webhook \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer <api-token>' \
   -d '{
-    "remote": "webdav",
     "path": "/remote/folder/a",
     "callback_url": "https://sender.example.com/download-finished",
     "curl_url": "http://localhost:5244/api/fs/list?path=/&refresh=true",
@@ -179,7 +178,6 @@ curl -X GET "http://localhost:5244/api/fs/list?path=/&refresh=true" \
 安全规则：
 
 - rclone 使用 `exec.CommandContext`，不走 shell。
-- remote 拒绝空值、`..`、斜杠、反斜杠、NUL 字节和换行。
 - path 拒绝空值、`..`、反斜杠、NUL 字节。
 - 本地路径固定为 `本地下载根目录/远端名/远端路径`，并拒绝已存在 symlink 路径组件。
 - `callback_url` / `curl_url` 建议配置域名白名单。

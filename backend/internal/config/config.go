@@ -15,6 +15,7 @@ type Config struct {
 	MountRoot               string
 	WebhookLocalBaseDir     string
 	WebhookRclonePath       string
+	WebhookRcloneRemote     string
 	WebhookTransfers        int
 	WebhookCheckers         int
 	WebhookRetries          int
@@ -40,6 +41,7 @@ func Load() *Config {
 		MountRoot:               getEnv("RCLONE_MANAGER_MOUNT_ROOT", ""),
 		WebhookLocalBaseDir:     getEnv("RCLONE_MANAGER_WEBHOOK_LOCAL_BASE_DIR", dataDir+"/downloads"),
 		WebhookRclonePath:       getEnv("RCLONE_MANAGER_WEBHOOK_RCLONE_PATH", "rclone"),
+		WebhookRcloneRemote:     getEnv("RCLONE_MANAGER_WEBHOOK_RCLONE_REMOTE", ""),
 		WebhookTransfers:        getEnvInt("RCLONE_MANAGER_WEBHOOK_TRANSFERS", 4),
 		WebhookCheckers:         getEnvInt("RCLONE_MANAGER_WEBHOOK_CHECKERS", 8),
 		WebhookRetries:          getEnvInt("RCLONE_MANAGER_WEBHOOK_RETRIES", 3),

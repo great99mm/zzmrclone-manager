@@ -40,6 +40,7 @@ const statusLabels = {
 
 const defaultWebhookConfig = {
   local_base_dir: '/app/data/downloads',
+  rclone_remote: '',
   transfers: 4,
   checkers: 8,
   retries: 3,
@@ -54,6 +55,7 @@ const defaultWebhookConfig = {
 
 const configToForm = (data) => ({
   local_base_dir: data?.local_base_dir || defaultWebhookConfig.local_base_dir,
+  rclone_remote: data?.rclone_remote || '',
   transfers: data?.transfers ?? defaultWebhookConfig.transfers,
   checkers: data?.checkers ?? defaultWebhookConfig.checkers,
   retries: data?.retries ?? defaultWebhookConfig.retries,
@@ -74,7 +76,6 @@ const WebhookJobs = () => {
   const [submitting, setSubmitting] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
   const [form, setForm] = useState({
-    remote: '',
     path: '',
     callback_url: '',
     curl_url: '',
@@ -144,7 +145,7 @@ const WebhookJobs = () => {
       }
       const res = await createWebhookJob(payload);
       toast.success(`一次性任务已创建：${res.data.job_id}`);
-      setForm({ remote: '', path: '', callback_url: '', curl_url: '', curl_headers: '' });
+      setForm({ path: '', callback_url: '', curl_url: '', curl_headers: '' });
       await loadJobs();
       await loadJob(res.data.job_id);
     } catch (err) {
@@ -236,6 +237,14 @@ const WebhookJobs = () => {
               Webhook 运行配置
             </h2>
             <form onSubmit={saveWebhookConfig} className="space-y-4">
+              <Field label="Rclone 远端名">
+                <input
+                  value={configForm.rclone_remote}
+                  onChange={(event) => setConfigForm((prev) => ({ ...prev, rclone_remote: event.target.value }))}
+                  placeholder="webdav"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </Field>
               <Field label="本地下载根目录">
                 <input
                   value={configForm.local_base_dir}
@@ -339,7 +348,7 @@ const WebhookJobs = () => {
                 />
               </Field>
               <div className="rounded-lg bg-blue-50 border border-blue-100 p-3 text-sm text-blue-800">
-                Webhook 必须携带系统设置里的 API Token。远端名由每次 Webhook 请求传入，支持多个 rclone 远端。
+                Webhook 必须携带系统设置里的 API Token。远端名在这里配置，外部请求只需要传远端路径。
               </div>
               <button
                 type="submit"
@@ -358,15 +367,6 @@ const WebhookJobs = () => {
               手动创建一次性任务
             </h2>
             <form onSubmit={submitJob} className="space-y-4">
-              <Field label="远端名">
-                <input
-                  value={form.remote}
-                  onChange={(event) => setForm((prev) => ({ ...prev, remote: event.target.value }))}
-                  placeholder="webdav"
-                  required
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-              </Field>
               <Field label="远端路径">
                 <input
                   value={form.path}
@@ -420,10 +420,11 @@ const WebhookJobs = () => {
               接入信息
             </h2>
             <Info label="Endpoint" value={webhookEndpoint} mono />
+            <Info label="Remote" value={config?.rclone_remote || '未配置，请在本页 Webhook 运行配置中填写'} mono />
             <Info label="Local Base" value={config?.local_base_dir || '-'} mono />
             <Info label="Token" value={config?.api_token_enabled ? '已配置：Authorization: Bearer <token>' : '未配置，/webhook 会拒绝请求'} />
             <div className="mt-4 text-xs text-slate-400 leading-6">
-              请求体必须包含 remote 和 path。本地目录会按 “本地下载根目录 / 远端名 / 远端路径” 自动创建。callback/curl host 白名单为空时允许所有 HTTP(S) 主机。
+              请求体只需要包含 path。本地目录会按 “本地下载根目录 / 远端名 / 远端路径” 自动创建。callback/curl host 白名单为空时允许所有 HTTP(S) 主机。
             </div>
           </div>
         </div>

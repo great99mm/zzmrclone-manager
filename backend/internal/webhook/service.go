@@ -39,7 +39,6 @@ const (
 )
 
 type CreateRequest struct {
-	Remote      string            `json:"remote" binding:"required"`
 	Path        string            `json:"path" binding:"required"`
 	CallbackURL string            `json:"callback_url" binding:"required"`
 	CurlURL     string            `json:"curl_url" binding:"required"`
@@ -120,7 +119,7 @@ func (s *Service) VerifyToken(token string) bool {
 }
 
 func (s *Service) CreateJob(ctx context.Context, req CreateRequest) (*models.WebhookJob, error) {
-	remoteName, err := cleanRemoteName(req.Remote)
+	remoteName, err := cleanRemoteName(s.cfg.WebhookRcloneRemote)
 	if err != nil {
 		return nil, err
 	}
