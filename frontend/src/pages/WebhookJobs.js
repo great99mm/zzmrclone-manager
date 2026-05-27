@@ -24,6 +24,7 @@ const WebhookJobs = () => {
     path: '',
     callback_url: '',
     curl_url: '',
+    curl_headers: '',
   });
 
   const webhookEndpoint = useMemo(() => `${window.location.origin}/webhook`, []);
@@ -69,9 +70,15 @@ const WebhookJobs = () => {
     event.preventDefault();
     setSubmitting(true);
     try {
-      const res = await createWebhookJob(form);
+      const payload = { ...form };
+      if (form.curl_headers.trim()) {
+        payload.curl_headers = JSON.parse(form.curl_headers);
+      } else {
+        delete payload.curl_headers;
+      }
+      const res = await createWebhookJob(payload);
       toast.success(`任务已创建：${res.data.job_id}`);
-      setForm({ path: '', callback_url: '', curl_url: '' });
+      setForm({ path: '', callback_url: '', curl_url: '', curl_headers: '' });
       await loadJobs();
       await loadJob(res.data.job_id);
     } catch (err) {
@@ -150,9 +157,18 @@ const WebhookJobs = () => {
                 <input
                   value={form.curl_url}
                   onChange={(event) => setForm((prev) => ({ ...prev, curl_url: event.target.value }))}
-                  placeholder="https://api.example.com/reload?path=/remote/folder/a"
+                  placeholder="http://localhost:5244/api/fs/list?path=/&refresh=true"
                   required
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </Field>
+              <Field label="Curl Headers（JSON，可选）">
+                <textarea
+                  value={form.curl_headers}
+                  onChange={(event) => setForm((prev) => ({ ...prev, curl_headers: event.target.value }))}
+                  placeholder={'{\n  "Authorization": "openlist-xxx"\n}'}
+                  rows={4}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-xs"
                 />
               </Field>
               <button

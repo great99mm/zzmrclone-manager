@@ -125,6 +125,7 @@ type WebhookJob struct {
 	LocalPath   string     `json:"local_path"`
 	CallbackURL string     `json:"callback_url" gorm:"not null"`
 	CurlURL     string     `json:"curl_url" gorm:"not null"`
+	CurlHeaders string     `json:"curl_headers" gorm:"type:text"`
 	Status      string     `json:"status" gorm:"index;not null"`
 	Error       string     `json:"error" gorm:"type:text"`
 	RcloneLog   string     `json:"rclone_log" gorm:"type:text"`

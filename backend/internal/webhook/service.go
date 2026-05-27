@@ -39,9 +39,10 @@ const (
 )
 
 type CreateRequest struct {
-	Path        string `json:"path" binding:"required"`
-	CallbackURL string `json:"callback_url" binding:"required"`
-	CurlURL     string `json:"curl_url" binding:"required"`
+	Path        string            `json:"path" binding:"required"`
+	CallbackURL string            `json:"callback_url" binding:"required"`
+	CurlURL     string            `json:"curl_url" binding:"required"`
+	CurlHeaders map[string]string `json:"curl_headers"`
 }
 
 type Service struct {
@@ -136,6 +137,14 @@ func (s *Service) CreateJob(ctx context.Context, req CreateRequest) (*models.Web
 	if _, err := validateOutboundURL(req.CurlURL, s.cfg.AllowedCurlHosts); err != nil {
 		return nil, fmt.Errorf("invalid curl_url: %w", err)
 	}
+	curlHeaders, err := cleanHeaders(req.CurlHeaders)
+	if err != nil {
+		return nil, err
+	}
+	curlHeadersJSON, err := encodeHeaders(curlHeaders)
+	if err != nil {
+		return nil, err
+	}
 
 	jobID, err := newJobID()
 	if err != nil {
@@ -146,6 +155,7 @@ func (s *Service) CreateJob(ctx context.Context, req CreateRequest) (*models.Web
 		RemotePath:  req.Path,
 		CallbackURL: req.CallbackURL,
 		CurlURL:     req.CurlURL,
+		CurlHeaders: curlHeadersJSON,
 		Status:      StatusPending,
 	}
 	if err := s.db.WithContext(ctx).Create(job).Error; err != nil {
@@ -314,7 +324,12 @@ func (s *Service) process(ctx context.Context, jobID string) {
 	if err := s.setStatus(job.ID, StatusCallingCurlURL); err != nil {
 		return
 	}
-	if err := s.callCurlURL(jobCtx, job.CurlURL); err != nil {
+	curlHeaders, err := decodeHeaders(job.CurlHeaders)
+	if err != nil {
+		s.fail(job.ID, "curl_url headers", err, rcloneLog)
+		return
+	}
+	if err := s.callCurlURL(jobCtx, job.CurlURL, curlHeaders); err != nil {
 		if ctx.Err() != nil {
 			return
 		}
@@ -428,7 +443,7 @@ func (s *Service) postCallback(ctx context.Context, job *models.WebhookJob) erro
 	return s.do2xx(req, "callback")
 }
 
-func (s *Service) callCurlURL(ctx context.Context, raw string) error {
+func (s *Service) callCurlURL(ctx context.Context, raw string, headers map[string]string) error {
 	curlURL, err := validateOutboundURL(raw, s.cfg.AllowedCurlHosts)
 	if err != nil {
 		return err
@@ -438,7 +453,51 @@ func (s *Service) callCurlURL(ctx context.Context, raw string) error {
 		return err
 	}
 	req.Header.Set("User-Agent", "zzmrclone-manager/1.0")
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
 	return s.do2xx(req, "curl_url")
+}
+
+func cleanHeaders(headers map[string]string) (map[string]string, error) {
+	if len(headers) == 0 {
+		return nil, nil
+	}
+	cleaned := make(map[string]string, len(headers))
+	for key, value := range headers {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" {
+			return nil, errors.New("curl_headers contains empty header name")
+		}
+		if strings.ContainsAny(key, "\r\n:") || strings.ContainsAny(value, "\r\n") {
+			return nil, fmt.Errorf("curl_headers contains invalid header %q", key)
+		}
+		cleaned[key] = value
+	}
+	return cleaned, nil
+}
+
+func encodeHeaders(headers map[string]string) (string, error) {
+	if len(headers) == 0 {
+		return "", nil
+	}
+	data, err := json.Marshal(headers)
+	if err != nil {
+		return "", fmt.Errorf("encode curl_headers: %w", err)
+	}
+	return string(data), nil
+}
+
+func decodeHeaders(encoded string) (map[string]string, error) {
+	if strings.TrimSpace(encoded) == "" {
+		return nil, nil
+	}
+	var headers map[string]string
+	if err := json.Unmarshal([]byte(encoded), &headers); err != nil {
+		return nil, fmt.Errorf("decode curl_headers: %w", err)
+	}
+	return cleanHeaders(headers)
 }
 
 func (s *Service) do2xx(req *http.Request, name string) error {

@@ -126,8 +126,18 @@ curl -X POST http://ip:7071/webhook \
   -d '{
     "path": "/remote/folder/a",
     "callback_url": "https://sender.example.com/download-finished",
-    "curl_url": "https://api.example.com/reload?path=/remote/folder/a"
+    "curl_url": "http://localhost:5244/api/fs/list?path=/&refresh=true",
+    "curl_headers": {
+      "Authorization": "openlist-xxx"
+    }
   }'
+```
+
+`curl_headers` 可选，用于需要额外请求头的刷新接口，例如 OpenList：
+
+```bash
+curl -X GET "http://localhost:5244/api/fs/list?path=/&refresh=true" \
+  -H "Authorization: openlist-xxx"
 ```
 
 返回 `202 Accepted`：
