@@ -256,7 +256,7 @@ const WebhookJobs = () => {
                 />
               </Field>
               <div className="grid grid-cols-2 gap-3">
-                <Field label="Transfers">
+                <Field label="传输并发数">
                   <input
                     type="number"
                     min="1"
@@ -266,7 +266,7 @@ const WebhookJobs = () => {
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   />
                 </Field>
-                <Field label="Checkers">
+                <Field label="校验并发数">
                   <input
                     type="number"
                     min="1"
@@ -276,7 +276,7 @@ const WebhookJobs = () => {
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   />
                 </Field>
-                <Field label="Retries">
+                <Field label="失败重试次数">
                   <input
                     type="number"
                     min="0"
@@ -286,7 +286,7 @@ const WebhookJobs = () => {
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   />
                 </Field>
-                <Field label="Low-level retries">
+                <Field label="底层重试次数">
                   <input
                     type="number"
                     min="0"
@@ -297,7 +297,7 @@ const WebhookJobs = () => {
                   />
                 </Field>
               </div>
-              <Field label="限速 bwlimit（可选）">
+              <Field label="传输限速（可选）">
                 <input
                   value={configForm.bwlimit}
                   onChange={(event) => setConfigForm((prev) => ({ ...prev, bwlimit: event.target.value }))}
@@ -314,7 +314,7 @@ const WebhookJobs = () => {
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                   />
                 </Field>
-                <Field label="HTTP 超时">
+                <Field label="回调请求超时">
                   <input
                     value={configForm.http_timeout}
                     onChange={(event) => setConfigForm((prev) => ({ ...prev, http_timeout: event.target.value }))}
