@@ -5,6 +5,8 @@ import toast from 'react-hot-toast';
 
 const Settings = () => {
   const [config, setConfig] = useState('');
+  const [configPath, setConfigPath] = useState('');
+  const [configError, setConfigError] = useState('');
   const [loading, setLoading] = useState(true);
 
   // Token state
@@ -31,6 +33,8 @@ const Settings = () => {
         getTokenInfo(),
       ]);
       setConfig(configRes.data.content);
+      setConfigPath(configRes.data.path || '');
+      setConfigError(configRes.data.error || '');
       // Token
       if (tokenRes.data) {
         setTokenEnabled(tokenRes.data.enabled);
@@ -38,6 +42,7 @@ const Settings = () => {
       }
     } catch (err) {
       console.error('Failed to load settings');
+      toast.error(err.response?.data?.error || '加载系统设置失败');
     } finally {
       setLoading(false);
     }
@@ -80,7 +85,7 @@ const Settings = () => {
       setTokenEnabled(apiToken !== '');
       toast.success('访问 Token 已保存');
     } catch (err) {
-      toast.error('保存失败');
+      toast.error(err.response?.data?.error || '保存失败');
     }
   };
 
@@ -240,6 +245,16 @@ const Settings = () => {
               </span>
             </div>
           </div>
+          {configPath && (
+            <p className="text-xs text-gray-500 mt-3 font-mono break-all">
+              配置路径：{configPath}
+            </p>
+          )}
+          {configError && (
+            <p className="text-xs text-red-600 mt-2 break-all">
+              读取失败：{configError}
+            </p>
+          )}
           <p className="text-sm text-gray-500 mt-3 flex items-center gap-1">
             <AlertTriangle className="w-4 h-4 text-amber-500" />
             配置文件通过 Docker volume 挂载，如需修改请直接编辑宿主机上的 rclone.conf

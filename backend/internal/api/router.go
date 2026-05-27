@@ -121,8 +121,8 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		api.POST("/change-password", handleChangePassword)
 
 		// Token management (read/update)
-		api.GET("/token", requireTokenQuery, getTokenInfo)
-		api.POST("/token", requireTokenQuery, updateToken)
+		api.GET("/token", getTokenInfo)
+		api.POST("/token", updateToken)
 
 		// Tasks
 		tasks := api.Group("/tasks")
@@ -316,12 +316,19 @@ func updateToken(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	cfgGlobal.APIToken = req.Token
+	token := strings.TrimSpace(req.Token)
 	// Persist to env/system setting for hot-reload awareness
 	var setting models.SystemSetting
-	db.Where("`key` = ?", "api_token").FirstOrCreate(&setting, models.SystemSetting{Key: "api_token"})
-	setting.Value = req.Token
-	db.Save(&setting)
+	if err := db.Where("`key` = ?", "api_token").FirstOrCreate(&setting, models.SystemSetting{Key: "api_token"}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	setting.Value = token
+	if err := db.Save(&setting).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	cfgGlobal.APIToken = token
 	c.JSON(http.StatusOK, gin.H{"message": "token updated"})
 }
 
@@ -1049,7 +1056,7 @@ func deleteOpenlistConfig(c *gin.Context) {
 
 // Rclone handlers
 func listRemotes(c *gin.Context) {
-	configPath := "/root/.config/rclone/rclone.conf"
+	configPath := currentRcloneConfigPath()
 	content, err := os.ReadFile(configPath)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"remotes": []string{}})
@@ -1069,7 +1076,7 @@ func listRemotes(c *gin.Context) {
 }
 
 func listRemoteDetails(c *gin.Context) {
-	configPath := "/root/.config/rclone/rclone.conf"
+	configPath := currentRcloneConfigPath()
 	content, err := os.ReadFile(configPath)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"remotes": []map[string]string{}})
@@ -1124,7 +1131,7 @@ func listRemoteDir(c *gin.Context) {
 	}
 
 	remotePath := fmt.Sprintf("%s:%s", remote, path)
-	args := []string{"lsjson", remotePath, "--config", "/root/.config/rclone/rclone.conf"}
+	args := []string{"lsjson", remotePath, "--config", currentRcloneConfigPath()}
 
 	cmd := exec.Command("rclone", args...)
 	output, err := cmd.Output()
@@ -1183,7 +1190,7 @@ func createRemoteDir(c *gin.Context) {
 	}
 
 	remotePath := fmt.Sprintf("%s:%s", remote, path)
-	cmd := exec.Command("rclone", "mkdir", remotePath, "--config", "/root/.config/rclone/rclone.conf")
+	cmd := exec.Command("rclone", "mkdir", remotePath, "--config", currentRcloneConfigPath())
 	if output, err := cmd.CombinedOutput(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("rclone mkdir failed: %v %s", err, strings.TrimSpace(string(output)))})
 		return
@@ -1193,14 +1200,21 @@ func createRemoteDir(c *gin.Context) {
 }
 
 func getRcloneConfig(c *gin.Context) {
-	configPath := "/root/.config/rclone/rclone.conf"
+	configPath := currentRcloneConfigPath()
 	content, err := os.ReadFile(configPath)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"content": ""})
+		c.JSON(http.StatusOK, gin.H{"content": "", "path": configPath, "error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"content": string(content)})
+	c.JSON(http.StatusOK, gin.H{"content": string(content), "path": configPath})
+}
+
+func currentRcloneConfigPath() string {
+	if cfgGlobal != nil && strings.TrimSpace(cfgGlobal.RcloneConfig) != "" {
+		return strings.TrimSpace(cfgGlobal.RcloneConfig)
+	}
+	return "/root/.config/rclone/rclone.conf"
 }
 
 // File browser types
@@ -1277,7 +1291,7 @@ func listRemoteFiles(c *gin.Context) {
 	}
 
 	remotePath := fmt.Sprintf("%s:%s", remote, path)
-	args := []string{"lsjson", remotePath, "--config", "/root/.config/rclone/rclone.conf"}
+	args := []string{"lsjson", remotePath, "--config", currentRcloneConfigPath()}
 
 	cmd := exec.Command("rclone", args...)
 	output, err := cmd.Output()

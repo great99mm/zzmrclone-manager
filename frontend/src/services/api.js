@@ -101,12 +101,10 @@ export const updateWebhookConfig = (data) => api.put('/webhook-jobs/config', dat
 
 // Token management
 export const getTokenInfo = () => {
-  const token = localStorage.getItem('apiToken') || '';
-  return api.get(`/token?token=${token}`);
+  return api.get('/token');
 };
 export const updateToken = (tokenValue) => {
-  const token = localStorage.getItem('apiToken') || '';
-  return api.post(`/token?token=${token}`, { token: tokenValue });
+  return api.post('/token', { token: tokenValue });
 };
 
 export const createWebSocket = () => {
