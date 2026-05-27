@@ -68,7 +68,7 @@ const configToForm = (data) => ({
   allowed_curl_hosts: Array.isArray(data?.allowed_curl_hosts) ? data.allowed_curl_hosts.join(', ') : '',
 });
 
-const WebhookJobs = () => {
+const WebhookJobs = ({ mode = 'all' }) => {
   const [jobs, setJobs] = useState([]);
   const [selectedJob, setSelectedJob] = useState(null);
   const [config, setConfig] = useState(null);
@@ -84,6 +84,12 @@ const WebhookJobs = () => {
   const [configForm, setConfigForm] = useState(defaultWebhookConfig);
 
   const webhookEndpoint = useMemo(() => `${window.location.origin}/webhook`, []);
+  const showConfig = mode === 'all' || mode === 'config';
+  const showTasks = mode === 'all' || mode === 'tasks';
+  const pageTitle = showConfig && !showTasks ? 'Webhook 配置' : 'Webhook 任务';
+  const pageDescription = showConfig && !showTasks
+    ? '配置 /webhook 接入参数、下载根目录、远端、白名单、并发和超时。'
+    : '查看外部 POST /webhook 创建的一次性下载任务，跟踪下载、校验、回调和刷新详情。';
 
   const loadData = async () => {
     setLoading(true);
@@ -217,8 +223,8 @@ const WebhookJobs = () => {
             <Webhook className="w-4 h-4" />
             Webhook One-Time Jobs
           </div>
-          <h1 className="text-2xl font-bold text-gray-900">Webhook 一次性下载</h1>
-          <p className="text-gray-500 mt-1">外部 POST /webhook 后会立刻出现在这里。每条记录都是一次性任务，可查看下载、校验、回调和刷新详情。</p>
+          <h1 className="text-2xl font-bold text-gray-900">{pageTitle}</h1>
+          <p className="text-gray-500 mt-1">{pageDescription}</p>
         </div>
         <button
           onClick={loadData}
@@ -229,8 +235,10 @@ const WebhookJobs = () => {
         </button>
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-[420px,1fr] gap-6">
+      <div className={`grid grid-cols-1 gap-6 ${showConfig && showTasks ? 'xl:grid-cols-[420px,1fr]' : ''}`}>
+        {(showConfig || showTasks) && (
         <div className="space-y-6 xl:max-h-[calc(100vh-7rem)] xl:overflow-y-auto xl:pr-2">
+          {showConfig && (
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
             <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
               <Cog className="w-5 h-5 text-blue-500" />
@@ -360,7 +368,9 @@ const WebhookJobs = () => {
               </button>
             </form>
           </div>
+          )}
 
+          {showTasks && (
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
             <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
               <Send className="w-5 h-5 text-blue-500" />
@@ -413,7 +423,9 @@ const WebhookJobs = () => {
               </button>
             </form>
           </div>
+          )}
 
+          {showConfig && (
           <div className="bg-slate-950 text-slate-100 rounded-xl shadow-sm border border-slate-800 p-6 overflow-hidden">
             <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
               <ShieldCheck className="w-5 h-5 text-emerald-300" />
@@ -427,12 +439,15 @@ const WebhookJobs = () => {
               请求体只需要包含 path。本地目录会按 “本地下载根目录 / 远端名 / 远端路径” 自动创建。callback/curl host 白名单为空时允许所有 HTTP(S) 主机。
             </div>
           </div>
+          )}
         </div>
+        )}
 
+        {showTasks && (
         <div className="space-y-6 min-w-0">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <h2 className="text-lg font-semibold text-gray-900">一次性任务卡片</h2>
+              <h2 className="text-lg font-semibold text-gray-900">Webhook 任务</h2>
               <p className="text-sm text-gray-500 mt-1">共 {jobs.length} 条，最新任务在前。</p>
             </div>
           </div>
@@ -468,6 +483,7 @@ const WebhookJobs = () => {
             )}
           </div>
         </div>
+        )}
       </div>
     </div>
   );

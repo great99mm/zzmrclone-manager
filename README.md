@@ -99,7 +99,7 @@ docker exec rclone-manager /app/server --reset-password
 
 ## 环境变量
 
-Docker 镜像内已有默认运行配置，`docker-compose.yml` 默认不需要额外业务环境变量。Webhook 下载参数推荐在 WebUI 左侧 **Webhook 下载** 页面配置，保存后写入 SQLite，重启后自动恢复。
+Docker 镜像内已有默认运行配置，`docker-compose.yml` 默认不需要额外业务环境变量。Webhook 下载参数推荐在 WebUI 左侧 **Webhook 配置** 页面配置，保存后写入 SQLite，重启后自动恢复。
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
@@ -126,7 +126,7 @@ Docker 部署默认无需额外 Webhook 环境变量，镜像默认使用上海�
 启动后在 WebUI 配置：
 
 1. **系统设置**：配置 API/Webhook 共用 Token。
-2. **Webhook 下载**：配置 rclone 远端名、本地下载根目录、callback/curl host 白名单、并发和超时。
+2. **Webhook 配置**：配置 rclone 远端名、本地下载根目录、callback/curl host 白名单、并发和超时。
 
 远端名在 WebUI 中配置，只写远端名，不带冒号；例如 `webdav`，服务会拼成 `webdav:/remote/folder/a`。
 
@@ -161,7 +161,7 @@ curl -X GET "http://localhost:5244/api/fs/list?path=/&refresh=true" \
 {"job_id":"job_xxx","job_type":"one_time","status":"pending"}
 ```
 
-这是一次性任务。任务会写入 SQLite，并在 WebUI 左侧 **Webhook 下载** 页面以任务卡片展示；点击卡片 **详情** 可查看远端名、远端路径、本地路径、callback/curl URL、curl headers、错误和 rclone 日志。
+这是一次性任务。任务会写入 SQLite，并在 WebUI 左侧 **Webhook 任务** 页面以任务卡片展示；点击卡片 **详情** 可查看远端名、远端路径、本地路径、callback/curl URL、curl headers、错误和 rclone 日志。
 
 `/webhook` 必须使用系统里的 API Token。推荐使用 `Authorization: Bearer <api-token>`；同时兼容 `X-API-Token`、`X-Webhook-Token` 或 `?token=`。
 
