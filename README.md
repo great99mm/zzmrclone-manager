@@ -52,17 +52,18 @@
 
 
 ```bash
-# 1. 下载 api 分支 docker-compose.yml
-wget https://raw.githubusercontent.com/great99mm/zzmrclone-manager/api/docker-compose.yml
+# 1. 克隆 api 分支源码
+git clone -b api https://github.com/great99mm/zzmrclone-manager.git
+cd zzmrclone-manager
 
-# 2. 编辑 docker-compose.yml，只保留基础运行变量和需要挂载的本地目录
+# 2. 编辑 docker-compose.yml，按需调整本地目录挂载
 vim docker-compose.yml
 
-# 3. 启动
-docker compose up -d
+# 3. 本地构建镜像并启动
+docker compose up -d --build
 ```
 
-> 当前 api 分支统一对外端口为 `6050`：WebUI、`/api`、`/webhook` 都走 `http://ip:6050`。云盘挂载功能依赖 FUSE，`docker-compose.yml` 已包含 `/dev/fuse`、`SYS_ADMIN`、`apparmor:unconfined`；宿主机目录映射请按你自己的路径自行添加。
+> 当前 api 分支使用本地 Dockerfile 构建镜像，统一对外端口为 `6050`：WebUI、`/api`、`/webhook` 都走 `http://ip:6050`。云盘挂载功能依赖 FUSE，`docker-compose.yml` 已包含 `/dev/fuse`、`SYS_ADMIN`、`apparmor:unconfined`；宿主机目录映射请按你自己的路径自行添加。
 
 
 ### 获取管理员密码

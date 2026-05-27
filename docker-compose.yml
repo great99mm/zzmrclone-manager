@@ -1,6 +1,9 @@
 services:
   rclone-manager:
-    image: dedehao/zzmrclone-manager:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: zzmrclone-manager:api-local
     container_name: rclone-manager
     restart: unless-stopped
     devices:
