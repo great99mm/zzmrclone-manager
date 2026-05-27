@@ -1,6 +1,6 @@
 # ZZMRClone Manager
 
-基于 Web 的 Rclone 自动化管理工具，支持任务调度、目录监控、实时日志、结构化转移记录、**云盘本地挂载** 和 **OpenList 目录自动刷新**。提供可视化界面和持久化数据库，一条命令即可部署。
+基于 Web 的 Rclone 自动化管理工具，支持任务调度、目录监控、实时日志、结构化转移记录、**云盘本地挂载**、**OpenList 目录自动刷新** 和 **Webhook 一次性下载 API**。提供可视化界面和持久化数据库，一条命令即可部署。
 
 ---
 
@@ -50,17 +50,17 @@
 
 
 ```bash
-# 1. 下载 docker-compose.yml
-wget https://raw.githubusercontent.com/great99mm/zzmrclone-manager/master/docker-compose.yml
+# 1. 下载 api 分支 docker-compose.yml
+wget https://raw.githubusercontent.com/great99mm/zzmrclone-manager/api/docker-compose.yml
 
-# 2. 编辑 docker-compose.yml，配置需要监控的本地目录映射
+# 2. 编辑 docker-compose.yml，配置 rclone 远端、Webhook Token、白名单、本地目录映射
 vim docker-compose.yml
 
 # 3. 启动
 docker compose up -d
 ```
 
-> 云盘挂载功能依赖 FUSE。当前 `docker-compose.yml` 已包含 `/dev/fuse`、`SYS_ADMIN`、`apparmor:unconfined`；宿主机目录映射请按你自己的路径自行添加。
+> 当前 api 分支统一对外端口为 `6050`：WebUI、`/api`、`/webhook` 都走 `http://ip:6050`。云盘挂载功能依赖 FUSE，`docker-compose.yml` 已包含 `/dev/fuse`、`SYS_ADMIN`、`apparmor:unconfined`；宿主机目录映射请按你自己的路径自行添加。
 
 
 ### 获取管理员密码
@@ -105,17 +105,45 @@ docker exec rclone-manager /app/server --reset-password
 | `RCLONE_MANAGER_API_TOKEN` | `""` | API Token（空表示不启用） |
 | `RCLONE_MANAGER_MOUNT_ROOT` | `""` | 可选：限制挂载目录根路径；留空表示不限制 |
 | `RCLONE_MANAGER_WEBHOOK_LOCAL_BASE_DIR` | `/app/data/downloads` | Webhook 下载本地根目录 |
+| `RCLONE_MANAGER_WEBHOOK_RCLONE_PATH` | `rclone` | rclone 可执行文件路径 |
 | `RCLONE_MANAGER_WEBHOOK_RCLONE_REMOTE` | `""` | Webhook 下载使用的 rclone 远端名，必填后任务才可执行 |
 | `RCLONE_MANAGER_WEBHOOK_TOKENS` | `""` | Webhook Token，多个用逗号分隔 |
 | `RCLONE_MANAGER_WEBHOOK_ALLOWED_CALLBACK_HOSTS` | `""` | callback_url 域名白名单，多个用逗号分隔，支持 `*.example.com` |
 | `RCLONE_MANAGER_WEBHOOK_ALLOWED_CURL_HOSTS` | `""` | curl_url 域名白名单，多个用逗号分隔，支持 `*.example.com` |
+| `RCLONE_MANAGER_WEBHOOK_ALLOW_ANONYMOUS` | `false` | 是否允许 `/webhook` 不带 Token |
 | `RCLONE_MANAGER_WEBHOOK_WORKERS` | `2` | Webhook 下载 worker 数 |
+| `RCLONE_MANAGER_WEBHOOK_QUEUE_SIZE` | `100` | Webhook 队列长度 |
 | `RCLONE_MANAGER_WEBHOOK_TRANSFERS` | `4` | rclone transfers |
 | `RCLONE_MANAGER_WEBHOOK_CHECKERS` | `8` | rclone checkers |
+| `RCLONE_MANAGER_WEBHOOK_RETRIES` | `3` | rclone retries |
+| `RCLONE_MANAGER_WEBHOOK_LOW_LEVEL_RETRIES` | `10` | rclone low-level retries |
+| `RCLONE_MANAGER_WEBHOOK_BWLIMIT` | `""` | rclone bwlimit，可选 |
+| `RCLONE_MANAGER_WEBHOOK_JOB_TIMEOUT` | `0s` | 单个 Webhook 任务超时，`0s` 表示不限制 |
+| `RCLONE_MANAGER_WEBHOOK_HTTP_TIMEOUT` | `30s` | callback/curl_url 请求超时 |
+| `RCLONE_MANAGER_WEBHOOK_MAX_RCLONE_LOG_BYTES` | `1048576` | 单个任务保留的 rclone 日志最大字节数 |
 
 ---
 
 ## Webhook 下载 API
+
+### 配置要点
+
+至少配置：
+
+```yaml
+environment:
+  - RCLONE_MANAGER_PORT=6050
+  - RCLONE_CONFIG=/root/.config/rclone/rclone.conf
+  - RCLONE_MANAGER_WEBHOOK_RCLONE_REMOTE=webdav
+  - RCLONE_MANAGER_WEBHOOK_LOCAL_BASE_DIR=/app/data/downloads
+  - RCLONE_MANAGER_WEBHOOK_TOKENS=replace-with-long-random-token
+  - RCLONE_MANAGER_WEBHOOK_ALLOWED_CALLBACK_HOSTS=sender.example.com
+  - RCLONE_MANAGER_WEBHOOK_ALLOWED_CURL_HOSTS=localhost,127.0.0.1,api.example.com
+```
+
+`RCLONE_MANAGER_WEBHOOK_RCLONE_REMOTE` 只写远端名，不带冒号；例如 `webdav`，服务会拼成 `webdav:/remote/folder/a`。
+
+### 调用示例
 
 外部系统调用：
 
