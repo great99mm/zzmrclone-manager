@@ -222,8 +222,6 @@ func applySystemSetting(cfg *config.Config, key, value string) {
 		cfg.APIToken = value
 	case "webhook_local_base_dir":
 		cfg.WebhookLocalBaseDir = value
-	case "webhook_rclone_remote":
-		cfg.WebhookRcloneRemote = value
 	case "webhook_transfers":
 		if parsed, err := strconv.Atoi(value); err == nil {
 			cfg.WebhookTransfers = parsed
@@ -250,8 +248,6 @@ func applySystemSetting(cfg *config.Config, key, value string) {
 		if parsed, err := strconv.Atoi(value); err == nil {
 			cfg.WebhookMaxRcloneLogSize = parsed
 		}
-	case "webhook_allow_anonymous":
-		cfg.WebhookAllowAnonymous = value == "true"
 	case "webhook_allowed_callback_hosts":
 		cfg.AllowedCallbackHosts = splitSettingList(value)
 	case "webhook_allowed_curl_hosts":

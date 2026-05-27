@@ -4,6 +4,7 @@ import (
 	"flag"
 	"log"
 	"os"
+	"time"
 
 	"rclone-manager/internal/api"
 	"rclone-manager/internal/config"
@@ -11,6 +12,13 @@ import (
 )
 
 func main() {
+	if os.Getenv("TZ") == "" {
+		_ = os.Setenv("TZ", "Asia/Shanghai")
+	}
+	if loc, err := time.LoadLocation(os.Getenv("TZ")); err == nil {
+		time.Local = loc
+	}
+
 	resetPassword := flag.Bool("reset-password", false, "Reset admin password to a new random value and exit")
 	flag.Parse()
 

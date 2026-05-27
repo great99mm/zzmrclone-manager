@@ -17,7 +17,6 @@ import (
 
 type webhookConfigRequest struct {
 	LocalBaseDir         string   `json:"local_base_dir"`
-	RcloneRemote         string   `json:"rclone_remote"`
 	Transfers            int      `json:"transfers"`
 	Checkers             int      `json:"checkers"`
 	Retries              int      `json:"retries"`
@@ -26,7 +25,6 @@ type webhookConfigRequest struct {
 	JobTimeout           string   `json:"job_timeout"`
 	HTTPTimeout          string   `json:"http_timeout"`
 	MaxRcloneLogBytes    int      `json:"max_rclone_log_bytes"`
-	AllowAnonymous       bool     `json:"allow_anonymous_webhook"`
 	AllowedCallbackHosts []string `json:"allowed_callback_hosts"`
 	AllowedCurlHosts     []string `json:"allowed_curl_hosts"`
 }
@@ -116,26 +114,24 @@ func retryWebhookJob(c *gin.Context) {
 
 func getWebhookConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
-		"local_base_dir":          cfgGlobal.WebhookLocalBaseDir,
-		"rclone_path":             cfgGlobal.WebhookRclonePath,
-		"rclone_config":           cfgGlobal.RcloneConfig,
-		"rclone_remote":           cfgGlobal.WebhookRcloneRemote,
-		"transfers":               cfgGlobal.WebhookTransfers,
-		"checkers":                cfgGlobal.WebhookCheckers,
-		"retries":                 cfgGlobal.WebhookRetries,
-		"low_level_retries":       cfgGlobal.WebhookLowLevelRetries,
-		"bwlimit":                 cfgGlobal.WebhookBWLimit,
-		"workers":                 cfgGlobal.WebhookWorkers,
-		"queue_size":              cfgGlobal.WebhookQueueSize,
-		"job_timeout":             cfgGlobal.WebhookJobTimeout,
-		"http_timeout":            cfgGlobal.WebhookHTTPTimeout,
-		"max_rclone_log_bytes":    cfgGlobal.WebhookMaxRcloneLogSize,
-		"allowed_callback_hosts":  cfgGlobal.AllowedCallbackHosts,
-		"allowed_curl_hosts":      cfgGlobal.AllowedCurlHosts,
-		"token_required":          webhookJobs.AuthEnabled(),
-		"api_token_enabled":       strings.TrimSpace(cfgGlobal.APIToken) != "",
-		"token_source":            "RCLONE_MANAGER_API_TOKEN",
-		"allow_anonymous_webhook": cfgGlobal.WebhookAllowAnonymous,
+		"local_base_dir":         cfgGlobal.WebhookLocalBaseDir,
+		"rclone_path":            cfgGlobal.WebhookRclonePath,
+		"rclone_config":          cfgGlobal.RcloneConfig,
+		"transfers":              cfgGlobal.WebhookTransfers,
+		"checkers":               cfgGlobal.WebhookCheckers,
+		"retries":                cfgGlobal.WebhookRetries,
+		"low_level_retries":      cfgGlobal.WebhookLowLevelRetries,
+		"bwlimit":                cfgGlobal.WebhookBWLimit,
+		"workers":                cfgGlobal.WebhookWorkers,
+		"queue_size":             cfgGlobal.WebhookQueueSize,
+		"job_timeout":            cfgGlobal.WebhookJobTimeout,
+		"http_timeout":           cfgGlobal.WebhookHTTPTimeout,
+		"max_rclone_log_bytes":   cfgGlobal.WebhookMaxRcloneLogSize,
+		"allowed_callback_hosts": cfgGlobal.AllowedCallbackHosts,
+		"allowed_curl_hosts":     cfgGlobal.AllowedCurlHosts,
+		"token_required":         webhookJobs.AuthEnabled(),
+		"api_token_enabled":      strings.TrimSpace(cfgGlobal.APIToken) != "",
+		"token_source":           "RCLONE_MANAGER_API_TOKEN",
 	})
 }
 
@@ -179,7 +175,6 @@ func applyWebhookConfigRequest(req *webhookConfigRequest) error {
 	}
 
 	cfgGlobal.WebhookLocalBaseDir = localBaseDir
-	cfgGlobal.WebhookRcloneRemote = strings.TrimSuffix(strings.TrimSpace(req.RcloneRemote), ":")
 	cfgGlobal.WebhookTransfers = clampInt(req.Transfers, 1, 64, 4)
 	cfgGlobal.WebhookCheckers = clampInt(req.Checkers, 1, 128, 8)
 	cfgGlobal.WebhookRetries = clampInt(req.Retries, 0, 20, 3)
@@ -188,7 +183,6 @@ func applyWebhookConfigRequest(req *webhookConfigRequest) error {
 	cfgGlobal.WebhookJobTimeout = defaultString(req.JobTimeout, "0s")
 	cfgGlobal.WebhookHTTPTimeout = defaultString(req.HTTPTimeout, "30s")
 	cfgGlobal.WebhookMaxRcloneLogSize = clampInt(req.MaxRcloneLogBytes, 1024, 10485760, 1048576)
-	cfgGlobal.WebhookAllowAnonymous = req.AllowAnonymous
 	cfgGlobal.AllowedCallbackHosts = cleanHostList(req.AllowedCallbackHosts)
 	cfgGlobal.AllowedCurlHosts = cleanHostList(req.AllowedCurlHosts)
 	return nil
@@ -197,7 +191,6 @@ func applyWebhookConfigRequest(req *webhookConfigRequest) error {
 func saveWebhookConfigRequest(req *webhookConfigRequest) error {
 	settings := map[string]string{
 		"webhook_local_base_dir":         cfgGlobal.WebhookLocalBaseDir,
-		"webhook_rclone_remote":          cfgGlobal.WebhookRcloneRemote,
 		"webhook_transfers":              strconv.Itoa(cfgGlobal.WebhookTransfers),
 		"webhook_checkers":               strconv.Itoa(cfgGlobal.WebhookCheckers),
 		"webhook_retries":                strconv.Itoa(cfgGlobal.WebhookRetries),
@@ -206,7 +199,6 @@ func saveWebhookConfigRequest(req *webhookConfigRequest) error {
 		"webhook_job_timeout":            cfgGlobal.WebhookJobTimeout,
 		"webhook_http_timeout":           cfgGlobal.WebhookHTTPTimeout,
 		"webhook_max_rclone_log_bytes":   strconv.Itoa(cfgGlobal.WebhookMaxRcloneLogSize),
-		"webhook_allow_anonymous":        strconv.FormatBool(cfgGlobal.WebhookAllowAnonymous),
 		"webhook_allowed_callback_hosts": strings.Join(cfgGlobal.AllowedCallbackHosts, ","),
 		"webhook_allowed_curl_hosts":     strings.Join(cfgGlobal.AllowedCurlHosts, ","),
 	}

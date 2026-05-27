@@ -18,6 +18,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o server ./cmd/server
 
 FROM alpine:latest
 
+ENV TZ=Asia/Shanghai
+
 RUN apk add --no-cache ca-certificates rclone bash curl tzdata fuse3 \
     && mkdir -p /app/data /app/logs \
     && printf 'user_allow_other\n' > /etc/fuse.conf

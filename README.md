@@ -102,7 +102,7 @@ Docker 镜像内已有默认运行配置，`docker-compose.yml` 默认不需要�
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `TZ` | 系统默认 | 可选：容器时区，例如 `Asia/Shanghai` |
+| `TZ` | `Asia/Shanghai` | 可选：容器时区，镜像默认上海时间 |
 | `RCLONE_MANAGER_MOUNT_ROOT` | `""` | 可选：限制云盘挂载目录根路径；留空表示不限制 |
 
 可选启动兜底变量：
@@ -120,19 +120,14 @@ Docker 镜像内已有默认运行配置，`docker-compose.yml` 默认不需要�
 
 ### 配置要点
 
-Docker 部署默认无需额外 Webhook 环境变量；如果你想显式设置时区，可选：
-
-```yaml
-environment:
-  - TZ=Asia/Shanghai
-```
+Docker 部署默认无需额外 Webhook 环境变量，镜像默认使用上海时区。
 
 启动后在 WebUI 配置：
 
 1. **系统设置**：配置 API/Webhook 共用 Token。
-2. **Webhook 下载**：配置 rclone 远端名、本地下载根目录、callback/curl host 白名单、并发和超时。
+2. **Webhook 下载**：配置本地下载根目录、callback/curl host 白名单、并发和超时。
 
-rclone 远端名只写远端名，不带冒号；例如 `webdav`，服务会拼成 `webdav:/remote/folder/a`。
+远端名由每次 Webhook 请求传入，支持多个 rclone 远端。远端名只写远端名，不带冒号；例如 `webdav`，服务会拼成 `webdav:/remote/folder/a`。
 
 ### 调用示例
 
@@ -143,6 +138,7 @@ curl -X POST http://ip:6050/webhook \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer <api-token>' \
   -d '{
+    "remote": "webdav",
     "path": "/remote/folder/a",
     "callback_url": "https://sender.example.com/download-finished",
     "curl_url": "http://localhost:5244/api/fs/list?path=/&refresh=true",
@@ -165,9 +161,9 @@ curl -X GET "http://localhost:5244/api/fs/list?path=/&refresh=true" \
 {"job_id":"job_xxx","job_type":"one_time","status":"pending"}
 ```
 
-这是一次性任务。任务会写入 SQLite，并在 WebUI 左侧 **Webhook 下载** 页面以任务卡片展示；点击卡片 **详情** 可查看远端路径、本地路径、callback/curl URL、curl headers、错误和 rclone 日志。
+这是一次性任务。任务会写入 SQLite，并在 WebUI 左侧 **Webhook 下载** 页面以任务卡片展示；点击卡片 **详情** 可查看远端名、远端路径、本地路径、callback/curl URL、curl headers、错误和 rclone 日志。
 
-`/webhook` 与系统里的 API Token 共用同一个值：`RCLONE_MANAGER_API_TOKEN`。推荐使用 `Authorization: Bearer <api-token>`；同时兼容 `X-API-Token`、`X-Webhook-Token` 或 `?token=`。
+`/webhook` 必须使用系统里的 API Token。推荐使用 `Authorization: Bearer <api-token>`；同时兼容 `X-API-Token`、`X-Webhook-Token` 或 `?token=`。
 
 管理接口：
 
@@ -183,8 +179,9 @@ curl -X GET "http://localhost:5244/api/fs/list?path=/&refresh=true" \
 安全规则：
 
 - rclone 使用 `exec.CommandContext`，不走 shell。
+- remote 拒绝空值、`..`、斜杠、反斜杠、NUL 字节和换行。
 - path 拒绝空值、`..`、反斜杠、NUL 字节。
-- 本地路径限制在 WebUI 配置的 Webhook 本地下载根目录内，并拒绝已存在 symlink 路径组件。
+- 本地路径固定为 `本地下载根目录/远端名/远端路径`，并拒绝已存在 symlink 路径组件。
 - `callback_url` / `curl_url` 建议配置域名白名单。
 
 ---

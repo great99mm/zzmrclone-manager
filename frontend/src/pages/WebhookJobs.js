@@ -40,7 +40,6 @@ const statusLabels = {
 
 const defaultWebhookConfig = {
   local_base_dir: '/app/data/downloads',
-  rclone_remote: '',
   transfers: 4,
   checkers: 8,
   retries: 3,
@@ -49,14 +48,12 @@ const defaultWebhookConfig = {
   job_timeout: '0s',
   http_timeout: '30s',
   max_rclone_log_bytes: 1048576,
-  allow_anonymous_webhook: false,
   allowed_callback_hosts: '',
   allowed_curl_hosts: '',
 };
 
 const configToForm = (data) => ({
   local_base_dir: data?.local_base_dir || defaultWebhookConfig.local_base_dir,
-  rclone_remote: data?.rclone_remote || '',
   transfers: data?.transfers ?? defaultWebhookConfig.transfers,
   checkers: data?.checkers ?? defaultWebhookConfig.checkers,
   retries: data?.retries ?? defaultWebhookConfig.retries,
@@ -65,7 +62,6 @@ const configToForm = (data) => ({
   job_timeout: data?.job_timeout || defaultWebhookConfig.job_timeout,
   http_timeout: data?.http_timeout || defaultWebhookConfig.http_timeout,
   max_rclone_log_bytes: data?.max_rclone_log_bytes ?? defaultWebhookConfig.max_rclone_log_bytes,
-  allow_anonymous_webhook: Boolean(data?.allow_anonymous_webhook),
   allowed_callback_hosts: Array.isArray(data?.allowed_callback_hosts) ? data.allowed_callback_hosts.join(', ') : '',
   allowed_curl_hosts: Array.isArray(data?.allowed_curl_hosts) ? data.allowed_curl_hosts.join(', ') : '',
 });
@@ -78,6 +74,7 @@ const WebhookJobs = () => {
   const [submitting, setSubmitting] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
   const [form, setForm] = useState({
+    remote: '',
     path: '',
     callback_url: '',
     curl_url: '',
@@ -147,7 +144,7 @@ const WebhookJobs = () => {
       }
       const res = await createWebhookJob(payload);
       toast.success(`一次性任务已创建：${res.data.job_id}`);
-      setForm({ path: '', callback_url: '', curl_url: '', curl_headers: '' });
+      setForm({ remote: '', path: '', callback_url: '', curl_url: '', curl_headers: '' });
       await loadJobs();
       await loadJob(res.data.job_id);
     } catch (err) {
@@ -239,14 +236,6 @@ const WebhookJobs = () => {
               Webhook 运行配置
             </h2>
             <form onSubmit={saveWebhookConfig} className="space-y-4">
-              <Field label="Rclone 远端名">
-                <input
-                  value={configForm.rclone_remote}
-                  onChange={(event) => setConfigForm((prev) => ({ ...prev, rclone_remote: event.target.value }))}
-                  placeholder="webdav"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-              </Field>
               <Field label="本地下载根目录">
                 <input
                   value={configForm.local_base_dir}
@@ -349,15 +338,9 @@ const WebhookJobs = () => {
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 />
               </Field>
-              <label className="flex items-start gap-3 rounded-lg bg-amber-50 border border-amber-100 p-3 text-sm text-amber-800">
-                <input
-                  type="checkbox"
-                  checked={configForm.allow_anonymous_webhook}
-                  onChange={(event) => setConfigForm((prev) => ({ ...prev, allow_anonymous_webhook: event.target.checked }))}
-                  className="mt-1 rounded border-amber-300 text-blue-600 focus:ring-blue-500"
-                />
-                <span>允许 /webhook 匿名调用。仅内网可信环境建议开启。</span>
-              </label>
+              <div className="rounded-lg bg-blue-50 border border-blue-100 p-3 text-sm text-blue-800">
+                Webhook 必须携带系统设置里的 API Token。远端名由每次 Webhook 请求传入，支持多个 rclone 远端。
+              </div>
               <button
                 type="submit"
                 disabled={savingConfig}
@@ -375,6 +358,15 @@ const WebhookJobs = () => {
               手动创建一次性任务
             </h2>
             <form onSubmit={submitJob} className="space-y-4">
+              <Field label="远端名">
+                <input
+                  value={form.remote}
+                  onChange={(event) => setForm((prev) => ({ ...prev, remote: event.target.value }))}
+                  placeholder="webdav"
+                  required
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </Field>
               <Field label="远端路径">
                 <input
                   value={form.path}
@@ -428,11 +420,10 @@ const WebhookJobs = () => {
               接入信息
             </h2>
             <Info label="Endpoint" value={webhookEndpoint} mono />
-            <Info label="Remote" value={config?.rclone_remote || '未配置，请在本页 Webhook 运行配置中填写'} mono />
             <Info label="Local Base" value={config?.local_base_dir || '-'} mono />
-            <Info label="Token" value={config?.token_required ? '使用系统设置中的 API Token：Authorization: Bearer <token>' : 'Webhook 未要求 Token'} />
+            <Info label="Token" value={config?.api_token_enabled ? '已配置：Authorization: Bearer <token>' : '未配置，/webhook 会拒绝请求'} />
             <div className="mt-4 text-xs text-slate-400 leading-6">
-              Webhook 与输出日志 API 共用同一个访问 Token。通过 curl 发出的任务会写入 SQLite，页面每 5 秒自动刷新。callback/curl host 白名单为空时允许所有 HTTP(S) 主机。
+              请求体必须包含 remote 和 path。本地目录会按 “本地下载根目录 / 远端名 / 远端路径” 自动创建。callback/curl host 白名单为空时允许所有 HTTP(S) 主机。
             </div>
           </div>
         </div>
@@ -503,7 +494,7 @@ const JobCard = ({ job, active, onDetail, onRetry, onCopy }) => {
         </div>
 
         <div className="space-y-2 text-sm">
-          <CardLine icon={MapPin} label="远端" value={job.remote_path} mono />
+          <CardLine icon={MapPin} label="远端" value={formatRemote(job)} mono />
           <CardLine icon={FileText} label="本地" value={job.local_path || '等待生成'} mono muted={!job.local_path} />
           <CardLine icon={Bell} label="Callback" value={hostOf(job.callback_url)} />
           <CardLine icon={ExternalLink} label="Curl" value={hostOf(job.curl_url)} />
@@ -540,6 +531,7 @@ const JobDetail = ({ job }) => (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
       <DetailItem label="Job ID" value={job.id} mono />
       <DetailItem label="任务类型" value={job.job_type || 'one_time'} />
+      <DetailItem label="远端名" value={job.remote || '-'} mono />
       <DetailItem label="远端路径" value={job.remote_path} mono />
       <DetailItem label="本地路径" value={job.local_path || '-'} mono />
       <DetailItem label="创建时间" value={formatTime(job.created_at)} />
@@ -653,6 +645,8 @@ const hostOf = (value) => {
     return value;
   }
 };
+
+const formatRemote = (job) => (job.remote ? `${job.remote}:${job.remote_path || ''}` : job.remote_path);
 
 const formatTime = (value) => {
   if (!value) return '-';

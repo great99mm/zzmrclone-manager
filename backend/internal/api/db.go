@@ -64,6 +64,9 @@ func InitDB(dataDir string) error {
 	if err := ensureMountConfigColumns(db); err != nil {
 		return fmt.Errorf("failed to migrate mount config columns: %v", err)
 	}
+	if err := ensureWebhookJobColumns(db); err != nil {
+		return fmt.Errorf("failed to migrate webhook job columns: %v", err)
+	}
 
 	// Create default admin if no users exist
 	var count int64
@@ -110,6 +113,24 @@ func InitDB(dataDir string) error {
 		}
 	}()
 
+	return nil
+}
+
+func ensureWebhookJobColumns(db *gorm.DB) error {
+	columns := map[string]string{
+		"remote_name": "text DEFAULT ''",
+	}
+	for name, definition := range columns {
+		exists, err := sqliteColumnExists(db, "webhook_jobs", name)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if err := db.Exec(fmt.Sprintf("ALTER TABLE webhook_jobs ADD COLUMN %s %s", name, definition)).Error; err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 

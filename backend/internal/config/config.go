@@ -15,7 +15,6 @@ type Config struct {
 	MountRoot               string
 	WebhookLocalBaseDir     string
 	WebhookRclonePath       string
-	WebhookRcloneRemote     string
 	WebhookTransfers        int
 	WebhookCheckers         int
 	WebhookRetries          int
@@ -26,7 +25,6 @@ type Config struct {
 	WebhookJobTimeout       string
 	WebhookHTTPTimeout      string
 	WebhookMaxRcloneLogSize int
-	WebhookAllowAnonymous   bool
 	AllowedCallbackHosts    []string
 	AllowedCurlHosts        []string
 }
@@ -42,7 +40,6 @@ func Load() *Config {
 		MountRoot:               getEnv("RCLONE_MANAGER_MOUNT_ROOT", ""),
 		WebhookLocalBaseDir:     getEnv("RCLONE_MANAGER_WEBHOOK_LOCAL_BASE_DIR", dataDir+"/downloads"),
 		WebhookRclonePath:       getEnv("RCLONE_MANAGER_WEBHOOK_RCLONE_PATH", "rclone"),
-		WebhookRcloneRemote:     getEnv("RCLONE_MANAGER_WEBHOOK_RCLONE_REMOTE", ""),
 		WebhookTransfers:        getEnvInt("RCLONE_MANAGER_WEBHOOK_TRANSFERS", 4),
 		WebhookCheckers:         getEnvInt("RCLONE_MANAGER_WEBHOOK_CHECKERS", 8),
 		WebhookRetries:          getEnvInt("RCLONE_MANAGER_WEBHOOK_RETRIES", 3),
@@ -53,7 +50,6 @@ func Load() *Config {
 		WebhookJobTimeout:       getEnv("RCLONE_MANAGER_WEBHOOK_JOB_TIMEOUT", "0s"),
 		WebhookHTTPTimeout:      getEnv("RCLONE_MANAGER_WEBHOOK_HTTP_TIMEOUT", "30s"),
 		WebhookMaxRcloneLogSize: getEnvInt("RCLONE_MANAGER_WEBHOOK_MAX_RCLONE_LOG_BYTES", 1048576),
-		WebhookAllowAnonymous:   getEnvBool("RCLONE_MANAGER_WEBHOOK_ALLOW_ANONYMOUS", false),
 		AllowedCallbackHosts:    getEnvList("RCLONE_MANAGER_WEBHOOK_ALLOWED_CALLBACK_HOSTS"),
 		AllowedCurlHosts:        getEnvList("RCLONE_MANAGER_WEBHOOK_ALLOWED_CURL_HOSTS"),
 	}

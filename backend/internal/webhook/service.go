@@ -39,6 +39,7 @@ const (
 )
 
 type CreateRequest struct {
+	Remote      string            `json:"remote" binding:"required"`
 	Path        string            `json:"path" binding:"required"`
 	CallbackURL string            `json:"callback_url" binding:"required"`
 	CurlURL     string            `json:"curl_url" binding:"required"`
@@ -106,22 +107,23 @@ func (s *Service) Start(ctx context.Context) error {
 }
 
 func (s *Service) AuthEnabled() bool {
-	return !s.cfg.WebhookAllowAnonymous && strings.TrimSpace(s.cfg.APIToken) != ""
+	return strings.TrimSpace(s.cfg.APIToken) != ""
 }
 
 func (s *Service) VerifyToken(token string) bool {
-	if s.cfg.WebhookAllowAnonymous {
-		return true
-	}
 	valid := strings.TrimSpace(s.cfg.APIToken)
 	if valid == "" {
-		return true
+		return false
 	}
 	token = strings.TrimSpace(token)
 	return subtle.ConstantTimeCompare([]byte(token), []byte(valid)) == 1
 }
 
 func (s *Service) CreateJob(ctx context.Context, req CreateRequest) (*models.WebhookJob, error) {
+	remoteName, err := cleanRemoteName(req.Remote)
+	if err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(req.Path) == "" {
 		return nil, errors.New("path is required")
 	}
@@ -150,6 +152,7 @@ func (s *Service) CreateJob(ctx context.Context, req CreateRequest) (*models.Web
 	job := &models.WebhookJob{
 		ID:          jobID,
 		JobType:     "one_time",
+		RemoteName:  remoteName,
 		RemotePath:  req.Path,
 		CallbackURL: req.CallbackURL,
 		CurlURL:     req.CurlURL,
@@ -265,24 +268,26 @@ func (s *Service) process(ctx context.Context, jobID string) {
 	if err := s.setStatus(job.ID, StatusRunning); err != nil {
 		return
 	}
+	remoteName, err := cleanRemoteName(job.RemoteName)
+	if err != nil {
+		s.fail(job.ID, "validate remote", err, job.RcloneLog)
+		return
+	}
 	cleanPath, relPath, err := cleanRemotePath(job.RemotePath)
 	if err != nil {
 		s.fail(job.ID, "validate path", err, job.RcloneLog)
 		return
 	}
-	localPath, err := buildLocalPath(s.cfg.WebhookLocalBaseDir, relPath)
+	localPath, err := buildLocalPath(s.cfg.WebhookLocalBaseDir, path.Join(remoteName, relPath))
 	if err != nil {
 		s.fail(job.ID, "build local path", err, job.RcloneLog)
 		return
 	}
-	remoteSpec, err := s.remoteSpec(cleanPath)
-	if err != nil {
-		s.fail(job.ID, "remote spec", err, job.RcloneLog)
-		return
-	}
+	remoteSpec := remoteSpec(remoteName, cleanPath)
+	job.RemoteName = remoteName
 	job.RemotePath = cleanPath
 	job.LocalPath = localPath
-	s.db.Model(job).Updates(map[string]interface{}{"remote_path": cleanPath, "local_path": localPath})
+	s.db.Model(job).Updates(map[string]interface{}{"remote_name": remoteName, "remote_path": cleanPath, "local_path": localPath})
 
 	rcloneLog := job.RcloneLog
 	if err := s.setStatus(job.ID, StatusCopying); err != nil {
@@ -391,12 +396,8 @@ func (s *Service) fail(jobID, step string, err error, rcloneLog string) {
 	})
 }
 
-func (s *Service) remoteSpec(remotePath string) (string, error) {
-	remote := strings.TrimSuffix(strings.TrimSpace(s.cfg.WebhookRcloneRemote), ":")
-	if remote == "" {
-		return "", errors.New("webhook rclone remote is not configured")
-	}
-	return remote + ":" + remotePath, nil
+func remoteSpec(remoteName, remotePath string) string {
+	return remoteName + ":" + remotePath
 }
 
 func (s *Service) runRclone(ctx context.Context, subcommand string, args ...string) (string, error) {
@@ -431,6 +432,7 @@ func (s *Service) postCallback(ctx context.Context, job *models.WebhookJob) erro
 	body, err := json.Marshal(map[string]string{
 		"job_id":      job.ID,
 		"status":      StatusSuccess,
+		"remote":      job.RemoteName,
 		"remote_path": job.RemotePath,
 		"local_path":  job.LocalPath,
 	})
@@ -549,6 +551,17 @@ func cleanRemotePath(raw string) (cleaned string, relative string, err error) {
 	cleaned = path.Clean("/" + strings.TrimPrefix(value, "/"))
 	relative = strings.TrimPrefix(cleaned, "/")
 	return cleaned, relative, nil
+}
+
+func cleanRemoteName(raw string) (string, error) {
+	value := strings.TrimSuffix(strings.TrimSpace(raw), ":")
+	if value == "" {
+		return "", errors.New("remote is required")
+	}
+	if strings.ContainsAny(value, "/\\\x00\r\n") || strings.Contains(value, "..") {
+		return "", errors.New("remote contains invalid characters")
+	}
+	return value, nil
 }
 
 func buildLocalPath(baseDir, remoteRelativePath string) (string, error) {
