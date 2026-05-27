@@ -78,7 +78,7 @@ docker exec rclone-manager cat /app/data/initial-password.txt
 docker exec rclone-manager cat /app/logs/backend.log | grep -A5 "INITIAL ADMIN"
 ```
 
-访问 `http://ip:7071`，使用用户名 `admin` 和上述方式获取的密码登录。
+访问 `http://ip:6050`，使用用户名 `admin` 和上述方式获取的密码登录。
 
 ### 重置管理员密码
 
@@ -120,7 +120,7 @@ docker exec rclone-manager /app/server --reset-password
 外部系统调用：
 
 ```bash
-curl -X POST http://ip:7071/webhook \
+curl -X POST http://ip:6050/webhook \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer <webhook-token>' \
   -d '{

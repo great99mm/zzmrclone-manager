@@ -10,7 +10,7 @@ services:
     security_opt:
       - apparmor:unconfined
     ports:
-      - "7071:80"
+      - "6050:80"
     volumes:
       - ./data:/app/data
       - /root/.config/rclone:/root/.config/rclone
