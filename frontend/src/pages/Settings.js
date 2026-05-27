@@ -78,7 +78,7 @@ const Settings = () => {
       await updateToken(apiToken);
       localStorage.setItem('apiToken', apiToken);
       setTokenEnabled(apiToken !== '');
-      toast.success('API Token 已保存');
+      toast.success('访问 Token 已保存');
     } catch (err) {
       toast.error('保存失败');
     }
@@ -97,7 +97,7 @@ const Settings = () => {
       {/* Header */}
       <div>
         <h1 className="text-2xl font-bold text-gray-900">系统设置</h1>
-        <p className="text-gray-500 mt-1">管理 Rclone 全局配置和系统参数</p>
+        <p className="text-gray-500 mt-1">管理 Rclone 配置、Webhook/API 共用 Token 和系统参数</p>
       </div>
 
       <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,360px),1fr))] gap-6 items-stretch auto-rows-fr">
@@ -180,23 +180,23 @@ const Settings = () => {
           </form>
         </div>
 
-        {/* API Token */}
+        {/* Access Token */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 h-full flex flex-col">
           <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
             <Key className="w-5 h-5 text-blue-500" />
-            API Token 设置
+            访问 Token 设置
           </h2>
           <div className="flex-1 flex flex-col gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                访问令牌 {tokenEnabled && <span className="text-green-600 text-xs">(已启用)</span>}
+                Webhook / API 共用令牌 {tokenEnabled && <span className="text-green-600 text-xs">(已启用)</span>}
               </label>
               <div className="relative">
                 <input
                   type={showToken ? 'text' : 'password'}
                   value={apiToken}
                   onChange={(e) => setApiToken(e.target.value)}
-                  placeholder="留空表示不启用 Token 验证"
+                  placeholder="留空表示不启用 Webhook 和 API Token 验证"
                   className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none"
                 />
                 <button
@@ -208,7 +208,7 @@ const Settings = () => {
                 </button>
               </div>
               <p className="text-sm text-gray-500 mt-1">
-                设置后，外部访问输出日志 API 需要在 URL 中添加 ?token=xxx
+                设置后，外部创建 Webhook 一次性下载任务请使用 Authorization: Bearer xxx；输出日志 API 仍可使用 ?token=xxx。
               </p>
             </div>
             <button
@@ -216,7 +216,7 @@ const Settings = () => {
               className="mt-auto inline-flex items-center justify-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
             >
               <Save className="w-4 h-4" />
-              保存 Token
+              保存共用 Token
             </button>
           </div>
         </div>

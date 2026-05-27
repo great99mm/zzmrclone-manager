@@ -29,7 +29,7 @@
 - **随机初始密码** — 首次部署自动生成随机管理员密码，告别硬编码默认密码
 - **密码重置命令** — 内置 `--reset-password` CLI 命令，随时重置管理员密码
 - **密码文件** — 初始/重置密码自动写入 `data/initial-password.txt`，方便查找
-- **Token 保护** — API 支持 Token 鉴权，防止未授权访问
+- **Token 保护** — Webhook 和 API 共用 `RCLONE_MANAGER_API_TOKEN` 鉴权，防止未授权访问
 
 ---
 
@@ -55,7 +55,7 @@
 # 1. 下载 api 分支 docker-compose.yml
 wget https://raw.githubusercontent.com/great99mm/zzmrclone-manager/api/docker-compose.yml
 
-# 2. 编辑 docker-compose.yml，配置 rclone 远端、Webhook Token、白名单、本地目录映射
+# 2. 编辑 docker-compose.yml，配置 rclone 远端、API/Webhook 共用 Token、白名单、本地目录映射
 vim docker-compose.yml
 
 # 3. 启动
@@ -104,12 +104,11 @@ docker exec rclone-manager /app/server --reset-password
 | `RCLONE_MANAGER_LOG_DIR` | `/app/logs` | 日志文件目录 |
 | `RCLONE_MANAGER_PORT` | `6050` | HTTP 服务端口 |
 | `RCLONE_CONFIG` | `/root/.config/rclone/rclone.conf` | Rclone 配置文件路径 |
-| `RCLONE_MANAGER_API_TOKEN` | `""` | API Token（空表示不启用） |
+| `RCLONE_MANAGER_API_TOKEN` | `""` | API/Webhook 共用 Token（空表示不启用；`/webhook` 可用 `Authorization: Bearer <token>`） |
 | `RCLONE_MANAGER_MOUNT_ROOT` | `""` | 可选：限制挂载目录根路径；留空表示不限制 |
 | `RCLONE_MANAGER_WEBHOOK_LOCAL_BASE_DIR` | `/app/data/downloads` | Webhook 下载本地根目录 |
 | `RCLONE_MANAGER_WEBHOOK_RCLONE_PATH` | `rclone` | rclone 可执行文件路径 |
 | `RCLONE_MANAGER_WEBHOOK_RCLONE_REMOTE` | `""` | Webhook 下载使用的 rclone 远端名，必填后任务才可执行 |
-| `RCLONE_MANAGER_WEBHOOK_TOKENS` | `""` | Webhook Token，多个用逗号分隔 |
 | `RCLONE_MANAGER_WEBHOOK_ALLOWED_CALLBACK_HOSTS` | `""` | callback_url 域名白名单，多个用逗号分隔，支持 `*.example.com` |
 | `RCLONE_MANAGER_WEBHOOK_ALLOWED_CURL_HOSTS` | `""` | curl_url 域名白名单，多个用逗号分隔，支持 `*.example.com` |
 | `RCLONE_MANAGER_WEBHOOK_ALLOW_ANONYMOUS` | `false` | 是否允许 `/webhook` 不带 Token |
@@ -138,7 +137,7 @@ environment:
   - RCLONE_CONFIG=/root/.config/rclone/rclone.conf
   - RCLONE_MANAGER_WEBHOOK_RCLONE_REMOTE=webdav
   - RCLONE_MANAGER_WEBHOOK_LOCAL_BASE_DIR=/app/data/downloads
-  - RCLONE_MANAGER_WEBHOOK_TOKENS=replace-with-long-random-token
+  - RCLONE_MANAGER_API_TOKEN=replace-with-long-random-token
   - RCLONE_MANAGER_WEBHOOK_ALLOWED_CALLBACK_HOSTS=sender.example.com
   - RCLONE_MANAGER_WEBHOOK_ALLOWED_CURL_HOSTS=localhost,127.0.0.1,api.example.com
 ```
@@ -152,7 +151,7 @@ environment:
 ```bash
 curl -X POST http://ip:6050/webhook \
   -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer <webhook-token>' \
+  -H 'Authorization: Bearer <api-token>' \
   -d '{
     "path": "/remote/folder/a",
     "callback_url": "https://sender.example.com/download-finished",
@@ -177,6 +176,8 @@ curl -X GET "http://localhost:5244/api/fs/list?path=/&refresh=true" \
 ```
 
 这是一次性任务。任务会写入 SQLite，并在 WebUI 左侧 **Webhook 下载** 页面以任务卡片展示；点击卡片 **详情** 可查看远端路径、本地路径、callback/curl URL、curl headers、错误和 rclone 日志。
+
+`/webhook` 与系统里的 API Token 共用同一个值：`RCLONE_MANAGER_API_TOKEN`。推荐使用 `Authorization: Bearer <api-token>`；同时兼容 `X-API-Token`、`X-Webhook-Token` 或 `?token=`。
 
 管理接口：
 
@@ -353,14 +354,14 @@ zzmrclone-manager/
 - `POST /api/mounts/:id/start` — 执行挂载
 - `POST /api/mounts/:id/stop` — 执行卸载
 
-### 转移记录（需 Token）
+### 转移记录（需 API/Webhook 共用 Token）
 - `GET /api/output-logs?token=xxx` — 获取结构化转移记录
 - `DELETE /api/output-logs/:id?token=xxx` — 删除单条记录
 - `DELETE /api/output-logs/clean?token=xxx` — 清空记录
 
 ### Token 管理
-- `GET /api/token?token=xxx` — 获取 Token 信息
-- `POST /api/token?token=xxx` — 更新 Token
+- `GET /api/token?token=xxx` — 获取 API/Webhook 共用 Token 信息
+- `POST /api/token?token=xxx` — 更新 API/Webhook 共用 Token
 
 ---
 

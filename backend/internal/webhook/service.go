@@ -103,25 +103,19 @@ func (s *Service) Start(ctx context.Context) error {
 }
 
 func (s *Service) AuthEnabled() bool {
-	return !s.cfg.WebhookAllowAnonymous && len(s.cfg.WebhookTokens) > 0
+	return !s.cfg.WebhookAllowAnonymous && strings.TrimSpace(s.cfg.APIToken) != ""
 }
 
 func (s *Service) VerifyToken(token string) bool {
 	if s.cfg.WebhookAllowAnonymous {
 		return true
 	}
-	if token == "" {
-		return len(s.cfg.WebhookTokens) == 0
+	valid := strings.TrimSpace(s.cfg.APIToken)
+	if valid == "" {
+		return true
 	}
-	for _, valid := range s.cfg.WebhookTokens {
-		if valid == "" {
-			continue
-		}
-		if subtle.ConstantTimeCompare([]byte(token), []byte(valid)) == 1 {
-			return true
-		}
-	}
-	return false
+	token = strings.TrimSpace(token)
+	return subtle.ConstantTimeCompare([]byte(token), []byte(valid)) == 1
 }
 
 func (s *Service) CreateJob(ctx context.Context, req CreateRequest) (*models.WebhookJob, error) {

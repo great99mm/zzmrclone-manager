@@ -232,9 +232,9 @@ const WebhookJobs = () => {
             <Info label="Endpoint" value={webhookEndpoint} mono />
             <Info label="Remote" value={config?.rclone_remote || '未配置 RCLONE_MANAGER_WEBHOOK_RCLONE_REMOTE'} mono />
             <Info label="Local Base" value={config?.local_base_dir || '-'} mono />
-            <Info label="Token" value={config?.token_required ? '需要 Bearer 或 X-Webhook-Token' : '未启用'} />
+            <Info label="Token" value={config?.token_required ? '使用系统设置中的 API Token：Authorization: Bearer <token>' : 'Webhook 未要求 Token'} />
             <div className="mt-4 text-xs text-slate-400 leading-6">
-              通过 curl 发出的任务会写入 SQLite，页面每 5 秒自动刷新。callback/curl host 白名单为空时允许所有 HTTP(S) 主机。
+              Webhook 与输出日志 API 共用同一个访问 Token。通过 curl 发出的任务会写入 SQLite，页面每 5 秒自动刷新。callback/curl host 白名单为空时允许所有 HTTP(S) 主机。
             </div>
           </div>
         </div>

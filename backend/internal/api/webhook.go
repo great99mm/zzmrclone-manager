@@ -18,7 +18,13 @@ func webhookAuthMiddleware(c *gin.Context) {
 	}
 	token := bearerToken(c.GetHeader("Authorization"))
 	if token == "" {
-		token = c.GetHeader("X-Webhook-Token")
+		token = strings.TrimSpace(c.GetHeader("X-API-Token"))
+	}
+	if token == "" {
+		token = strings.TrimSpace(c.GetHeader("X-Webhook-Token"))
+	}
+	if token == "" {
+		token = strings.TrimSpace(c.Query("token"))
 	}
 	if !webhookJobs.VerifyToken(token) {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
@@ -90,25 +96,26 @@ func retryWebhookJob(c *gin.Context) {
 
 func getWebhookConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
-		"local_base_dir":            cfgGlobal.WebhookLocalBaseDir,
-		"rclone_path":               cfgGlobal.WebhookRclonePath,
-		"rclone_config":             cfgGlobal.RcloneConfig,
-		"rclone_remote":             cfgGlobal.WebhookRcloneRemote,
-		"transfers":                 cfgGlobal.WebhookTransfers,
-		"checkers":                  cfgGlobal.WebhookCheckers,
-		"retries":                   cfgGlobal.WebhookRetries,
-		"low_level_retries":         cfgGlobal.WebhookLowLevelRetries,
-		"bwlimit":                   cfgGlobal.WebhookBWLimit,
-		"workers":                   cfgGlobal.WebhookWorkers,
-		"queue_size":                cfgGlobal.WebhookQueueSize,
-		"job_timeout":               cfgGlobal.WebhookJobTimeout,
-		"http_timeout":              cfgGlobal.WebhookHTTPTimeout,
-		"max_rclone_log_bytes":      cfgGlobal.WebhookMaxRcloneLogSize,
-		"allowed_callback_hosts":    cfgGlobal.AllowedCallbackHosts,
-		"allowed_curl_hosts":        cfgGlobal.AllowedCurlHosts,
-		"token_required":            webhookJobs.AuthEnabled(),
-		"allow_anonymous_webhook":   cfgGlobal.WebhookAllowAnonymous,
-		"webhook_tokens_configured": len(cfgGlobal.WebhookTokens),
+		"local_base_dir":          cfgGlobal.WebhookLocalBaseDir,
+		"rclone_path":             cfgGlobal.WebhookRclonePath,
+		"rclone_config":           cfgGlobal.RcloneConfig,
+		"rclone_remote":           cfgGlobal.WebhookRcloneRemote,
+		"transfers":               cfgGlobal.WebhookTransfers,
+		"checkers":                cfgGlobal.WebhookCheckers,
+		"retries":                 cfgGlobal.WebhookRetries,
+		"low_level_retries":       cfgGlobal.WebhookLowLevelRetries,
+		"bwlimit":                 cfgGlobal.WebhookBWLimit,
+		"workers":                 cfgGlobal.WebhookWorkers,
+		"queue_size":              cfgGlobal.WebhookQueueSize,
+		"job_timeout":             cfgGlobal.WebhookJobTimeout,
+		"http_timeout":            cfgGlobal.WebhookHTTPTimeout,
+		"max_rclone_log_bytes":    cfgGlobal.WebhookMaxRcloneLogSize,
+		"allowed_callback_hosts":  cfgGlobal.AllowedCallbackHosts,
+		"allowed_curl_hosts":      cfgGlobal.AllowedCurlHosts,
+		"token_required":          webhookJobs.AuthEnabled(),
+		"api_token_enabled":       strings.TrimSpace(cfgGlobal.APIToken) != "",
+		"token_source":            "RCLONE_MANAGER_API_TOKEN",
+		"allow_anonymous_webhook": cfgGlobal.WebhookAllowAnonymous,
 	})
 }
 
