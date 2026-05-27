@@ -1,5 +1,7 @@
 # ZZMRClone Manager
 
+> 当前 `api` 分支是 **Webhook 一次性下载任务增强分支**：面向外部系统通过 `POST /webhook` 创建单次 rclone 下载任务，任务自动执行 `rclone copy` + `rclone check`，完成后可回调业务系统或刷新 OpenList，并在 WebUI 中以任务卡片展示执行详情。
+
 基于 Web 的 Rclone 自动化管理工具，支持任务调度、目录监控、实时日志、结构化转移记录、**云盘本地挂载**、**OpenList 目录自动刷新** 和 **Webhook 一次性下载 API**。提供可视化界面和持久化数据库，一条命令即可部署。
 
 ---
