@@ -30,7 +30,7 @@ func main() {
 
 	port := cfg.Port
 	if port == "" {
-		port = "7070"
+		port = "6050"
 	}
 
 	log.Printf("Rclone Manager starting on port %s", port)

@@ -56,6 +56,7 @@ func InitDB(dataDir string) error {
 		&models.OutputLog{},
 		&models.OpenlistConfig{},
 		&models.MountConfig{},
+		&models.WebhookJob{},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to migrate database: %v", err)

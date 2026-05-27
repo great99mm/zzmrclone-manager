@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -22,16 +23,18 @@ import (
 	"rclone-manager/internal/rclone"
 	"rclone-manager/internal/scheduler"
 	"rclone-manager/internal/watcher"
+	webhooksvc "rclone-manager/internal/webhook"
 	"rclone-manager/internal/websocket"
 )
 
 var (
-	executor  *rclone.Executor
-	sched     *scheduler.Scheduler
-	watch     *watcher.Watcher
-	hub       *websocket.Hub
-	cfgGlobal *config.Config
-	mountMgr  *mountsvc.Manager
+	executor    *rclone.Executor
+	sched       *scheduler.Scheduler
+	watch       *watcher.Watcher
+	hub         *websocket.Hub
+	cfgGlobal   *config.Config
+	mountMgr    *mountsvc.Manager
+	webhookJobs *webhooksvc.Service
 )
 
 // Hard caps for memory-hungry rclone flags.  These act as guardrails:
@@ -84,6 +87,15 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	// Init mount manager and auto-mount enabled mount configs
 	mountMgr = mountsvc.NewManager(db, cfg.MountRoot, cfg.DataDir)
 	go mountMgr.RestoreAndStartEnabled()
+
+	var err error
+	webhookJobs, err = webhooksvc.NewService(cfg, db)
+	if err != nil {
+		panic(err)
+	}
+	if err := webhookJobs.Start(context.Background()); err != nil {
+		panic(err)
+	}
 
 	// Load existing tasks and start watchers/schedules
 	var tasks []models.Task
@@ -169,7 +181,19 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		api.GET("/output-logs", requireTokenQuery, getOutputLogs)
 		api.DELETE("/output-logs/:id", requireTokenQuery, deleteOutputLog)
 		api.DELETE("/output-logs/clean", requireTokenQuery, cleanOutputLogs)
+
+		// Webhook-driven download jobs
+		webhookJobsGroup := api.Group("/webhook-jobs")
+		{
+			webhookJobsGroup.GET("", listWebhookJobs)
+			webhookJobsGroup.POST("", createWebhookJob)
+			webhookJobsGroup.GET("/config", getWebhookConfig)
+			webhookJobsGroup.GET("/:id", getWebhookJob)
+			webhookJobsGroup.POST("/:id/retry", retryWebhookJob)
+		}
 	}
+
+	router.POST("/webhook", createWebhookJob)
 
 	// WebSocket
 	router.GET("/ws", hub.HandleWebSocket)

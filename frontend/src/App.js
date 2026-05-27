@@ -11,6 +11,7 @@ import Settings from './pages/Settings';
 import FileBrowser from './pages/FileBrowser';
 import OpenlistConfigs from './pages/OpenlistConfigs';
 import Mounts from './pages/Mounts';
+import WebhookJobs from './pages/WebhookJobs';
 import Login from './pages/Login';
 import useAuthStore from './hooks/useAuthStore';
 
@@ -92,6 +93,7 @@ function App() {
             <Route path="/logs" element={<Logs />} />
             <Route path="/files" element={<FileBrowser />} />
             <Route path="/mounts" element={<Mounts />} />
+            <Route path="/webhook-jobs" element={<WebhookJobs />} />
             <Route path="/openlist-configs" element={<OpenlistConfigs />} />
             <Route path="/settings" element={<Settings />} />
           </Routes>

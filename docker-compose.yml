@@ -28,5 +28,5 @@ services:
       - TZ=Asia/Shanghai
       - RCLONE_MANAGER_DATA_DIR=/app/data
       - RCLONE_MANAGER_LOG_DIR=/app/logs
-      - RCLONE_MANAGER_PORT=7070
+      - RCLONE_MANAGER_PORT=6050
       - RCLONE_CONFIG=/root/.config/rclone/rclone.conf

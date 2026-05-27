@@ -1,9 +1,9 @@
 import axios from 'axios';
 
-const API_BASE = process.env.NODE_ENV === 'production' ? '/api' : 'http://localhost:7070/api';
+const API_BASE = process.env.NODE_ENV === 'production' ? '/api' : 'http://localhost:6050/api';
 const WS_BASE = process.env.NODE_ENV === 'production' 
   ? `ws://${window.location.host}/ws` 
-  : 'ws://localhost:7070/ws';
+  : 'ws://localhost:6050/ws';
 
 const api = axios.create({
   baseURL: API_BASE,
@@ -90,6 +90,13 @@ export const cleanOutputLogs = (taskId = '') => {
   const tid = taskId ? `&task_id=${taskId}` : '';
   return api.delete(`/output-logs/clean?token=${token}${tid}`);
 };
+
+// Webhook download jobs
+export const getWebhookJobs = (limit = 50) => api.get(`/webhook-jobs?limit=${limit}`);
+export const getWebhookJob = (id) => api.get(`/webhook-jobs/${id}`);
+export const createWebhookJob = (data) => api.post('/webhook-jobs', data);
+export const retryWebhookJob = (id) => api.post(`/webhook-jobs/${id}/retry`);
+export const getWebhookConfig = () => api.get('/webhook-jobs/config');
 
 // Token management
 export const getTokenInfo = () => {

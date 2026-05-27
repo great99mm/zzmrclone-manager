@@ -119,6 +119,20 @@ type SystemSetting struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+type WebhookJob struct {
+	ID          string     `json:"id" gorm:"primaryKey"`
+	RemotePath  string     `json:"remote_path" gorm:"not null"`
+	LocalPath   string     `json:"local_path"`
+	CallbackURL string     `json:"callback_url" gorm:"not null"`
+	CurlURL     string     `json:"curl_url" gorm:"not null"`
+	Status      string     `json:"status" gorm:"index;not null"`
+	Error       string     `json:"error" gorm:"type:text"`
+	RcloneLog   string     `json:"rclone_log" gorm:"type:text"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+	FinishedAt  *time.Time `json:"finished_at"`
+}
+
 type User struct {
 	ID        uint      `json:"id" gorm:"primaryKey"`
 	Username  string    `json:"username" gorm:"uniqueIndex;not null"`

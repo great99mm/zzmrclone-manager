@@ -14,6 +14,7 @@
 - **实时日志** — WebSocket 推送任务执行日志，支持倒序查看和关键字高亮
 - **结构化转移记录** — 每条文件传输自动生成持久化记录，支持分页查询和筛选
 - **云盘本地挂载** — 参考 CloudDrive2 的使用方式，将远程云盘挂载到容器本地目录
+- **Webhook 下载 API** — 外部 POST `/webhook` 后立即入队，后台执行 `rclone copy` + `rclone check`，成功后依次回调 `callback_url` 和 `curl_url`
 
 ### OpenList 集成
 
@@ -99,10 +100,58 @@ docker exec rclone-manager /app/server --reset-password
 |------|--------|------|
 | `RCLONE_MANAGER_DATA_DIR` | `/app/data` | 数据目录（SQLite 数据库） |
 | `RCLONE_MANAGER_LOG_DIR` | `/app/logs` | 日志文件目录 |
-| `RCLONE_MANAGER_PORT` | `7070` | HTTP 服务端口 |
+| `RCLONE_MANAGER_PORT` | `6050` | HTTP 服务端口 |
 | `RCLONE_CONFIG` | `/root/.config/rclone/rclone.conf` | Rclone 配置文件路径 |
 | `RCLONE_MANAGER_API_TOKEN` | `""` | API Token（空表示不启用） |
 | `RCLONE_MANAGER_MOUNT_ROOT` | `""` | 可选：限制挂载目录根路径；留空表示不限制 |
+| `RCLONE_MANAGER_WEBHOOK_LOCAL_BASE_DIR` | `/app/data/downloads` | Webhook 下载本地根目录 |
+| `RCLONE_MANAGER_WEBHOOK_RCLONE_REMOTE` | `""` | Webhook 下载使用的 rclone 远端名，必填后任务才可执行 |
+| `RCLONE_MANAGER_WEBHOOK_TOKENS` | `""` | Webhook Token，多个用逗号分隔 |
+| `RCLONE_MANAGER_WEBHOOK_ALLOWED_CALLBACK_HOSTS` | `""` | callback_url 域名白名单，多个用逗号分隔，支持 `*.example.com` |
+| `RCLONE_MANAGER_WEBHOOK_ALLOWED_CURL_HOSTS` | `""` | curl_url 域名白名单，多个用逗号分隔，支持 `*.example.com` |
+| `RCLONE_MANAGER_WEBHOOK_WORKERS` | `2` | Webhook 下载 worker 数 |
+| `RCLONE_MANAGER_WEBHOOK_TRANSFERS` | `4` | rclone transfers |
+| `RCLONE_MANAGER_WEBHOOK_CHECKERS` | `8` | rclone checkers |
+
+---
+
+## Webhook 下载 API
+
+外部系统调用：
+
+```bash
+curl -X POST http://ip:7071/webhook \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer <webhook-token>' \
+  -d '{
+    "path": "/remote/folder/a",
+    "callback_url": "https://sender.example.com/download-finished",
+    "curl_url": "https://api.example.com/reload?path=/remote/folder/a"
+  }'
+```
+
+返回 `202 Accepted`：
+
+```json
+{"job_id":"job_xxx","status":"pending"}
+```
+
+管理接口：
+
+- `GET /api/webhook-jobs`
+- `POST /api/webhook-jobs`
+- `GET /api/webhook-jobs/:id`
+- `POST /api/webhook-jobs/:id/retry`
+- `GET /api/webhook-jobs/config`
+
+状态：`pending`、`running`、`copying`、`checking`、`notifying_callback`、`calling_curl_url`、`success`、`failed`。
+
+安全规则：
+
+- rclone 使用 `exec.CommandContext`，不走 shell。
+- path 拒绝空值、`..`、反斜杠、NUL 字节。
+- 本地路径限制在 `RCLONE_MANAGER_WEBHOOK_LOCAL_BASE_DIR` 内，并拒绝已存在 symlink 路径组件。
+- `callback_url` / `curl_url` 建议配置域名白名单。
 
 ---
 
