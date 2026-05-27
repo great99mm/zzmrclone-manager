@@ -24,16 +24,3 @@ services:
       #  target: /data/cloud-mount
       #  bind:
       #    propagation: rshared
-    environment:
-      - TZ=Asia/Shanghai
-      - RCLONE_MANAGER_DATA_DIR=/app/data
-      - RCLONE_MANAGER_LOG_DIR=/app/logs
-      - RCLONE_MANAGER_PORT=6050
-      - RCLONE_CONFIG=/root/.config/rclone/rclone.conf
-      # API 与 Webhook 共用同一个访问 Token；留空表示不启用 Token 验证
-      #- RCLONE_MANAGER_API_TOKEN=replace-with-long-random-token
-      # Webhook 一次性下载配置
-      #- RCLONE_MANAGER_WEBHOOK_RCLONE_REMOTE=webdav
-      #- RCLONE_MANAGER_WEBHOOK_LOCAL_BASE_DIR=/app/data/downloads
-      #- RCLONE_MANAGER_WEBHOOK_ALLOWED_CALLBACK_HOSTS=sender.example.com
-      #- RCLONE_MANAGER_WEBHOOK_ALLOWED_CURL_HOSTS=localhost,127.0.0.1,api.example.com

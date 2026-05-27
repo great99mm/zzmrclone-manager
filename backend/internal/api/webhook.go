@@ -3,13 +3,33 @@ package api
 import (
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+	"rclone-manager/internal/models"
 	webhooksvc "rclone-manager/internal/webhook"
 )
+
+type webhookConfigRequest struct {
+	LocalBaseDir         string   `json:"local_base_dir"`
+	RcloneRemote         string   `json:"rclone_remote"`
+	Transfers            int      `json:"transfers"`
+	Checkers             int      `json:"checkers"`
+	Retries              int      `json:"retries"`
+	LowLevelRetries      int      `json:"low_level_retries"`
+	BWLimit              string   `json:"bwlimit"`
+	JobTimeout           string   `json:"job_timeout"`
+	HTTPTimeout          string   `json:"http_timeout"`
+	MaxRcloneLogBytes    int      `json:"max_rclone_log_bytes"`
+	AllowAnonymous       bool     `json:"allow_anonymous_webhook"`
+	AllowedCallbackHosts []string `json:"allowed_callback_hosts"`
+	AllowedCurlHosts     []string `json:"allowed_curl_hosts"`
+}
 
 func webhookAuthMiddleware(c *gin.Context) {
 	if webhookJobs == nil {
@@ -117,6 +137,128 @@ func getWebhookConfig(c *gin.Context) {
 		"token_source":            "RCLONE_MANAGER_API_TOKEN",
 		"allow_anonymous_webhook": cfgGlobal.WebhookAllowAnonymous,
 	})
+}
+
+func updateWebhookConfig(c *gin.Context) {
+	var req webhookConfigRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := applyWebhookConfigRequest(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := saveWebhookConfigRequest(&req); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if err := webhookJobs.ReloadConfig(); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "webhook config updated"})
+}
+
+func applyWebhookConfigRequest(req *webhookConfigRequest) error {
+	localBaseDir := strings.TrimSpace(req.LocalBaseDir)
+	if localBaseDir == "" {
+		localBaseDir = cfgGlobal.DataDir + "/downloads"
+	}
+	if !filepath.IsAbs(localBaseDir) {
+		return errors.New("local_base_dir must be an absolute path")
+	}
+	if err := os.MkdirAll(localBaseDir, 0o755); err != nil {
+		return err
+	}
+	if _, err := time.ParseDuration(defaultString(req.JobTimeout, "0s")); err != nil {
+		return errors.New("job_timeout must be a valid Go duration, for example 0s or 2h")
+	}
+	if _, err := time.ParseDuration(defaultString(req.HTTPTimeout, "30s")); err != nil {
+		return errors.New("http_timeout must be a valid Go duration, for example 30s")
+	}
+
+	cfgGlobal.WebhookLocalBaseDir = localBaseDir
+	cfgGlobal.WebhookRcloneRemote = strings.TrimSuffix(strings.TrimSpace(req.RcloneRemote), ":")
+	cfgGlobal.WebhookTransfers = clampInt(req.Transfers, 1, 64, 4)
+	cfgGlobal.WebhookCheckers = clampInt(req.Checkers, 1, 128, 8)
+	cfgGlobal.WebhookRetries = clampInt(req.Retries, 0, 20, 3)
+	cfgGlobal.WebhookLowLevelRetries = clampInt(req.LowLevelRetries, 0, 50, 10)
+	cfgGlobal.WebhookBWLimit = strings.TrimSpace(req.BWLimit)
+	cfgGlobal.WebhookJobTimeout = defaultString(req.JobTimeout, "0s")
+	cfgGlobal.WebhookHTTPTimeout = defaultString(req.HTTPTimeout, "30s")
+	cfgGlobal.WebhookMaxRcloneLogSize = clampInt(req.MaxRcloneLogBytes, 1024, 10485760, 1048576)
+	cfgGlobal.WebhookAllowAnonymous = req.AllowAnonymous
+	cfgGlobal.AllowedCallbackHosts = cleanHostList(req.AllowedCallbackHosts)
+	cfgGlobal.AllowedCurlHosts = cleanHostList(req.AllowedCurlHosts)
+	return nil
+}
+
+func saveWebhookConfigRequest(req *webhookConfigRequest) error {
+	settings := map[string]string{
+		"webhook_local_base_dir":         cfgGlobal.WebhookLocalBaseDir,
+		"webhook_rclone_remote":          cfgGlobal.WebhookRcloneRemote,
+		"webhook_transfers":              strconv.Itoa(cfgGlobal.WebhookTransfers),
+		"webhook_checkers":               strconv.Itoa(cfgGlobal.WebhookCheckers),
+		"webhook_retries":                strconv.Itoa(cfgGlobal.WebhookRetries),
+		"webhook_low_level_retries":      strconv.Itoa(cfgGlobal.WebhookLowLevelRetries),
+		"webhook_bwlimit":                cfgGlobal.WebhookBWLimit,
+		"webhook_job_timeout":            cfgGlobal.WebhookJobTimeout,
+		"webhook_http_timeout":           cfgGlobal.WebhookHTTPTimeout,
+		"webhook_max_rclone_log_bytes":   strconv.Itoa(cfgGlobal.WebhookMaxRcloneLogSize),
+		"webhook_allow_anonymous":        strconv.FormatBool(cfgGlobal.WebhookAllowAnonymous),
+		"webhook_allowed_callback_hosts": strings.Join(cfgGlobal.AllowedCallbackHosts, ","),
+		"webhook_allowed_curl_hosts":     strings.Join(cfgGlobal.AllowedCurlHosts, ","),
+	}
+	for key, value := range settings {
+		var setting models.SystemSetting
+		if err := db.Where("`key` = ?", key).FirstOrCreate(&setting, models.SystemSetting{Key: key}).Error; err != nil {
+			return err
+		}
+		setting.Value = value
+		if err := db.Save(&setting).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func cleanHostList(values []string) []string {
+	items := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		items = append(items, value)
+	}
+	return items
+}
+
+func defaultString(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func clampInt(value, minValue, maxValue, fallback int) int {
+	if value == 0 {
+		value = fallback
+	}
+	if value < minValue {
+		return minValue
+	}
+	if value > maxValue {
+		return maxValue
+	}
+	return value
 }
 
 func bearerToken(value string) string {

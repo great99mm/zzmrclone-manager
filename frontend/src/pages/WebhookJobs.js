@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Bell,
+  Cog,
   Copy,
   ExternalLink,
   FileText,
@@ -13,7 +14,7 @@ import {
   Webhook,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
-import { createWebhookJob, getWebhookConfig, getWebhookJob, getWebhookJobs, retryWebhookJob } from '../services/api';
+import { createWebhookJob, getWebhookConfig, getWebhookJob, getWebhookJobs, retryWebhookJob, updateWebhookConfig } from '../services/api';
 
 const statusStyles = {
   pending: 'bg-slate-100 text-slate-700 border-slate-200',
@@ -37,18 +38,52 @@ const statusLabels = {
   failed: '失败',
 };
 
+const defaultWebhookConfig = {
+  local_base_dir: '/app/data/downloads',
+  rclone_remote: '',
+  transfers: 4,
+  checkers: 8,
+  retries: 3,
+  low_level_retries: 10,
+  bwlimit: '',
+  job_timeout: '0s',
+  http_timeout: '30s',
+  max_rclone_log_bytes: 1048576,
+  allow_anonymous_webhook: false,
+  allowed_callback_hosts: '',
+  allowed_curl_hosts: '',
+};
+
+const configToForm = (data) => ({
+  local_base_dir: data?.local_base_dir || defaultWebhookConfig.local_base_dir,
+  rclone_remote: data?.rclone_remote || '',
+  transfers: data?.transfers ?? defaultWebhookConfig.transfers,
+  checkers: data?.checkers ?? defaultWebhookConfig.checkers,
+  retries: data?.retries ?? defaultWebhookConfig.retries,
+  low_level_retries: data?.low_level_retries ?? defaultWebhookConfig.low_level_retries,
+  bwlimit: data?.bwlimit || '',
+  job_timeout: data?.job_timeout || defaultWebhookConfig.job_timeout,
+  http_timeout: data?.http_timeout || defaultWebhookConfig.http_timeout,
+  max_rclone_log_bytes: data?.max_rclone_log_bytes ?? defaultWebhookConfig.max_rclone_log_bytes,
+  allow_anonymous_webhook: Boolean(data?.allow_anonymous_webhook),
+  allowed_callback_hosts: Array.isArray(data?.allowed_callback_hosts) ? data.allowed_callback_hosts.join(', ') : '',
+  allowed_curl_hosts: Array.isArray(data?.allowed_curl_hosts) ? data.allowed_curl_hosts.join(', ') : '',
+});
+
 const WebhookJobs = () => {
   const [jobs, setJobs] = useState([]);
   const [selectedJob, setSelectedJob] = useState(null);
   const [config, setConfig] = useState(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [savingConfig, setSavingConfig] = useState(false);
   const [form, setForm] = useState({
     path: '',
     callback_url: '',
     curl_url: '',
     curl_headers: '',
   });
+  const [configForm, setConfigForm] = useState(defaultWebhookConfig);
 
   const webhookEndpoint = useMemo(() => `${window.location.origin}/webhook`, []);
 
@@ -58,6 +93,7 @@ const WebhookJobs = () => {
       const [jobsRes, configRes] = await Promise.all([getWebhookJobs(), getWebhookConfig()]);
       setJobs(jobsRes.data.jobs || []);
       setConfig(configRes.data);
+      setConfigForm(configToForm(configRes.data));
     } catch (err) {
       toast.error('加载 Webhook 下载数据失败');
     } finally {
@@ -121,6 +157,32 @@ const WebhookJobs = () => {
     }
   };
 
+  const saveWebhookConfig = async (event) => {
+    event.preventDefault();
+    setSavingConfig(true);
+    try {
+      const payload = {
+        ...configForm,
+        transfers: Number(configForm.transfers),
+        checkers: Number(configForm.checkers),
+        retries: Number(configForm.retries),
+        low_level_retries: Number(configForm.low_level_retries),
+        max_rclone_log_bytes: Number(configForm.max_rclone_log_bytes),
+        allowed_callback_hosts: splitHosts(configForm.allowed_callback_hosts),
+        allowed_curl_hosts: splitHosts(configForm.allowed_curl_hosts),
+      };
+      await updateWebhookConfig(payload);
+      const res = await getWebhookConfig();
+      setConfig(res.data);
+      setConfigForm(configToForm(res.data));
+      toast.success('Webhook 配置已保存');
+    } catch (err) {
+      toast.error(err.response?.data?.error || '保存 Webhook 配置失败');
+    } finally {
+      setSavingConfig(false);
+    }
+  };
+
   const retryJob = async (job) => {
     try {
       await retryWebhookJob(job.id);
@@ -170,7 +232,143 @@ const WebhookJobs = () => {
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-[420px,1fr] gap-6">
-        <div className="space-y-6">
+        <div className="space-y-6 xl:max-h-[calc(100vh-7rem)] xl:overflow-y-auto xl:pr-2">
+          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+            <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+              <Cog className="w-5 h-5 text-blue-500" />
+              Webhook 运行配置
+            </h2>
+            <form onSubmit={saveWebhookConfig} className="space-y-4">
+              <Field label="Rclone 远端名">
+                <input
+                  value={configForm.rclone_remote}
+                  onChange={(event) => setConfigForm((prev) => ({ ...prev, rclone_remote: event.target.value }))}
+                  placeholder="webdav"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </Field>
+              <Field label="本地下载根目录">
+                <input
+                  value={configForm.local_base_dir}
+                  onChange={(event) => setConfigForm((prev) => ({ ...prev, local_base_dir: event.target.value }))}
+                  placeholder="/app/data/downloads"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-sm"
+                />
+              </Field>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Transfers">
+                  <input
+                    type="number"
+                    min="1"
+                    max="64"
+                    value={configForm.transfers}
+                    onChange={(event) => setConfigForm((prev) => ({ ...prev, transfers: event.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </Field>
+                <Field label="Checkers">
+                  <input
+                    type="number"
+                    min="1"
+                    max="128"
+                    value={configForm.checkers}
+                    onChange={(event) => setConfigForm((prev) => ({ ...prev, checkers: event.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </Field>
+                <Field label="Retries">
+                  <input
+                    type="number"
+                    min="0"
+                    max="20"
+                    value={configForm.retries}
+                    onChange={(event) => setConfigForm((prev) => ({ ...prev, retries: event.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </Field>
+                <Field label="Low-level retries">
+                  <input
+                    type="number"
+                    min="0"
+                    max="50"
+                    value={configForm.low_level_retries}
+                    onChange={(event) => setConfigForm((prev) => ({ ...prev, low_level_retries: event.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </Field>
+              </div>
+              <Field label="限速 bwlimit（可选）">
+                <input
+                  value={configForm.bwlimit}
+                  onChange={(event) => setConfigForm((prev) => ({ ...prev, bwlimit: event.target.value }))}
+                  placeholder="10M 或留空"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </Field>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="任务超时">
+                  <input
+                    value={configForm.job_timeout}
+                    onChange={(event) => setConfigForm((prev) => ({ ...prev, job_timeout: event.target.value }))}
+                    placeholder="0s"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </Field>
+                <Field label="HTTP 超时">
+                  <input
+                    value={configForm.http_timeout}
+                    onChange={(event) => setConfigForm((prev) => ({ ...prev, http_timeout: event.target.value }))}
+                    placeholder="30s"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </Field>
+              </div>
+              <Field label="Rclone 日志最大字节数">
+                <input
+                  type="number"
+                  min="1024"
+                  max="10485760"
+                  value={configForm.max_rclone_log_bytes}
+                  onChange={(event) => setConfigForm((prev) => ({ ...prev, max_rclone_log_bytes: event.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </Field>
+              <Field label="Callback host 白名单（逗号分隔，留空允许全部）">
+                <input
+                  value={configForm.allowed_callback_hosts}
+                  onChange={(event) => setConfigForm((prev) => ({ ...prev, allowed_callback_hosts: event.target.value }))}
+                  placeholder="sender.example.com, *.example.com"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </Field>
+              <Field label="Curl host 白名单（逗号分隔，留空允许全部）">
+                <input
+                  value={configForm.allowed_curl_hosts}
+                  onChange={(event) => setConfigForm((prev) => ({ ...prev, allowed_curl_hosts: event.target.value }))}
+                  placeholder="localhost, 127.0.0.1, api.example.com"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </Field>
+              <label className="flex items-start gap-3 rounded-lg bg-amber-50 border border-amber-100 p-3 text-sm text-amber-800">
+                <input
+                  type="checkbox"
+                  checked={configForm.allow_anonymous_webhook}
+                  onChange={(event) => setConfigForm((prev) => ({ ...prev, allow_anonymous_webhook: event.target.checked }))}
+                  className="mt-1 rounded border-amber-300 text-blue-600 focus:ring-blue-500"
+                />
+                <span>允许 /webhook 匿名调用。仅内网可信环境建议开启。</span>
+              </label>
+              <button
+                type="submit"
+                disabled={savingConfig}
+                className="w-full inline-flex items-center justify-center gap-2 px-4 py-2 bg-gray-900 text-white rounded-lg hover:bg-gray-800 font-medium disabled:opacity-50"
+              >
+                <Cog className="w-4 h-4" />
+                {savingConfig ? '保存中...' : '保存 Webhook 配置'}
+              </button>
+            </form>
+          </div>
+
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
             <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
               <Send className="w-5 h-5 text-blue-500" />
@@ -230,7 +428,7 @@ const WebhookJobs = () => {
               接入信息
             </h2>
             <Info label="Endpoint" value={webhookEndpoint} mono />
-            <Info label="Remote" value={config?.rclone_remote || '未配置 RCLONE_MANAGER_WEBHOOK_RCLONE_REMOTE'} mono />
+            <Info label="Remote" value={config?.rclone_remote || '未配置，请在本页 Webhook 运行配置中填写'} mono />
             <Info label="Local Base" value={config?.local_base_dir || '-'} mono />
             <Info label="Token" value={config?.token_required ? '使用系统设置中的 API Token：Authorization: Bearer <token>' : 'Webhook 未要求 Token'} />
             <div className="mt-4 text-xs text-slate-400 leading-6">
@@ -427,6 +625,11 @@ const parseCurlHeaders = (value) => {
     return [];
   }
 };
+
+const splitHosts = (value) => value
+  .split(',')
+  .map((item) => item.trim())
+  .filter(Boolean);
 
 const formatHeaders = (value) => {
   const headers = parseCurlHeaders(value);

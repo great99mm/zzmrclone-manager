@@ -69,6 +69,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	if err := InitDB(cfg.DataDir); err != nil {
 		panic(err)
 	}
+	if err := loadSystemSettingsIntoConfig(cfg); err != nil {
+		panic(err)
+	}
 
 	// Init WebSocket hub
 	hub = websocket.NewHub()
@@ -188,6 +191,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			webhookJobsGroup.GET("", listWebhookJobs)
 			webhookJobsGroup.POST("", createWebhookJob)
 			webhookJobsGroup.GET("/config", getWebhookConfig)
+			webhookJobsGroup.PUT("/config", updateWebhookConfig)
 			webhookJobsGroup.GET("/:id", getWebhookJob)
 			webhookJobsGroup.POST("/:id/retry", retryWebhookJob)
 		}
@@ -199,6 +203,75 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	router.GET("/ws", hub.HandleWebSocket)
 
 	return router
+}
+
+func loadSystemSettingsIntoConfig(cfg *config.Config) error {
+	settings := make([]models.SystemSetting, 0)
+	if err := db.Find(&settings).Error; err != nil {
+		return err
+	}
+	for _, setting := range settings {
+		applySystemSetting(cfg, setting.Key, setting.Value)
+	}
+	return nil
+}
+
+func applySystemSetting(cfg *config.Config, key, value string) {
+	switch key {
+	case "api_token":
+		cfg.APIToken = value
+	case "webhook_local_base_dir":
+		cfg.WebhookLocalBaseDir = value
+	case "webhook_rclone_remote":
+		cfg.WebhookRcloneRemote = value
+	case "webhook_transfers":
+		if parsed, err := strconv.Atoi(value); err == nil {
+			cfg.WebhookTransfers = parsed
+		}
+	case "webhook_checkers":
+		if parsed, err := strconv.Atoi(value); err == nil {
+			cfg.WebhookCheckers = parsed
+		}
+	case "webhook_retries":
+		if parsed, err := strconv.Atoi(value); err == nil {
+			cfg.WebhookRetries = parsed
+		}
+	case "webhook_low_level_retries":
+		if parsed, err := strconv.Atoi(value); err == nil {
+			cfg.WebhookLowLevelRetries = parsed
+		}
+	case "webhook_bwlimit":
+		cfg.WebhookBWLimit = value
+	case "webhook_job_timeout":
+		cfg.WebhookJobTimeout = value
+	case "webhook_http_timeout":
+		cfg.WebhookHTTPTimeout = value
+	case "webhook_max_rclone_log_bytes":
+		if parsed, err := strconv.Atoi(value); err == nil {
+			cfg.WebhookMaxRcloneLogSize = parsed
+		}
+	case "webhook_allow_anonymous":
+		cfg.WebhookAllowAnonymous = value == "true"
+	case "webhook_allowed_callback_hosts":
+		cfg.AllowedCallbackHosts = splitSettingList(value)
+	case "webhook_allowed_curl_hosts":
+		cfg.AllowedCurlHosts = splitSettingList(value)
+	}
+}
+
+func splitSettingList(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	items := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			items = append(items, part)
+		}
+	}
+	return items
 }
 
 // requireTokenQuery middleware checks ?token= query param against configured API token.

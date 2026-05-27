@@ -46,11 +46,9 @@ type CreateRequest struct {
 }
 
 type Service struct {
-	cfg        *config.Config
-	db         *gorm.DB
-	queue      chan string
-	client     *http.Client
-	jobTimeout time.Duration
+	cfg   *config.Config
+	db    *gorm.DB
+	queue chan string
 
 	mu     sync.Mutex
 	active map[string]struct{}
@@ -68,23 +66,28 @@ func NewService(cfg *config.Config, db *gorm.DB) (*Service, error) {
 	if queueSize <= 0 {
 		queueSize = 100
 	}
-	httpTimeout, err := parseDurationDefault(cfg.WebhookHTTPTimeout, 30*time.Second)
-	if err != nil {
-		return nil, fmt.Errorf("invalid webhook http timeout: %w", err)
-	}
-	jobTimeout, err := parseDurationDefault(cfg.WebhookJobTimeout, 0)
-	if err != nil {
-		return nil, fmt.Errorf("invalid webhook job timeout: %w", err)
-	}
-
 	return &Service{
-		cfg:        cfg,
-		db:         db,
-		queue:      make(chan string, queueSize),
-		client:     &http.Client{Timeout: httpTimeout},
-		jobTimeout: jobTimeout,
-		active:     make(map[string]struct{}),
+		cfg:    cfg,
+		db:     db,
+		queue:  make(chan string, queueSize),
+		active: make(map[string]struct{}),
 	}, nil
+}
+
+func (s *Service) ReloadConfig() error {
+	if strings.TrimSpace(s.cfg.WebhookLocalBaseDir) == "" {
+		return errors.New("webhook local base dir is required")
+	}
+	if err := os.MkdirAll(s.cfg.WebhookLocalBaseDir, 0o755); err != nil {
+		return fmt.Errorf("create webhook local base dir: %w", err)
+	}
+	if _, err := parseDurationDefault(s.cfg.WebhookHTTPTimeout, 30*time.Second); err != nil {
+		return fmt.Errorf("invalid webhook http timeout: %w", err)
+	}
+	if _, err := parseDurationDefault(s.cfg.WebhookJobTimeout, 0); err != nil {
+		return fmt.Errorf("invalid webhook job timeout: %w", err)
+	}
+	return nil
 }
 
 func (s *Service) Start(ctx context.Context) error {
@@ -249,8 +252,13 @@ func (s *Service) process(ctx context.Context, jobID string) {
 
 	jobCtx := ctx
 	var cancel context.CancelFunc
-	if s.jobTimeout > 0 {
-		jobCtx, cancel = context.WithTimeout(ctx, s.jobTimeout)
+	jobTimeout, err := s.currentJobTimeout()
+	if err != nil {
+		s.fail(job.ID, "parse job timeout", err, job.RcloneLog)
+		return
+	}
+	if jobTimeout > 0 {
+		jobCtx, cancel = context.WithTimeout(ctx, jobTimeout)
 		defer cancel()
 	}
 
@@ -496,7 +504,11 @@ func decodeHeaders(encoded string) (map[string]string, error) {
 }
 
 func (s *Service) do2xx(req *http.Request, name string) error {
-	resp, err := s.client.Do(req)
+	httpClient, err := s.currentHTTPClient()
+	if err != nil {
+		return err
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("%s request failed: %w", name, err)
 	}
@@ -506,6 +518,18 @@ func (s *Service) do2xx(req *http.Request, name string) error {
 		return fmt.Errorf("%s returned %s: %s", name, resp.Status, strings.TrimSpace(string(body)))
 	}
 	return nil
+}
+
+func (s *Service) currentHTTPClient() (*http.Client, error) {
+	httpTimeout, err := parseDurationDefault(s.cfg.WebhookHTTPTimeout, 30*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("invalid webhook http timeout: %w", err)
+	}
+	return &http.Client{Timeout: httpTimeout}, nil
+}
+
+func (s *Service) currentJobTimeout() (time.Duration, error) {
+	return parseDurationDefault(s.cfg.WebhookJobTimeout, 0)
 }
 
 func cleanRemotePath(raw string) (cleaned string, relative string, err error) {
