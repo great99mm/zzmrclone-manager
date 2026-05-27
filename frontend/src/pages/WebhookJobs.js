@@ -1,17 +1,40 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { RefreshCw, RotateCcw, Send, ShieldCheck, Webhook } from 'lucide-react';
+import {
+  Bell,
+  Copy,
+  ExternalLink,
+  FileText,
+  MapPin,
+  RefreshCw,
+  RotateCcw,
+  Send,
+  ShieldCheck,
+  Terminal,
+  Webhook,
+} from 'lucide-react';
 import toast from 'react-hot-toast';
 import { createWebhookJob, getWebhookConfig, getWebhookJob, getWebhookJobs, retryWebhookJob } from '../services/api';
 
 const statusStyles = {
-  pending: 'bg-slate-100 text-slate-700',
-  running: 'bg-blue-100 text-blue-700',
-  copying: 'bg-indigo-100 text-indigo-700',
-  checking: 'bg-purple-100 text-purple-700',
-  notifying_callback: 'bg-cyan-100 text-cyan-700',
-  calling_curl_url: 'bg-cyan-100 text-cyan-700',
-  success: 'bg-green-100 text-green-700',
-  failed: 'bg-red-100 text-red-700',
+  pending: 'bg-slate-100 text-slate-700 border-slate-200',
+  running: 'bg-blue-100 text-blue-700 border-blue-200',
+  copying: 'bg-indigo-100 text-indigo-700 border-indigo-200',
+  checking: 'bg-purple-100 text-purple-700 border-purple-200',
+  notifying_callback: 'bg-cyan-100 text-cyan-700 border-cyan-200',
+  calling_curl_url: 'bg-cyan-100 text-cyan-700 border-cyan-200',
+  success: 'bg-green-100 text-green-700 border-green-200',
+  failed: 'bg-red-100 text-red-700 border-red-200',
+};
+
+const statusLabels = {
+  pending: '等待中',
+  running: '运行中',
+  copying: '下载中',
+  checking: '校验中',
+  notifying_callback: '回调中',
+  calling_curl_url: '刷新中',
+  success: '成功',
+  failed: '失败',
 };
 
 const WebhookJobs = () => {
@@ -29,12 +52,6 @@ const WebhookJobs = () => {
 
   const webhookEndpoint = useMemo(() => `${window.location.origin}/webhook`, []);
 
-  useEffect(() => {
-    loadData();
-    const interval = setInterval(loadJobs, 5000);
-    return () => clearInterval(interval);
-  }, []);
-
   const loadData = async () => {
     setLoading(true);
     try {
@@ -51,11 +68,27 @@ const WebhookJobs = () => {
   const loadJobs = async () => {
     try {
       const res = await getWebhookJobs();
-      setJobs(res.data.jobs || []);
+      const nextJobs = res.data.jobs || [];
+      setJobs(nextJobs);
+      if (selectedJob) {
+        const latestSelected = nextJobs.find((job) => job.id === selectedJob.id);
+        if (latestSelected) {
+          setSelectedJob(latestSelected);
+        }
+      }
     } catch (err) {
       // keep silent during polling
     }
   };
+
+  useEffect(() => {
+    loadData();
+    const interval = setInterval(() => {
+      loadJobs();
+    }, 5000);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const loadJob = async (id) => {
     try {
@@ -77,12 +110,12 @@ const WebhookJobs = () => {
         delete payload.curl_headers;
       }
       const res = await createWebhookJob(payload);
-      toast.success(`任务已创建：${res.data.job_id}`);
+      toast.success(`一次性任务已创建：${res.data.job_id}`);
       setForm({ path: '', callback_url: '', curl_url: '', curl_headers: '' });
       await loadJobs();
       await loadJob(res.data.job_id);
     } catch (err) {
-      toast.error(err.response?.data?.error || '创建失败');
+      toast.error(err.response?.data?.error || err.message || '创建失败');
     } finally {
       setSubmitting(false);
     }
@@ -96,6 +129,15 @@ const WebhookJobs = () => {
       await loadJob(job.id);
     } catch (err) {
       toast.error(err.response?.data?.error || '重试失败');
+    }
+  };
+
+  const copyID = async (jobID) => {
+    try {
+      await navigator.clipboard.writeText(jobID);
+      toast.success('Job ID 已复制');
+    } catch (err) {
+      toast.error('复制失败');
     }
   };
 
@@ -113,10 +155,10 @@ const WebhookJobs = () => {
         <div>
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-50 text-blue-700 text-sm font-medium mb-3">
             <Webhook className="w-4 h-4" />
-            Webhook API
+            Webhook One-Time Jobs
           </div>
-          <h1 className="text-2xl font-bold text-gray-900">Webhook 下载调度</h1>
-          <p className="text-gray-500 mt-1">接收外部通知后后台执行 rclone copy + check，并完成 callback / curl_url 通知链路。</p>
+          <h1 className="text-2xl font-bold text-gray-900">Webhook 一次性下载</h1>
+          <p className="text-gray-500 mt-1">外部 POST /webhook 后会立刻出现在这里。每条记录都是一次性任务，可查看下载、校验、回调和刷新详情。</p>
         </div>
         <button
           onClick={loadData}
@@ -132,7 +174,7 @@ const WebhookJobs = () => {
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
             <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
               <Send className="w-5 h-5 text-blue-500" />
-              创建任务
+              手动创建一次性任务
             </h2>
             <form onSubmit={submitJob} className="space-y-4">
               <Field label="远端路径">
@@ -177,7 +219,7 @@ const WebhookJobs = () => {
                 className="w-full inline-flex items-center justify-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium disabled:opacity-50"
               >
                 <Send className="w-4 h-4" />
-                {submitting ? '提交中...' : '提交任务'}
+                {submitting ? '提交中...' : '提交一次性任务'}
               </button>
             </form>
           </div>
@@ -192,62 +234,47 @@ const WebhookJobs = () => {
             <Info label="Local Base" value={config?.local_base_dir || '-'} mono />
             <Info label="Token" value={config?.token_required ? '需要 Bearer 或 X-Webhook-Token' : '未启用'} />
             <div className="mt-4 text-xs text-slate-400 leading-6">
-              环境变量配置：remote、local base、workers、白名单、webhook token。callback/curl host 白名单为空时允许所有 HTTP(S) 主机。
+              通过 curl 发出的任务会写入 SQLite，页面每 5 秒自动刷新。callback/curl host 白名单为空时允许所有 HTTP(S) 主机。
             </div>
           </div>
         </div>
 
         <div className="space-y-6 min-w-0">
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-            <div className="px-5 py-4 border-b border-gray-200 flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-gray-900">最近任务</h2>
-              <span className="text-sm text-gray-500">{jobs.length} 条</span>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[760px]">
-                <thead className="bg-gray-50 border-b border-gray-200">
-                  <tr>
-                    <th className="px-5 py-3 text-left text-xs font-semibold text-gray-500 uppercase">Job ID</th>
-                    <th className="px-5 py-3 text-left text-xs font-semibold text-gray-500 uppercase">路径</th>
-                    <th className="px-5 py-3 text-left text-xs font-semibold text-gray-500 uppercase">状态</th>
-                    <th className="px-5 py-3 text-left text-xs font-semibold text-gray-500 uppercase">更新时间</th>
-                    <th className="px-5 py-3 text-right text-xs font-semibold text-gray-500 uppercase">操作</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {jobs.length === 0 ? (
-                    <tr>
-                      <td colSpan="5" className="px-5 py-12 text-center text-gray-500">暂无任务</td>
-                    </tr>
-                  ) : jobs.map((job) => (
-                    <tr key={job.id} className="hover:bg-gray-50">
-                      <td className="px-5 py-4 font-mono text-xs text-gray-700">{job.id}</td>
-                      <td className="px-5 py-4 text-sm text-gray-700 max-w-xs truncate">{job.remote_path}</td>
-                      <td className="px-5 py-4"><StatusBadge status={job.status} /></td>
-                      <td className="px-5 py-4 text-sm text-gray-500">{formatTime(job.updated_at)}</td>
-                      <td className="px-5 py-4">
-                        <div className="flex justify-end gap-2">
-                          <button onClick={() => loadJob(job.id)} className="px-3 py-1.5 text-sm bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200">详情</button>
-                          {job.status === 'failed' && (
-                            <button onClick={() => retryJob(job)} className="px-3 py-1.5 text-sm bg-red-50 text-red-700 rounded-lg hover:bg-red-100 inline-flex items-center gap-1">
-                              <RotateCcw className="w-3.5 h-3.5" /> 重试
-                            </button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900">一次性任务卡片</h2>
+              <p className="text-sm text-gray-500 mt-1">共 {jobs.length} 条，最新任务在前。</p>
             </div>
           </div>
 
+          {jobs.length === 0 ? (
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 px-6 py-12 text-center text-gray-500">
+              暂无一次性任务。外部调用 <span className="font-mono text-gray-700">POST /webhook</span> 后会显示在这里。
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 2xl:grid-cols-2 gap-4">
+              {jobs.map((job) => (
+                <JobCard
+                  key={job.id}
+                  job={job}
+                  active={selectedJob?.id === job.id}
+                  onDetail={() => loadJob(job.id)}
+                  onRetry={() => retryJob(job)}
+                  onCopy={() => copyID(job.id)}
+                />
+              ))}
+            </div>
+          )}
+
           <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 min-w-0">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">任务详情</h2>
+            <div className="flex items-center justify-between gap-3 mb-4">
+              <h2 className="text-lg font-semibold text-gray-900">任务详情</h2>
+              {selectedJob && <StatusBadge status={selectedJob.status} />}
+            </div>
             {selectedJob ? (
-              <pre className="bg-gray-950 text-gray-100 rounded-lg p-4 text-xs overflow-auto max-h-[460px]">{JSON.stringify(selectedJob, null, 2)}</pre>
+              <JobDetail job={selectedJob} />
             ) : (
-              <div className="text-gray-500 text-sm">点击最近任务中的“详情”查看完整 job 数据、错误和 rclone 日志。</div>
+              <div className="text-gray-500 text-sm">点击任务卡片中的“详情”查看完整下载、通知和 rclone 日志。</div>
             )}
           </div>
         </div>
@@ -255,6 +282,89 @@ const WebhookJobs = () => {
     </div>
   );
 };
+
+const JobCard = ({ job, active, onDetail, onRetry, onCopy }) => {
+  const headerCount = parseCurlHeaders(job.curl_headers).length;
+
+  return (
+    <article className={`rounded-2xl border bg-white shadow-sm transition-all ${active ? 'border-blue-300 ring-2 ring-blue-100' : 'border-gray-200 hover:border-blue-200'}`}>
+      <div className="p-5 space-y-4">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="px-2 py-1 rounded-full text-xs font-semibold bg-gray-900 text-white">一次性任务</span>
+              <StatusBadge status={job.status} />
+            </div>
+            <button onClick={onDetail} className="font-mono text-xs text-blue-700 hover:text-blue-900 break-all text-left">
+              {job.id}
+            </button>
+          </div>
+          <button onClick={onCopy} className="p-2 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-lg" title="复制 Job ID" type="button">
+            <Copy className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="space-y-2 text-sm">
+          <CardLine icon={MapPin} label="远端" value={job.remote_path} mono />
+          <CardLine icon={FileText} label="本地" value={job.local_path || '等待生成'} mono muted={!job.local_path} />
+          <CardLine icon={Bell} label="Callback" value={hostOf(job.callback_url)} />
+          <CardLine icon={ExternalLink} label="Curl" value={hostOf(job.curl_url)} />
+        </div>
+
+        <div className="grid grid-cols-2 gap-2 text-xs">
+          <MiniMetric label="Header" value={`${headerCount} 个`} />
+          <MiniMetric label="更新" value={formatTime(job.updated_at)} />
+        </div>
+
+        {job.error && (
+          <div className="rounded-lg bg-red-50 border border-red-100 px-3 py-2 text-sm text-red-700 line-clamp-2">
+            {job.error}
+          </div>
+        )}
+
+        <div className="flex items-center justify-end gap-2 pt-1">
+          <button onClick={onDetail} className="px-3 py-1.5 text-sm bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200" type="button">
+            详情
+          </button>
+          {job.status === 'failed' && (
+            <button onClick={onRetry} className="px-3 py-1.5 text-sm bg-red-50 text-red-700 rounded-lg hover:bg-red-100 inline-flex items-center gap-1" type="button">
+              <RotateCcw className="w-3.5 h-3.5" /> 重试
+            </button>
+          )}
+        </div>
+      </div>
+    </article>
+  );
+};
+
+const JobDetail = ({ job }) => (
+  <div className="space-y-5">
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+      <DetailItem label="Job ID" value={job.id} mono />
+      <DetailItem label="任务类型" value={job.job_type || 'one_time'} />
+      <DetailItem label="远端路径" value={job.remote_path} mono />
+      <DetailItem label="本地路径" value={job.local_path || '-'} mono />
+      <DetailItem label="创建时间" value={formatTime(job.created_at)} />
+      <DetailItem label="更新时间" value={formatTime(job.updated_at)} />
+      <DetailItem label="完成时间" value={formatTime(job.finished_at)} />
+      <DetailItem label="Curl Headers" value={formatHeaders(job.curl_headers)} mono />
+    </div>
+
+    <DetailBlock label="Callback URL" value={job.callback_url} />
+    <DetailBlock label="Curl URL" value={job.curl_url} />
+    {job.error && <DetailBlock label="错误" value={job.error} danger />}
+
+    <div>
+      <div className="flex items-center gap-2 text-sm font-semibold text-gray-900 mb-2">
+        <Terminal className="w-4 h-4 text-gray-500" />
+        Rclone 日志
+      </div>
+      <pre className="bg-gray-950 text-gray-100 rounded-lg p-4 text-xs overflow-auto max-h-[460px] whitespace-pre-wrap">
+        {job.rclone_log || '暂无日志'}
+      </pre>
+    </div>
+  </div>
+);
 
 const Field = ({ label, children }) => (
   <label className="block">
@@ -270,11 +380,76 @@ const Info = ({ label, value, mono }) => (
   </div>
 );
 
+const CardLine = ({ icon: Icon, label, value, mono, muted }) => (
+  <div className="flex items-start gap-2 min-w-0">
+    <Icon className="w-4 h-4 text-gray-400 mt-0.5 flex-shrink-0" />
+    <div className="min-w-0">
+      <div className="text-xs text-gray-500">{label}</div>
+      <div className={`truncate ${mono ? 'font-mono text-xs' : ''} ${muted ? 'text-gray-400' : 'text-gray-800'}`}>{value || '-'}</div>
+    </div>
+  </div>
+);
+
+const MiniMetric = ({ label, value }) => (
+  <div className="rounded-lg bg-gray-50 border border-gray-100 px-3 py-2">
+    <div className="text-gray-400">{label}</div>
+    <div className="font-medium text-gray-700 truncate">{value}</div>
+  </div>
+);
+
+const DetailItem = ({ label, value, mono }) => (
+  <div className="rounded-lg bg-gray-50 border border-gray-100 px-3 py-2 min-w-0">
+    <div className="text-xs text-gray-500 mb-1">{label}</div>
+    <div className={`text-sm text-gray-800 break-all ${mono ? 'font-mono text-xs' : ''}`}>{value || '-'}</div>
+  </div>
+);
+
+const DetailBlock = ({ label, value, danger }) => (
+  <div>
+    <div className="text-sm font-semibold text-gray-900 mb-2">{label}</div>
+    <div className={`rounded-lg border px-3 py-2 text-sm break-all ${danger ? 'bg-red-50 border-red-100 text-red-700' : 'bg-gray-50 border-gray-100 text-gray-800'}`}>
+      {value || '-'}
+    </div>
+  </div>
+);
+
 const StatusBadge = ({ status }) => (
-  <span className={`px-2 py-1 rounded-full text-xs font-medium ${statusStyles[status] || 'bg-gray-100 text-gray-700'}`}>
-    {status}
+  <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium border ${statusStyles[status] || 'bg-gray-100 text-gray-700 border-gray-200'}`}>
+    {statusLabels[status] || status}
   </span>
 );
+
+const parseCurlHeaders = (value) => {
+  if (!value) return [];
+  try {
+    return Object.entries(JSON.parse(value));
+  } catch (err) {
+    return [];
+  }
+};
+
+const formatHeaders = (value) => {
+  const headers = parseCurlHeaders(value);
+  if (headers.length === 0) return '-';
+  return headers.map(([key, val]) => `${key}: ${maskHeaderValue(key, val)}`).join('\n');
+};
+
+const maskHeaderValue = (key, value) => {
+  if (!value) return '';
+  if (key.toLowerCase() === 'authorization') {
+    return `${String(value).slice(0, 12)}...${String(value).slice(-6)}`;
+  }
+  return value;
+};
+
+const hostOf = (value) => {
+  if (!value) return '-';
+  try {
+    return new URL(value).host;
+  } catch (err) {
+    return value;
+  }
+};
 
 const formatTime = (value) => {
   if (!value) return '-';

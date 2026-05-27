@@ -143,8 +143,10 @@ curl -X GET "http://localhost:5244/api/fs/list?path=/&refresh=true" \
 返回 `202 Accepted`：
 
 ```json
-{"job_id":"job_xxx","status":"pending"}
+{"job_id":"job_xxx","job_type":"one_time","status":"pending"}
 ```
+
+这是一次性任务。任务会写入 SQLite，并在 WebUI 左侧 **Webhook 下载** 页面以任务卡片展示；点击卡片 **详情** 可查看远端路径、本地路径、callback/curl URL、curl headers、错误和 rclone 日志。
 
 管理接口：
 

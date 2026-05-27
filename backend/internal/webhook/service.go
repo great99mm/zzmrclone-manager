@@ -152,6 +152,7 @@ func (s *Service) CreateJob(ctx context.Context, req CreateRequest) (*models.Web
 	}
 	job := &models.WebhookJob{
 		ID:          jobID,
+		JobType:     "one_time",
 		RemotePath:  req.Path,
 		CallbackURL: req.CallbackURL,
 		CurlURL:     req.CurlURL,

@@ -121,6 +121,7 @@ type SystemSetting struct {
 
 type WebhookJob struct {
 	ID          string     `json:"id" gorm:"primaryKey"`
+	JobType     string     `json:"job_type" gorm:"default:'one_time'"`
 	RemotePath  string     `json:"remote_path" gorm:"not null"`
 	LocalPath   string     `json:"local_path"`
 	CallbackURL string     `json:"callback_url" gorm:"not null"`

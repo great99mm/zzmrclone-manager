@@ -45,7 +45,7 @@ func createWebhookJob(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusAccepted, gin.H{"job_id": job.ID, "status": job.Status})
+	c.JSON(http.StatusAccepted, gin.H{"job_id": job.ID, "job_type": job.JobType, "status": job.Status})
 }
 
 func isExternalWebhookRequest(c *gin.Context) bool {
@@ -85,7 +85,7 @@ func retryWebhookJob(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusAccepted, gin.H{"job_id": job.ID, "status": job.Status})
+	c.JSON(http.StatusAccepted, gin.H{"job_id": job.ID, "job_type": job.JobType, "status": job.Status})
 }
 
 func getWebhookConfig(c *gin.Context) {
