@@ -122,6 +122,18 @@ func retryWebhookJob(c *gin.Context) {
 	c.JSON(http.StatusAccepted, gin.H{"job_id": job.ID, "job_type": job.JobType, "status": job.Status})
 }
 
+func deleteWebhookJob(c *gin.Context) {
+	if err := webhookJobs.DeleteJob(c.Request.Context(), c.Param("id")); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "job not found"})
+			return
+		}
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "webhook job deleted"})
+}
+
 func getWebhookConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"local_base_dir":         cfgGlobal.WebhookLocalBaseDir,

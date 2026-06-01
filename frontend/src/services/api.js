@@ -96,6 +96,7 @@ export const getWebhookJobs = (limit = 50) => api.get(`/webhook-jobs?limit=${lim
 export const getWebhookJob = (id) => api.get(`/webhook-jobs/${id}`);
 export const createWebhookJob = (data) => api.post('/webhook-jobs', data);
 export const retryWebhookJob = (id) => api.post(`/webhook-jobs/${id}/retry`);
+export const deleteWebhookJob = (id) => api.delete(`/webhook-jobs/${id}`);
 export const getWebhookConfig = () => api.get('/webhook-jobs/config');
 export const updateWebhookConfig = (data) => api.put('/webhook-jobs/config', data);
 

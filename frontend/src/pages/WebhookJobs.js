@@ -1,8 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Bell,
+  CheckCircle,
   Cog,
   Copy,
+  Trash2,
+  X,
   ExternalLink,
   FileText,
   MapPin,
@@ -14,7 +17,7 @@ import {
   Webhook,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
-import { createWebhookJob, getWebhookConfig, getWebhookJob, getWebhookJobs, retryWebhookJob, updateWebhookConfig } from '../services/api';
+import { createWebhookJob, deleteWebhookJob, getWebhookConfig, getWebhookJob, getWebhookJobs, retryWebhookJob, updateWebhookConfig } from '../services/api';
 
 const statusStyles = {
   pending: 'bg-slate-100 text-slate-700 border-slate-200',
@@ -77,6 +80,7 @@ const WebhookJobs = ({ mode = 'all' }) => {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [savingConfig, setSavingConfig] = useState(false);
+  const [detailOpen, setDetailOpen] = useState(false);
   const [form, setForm] = useState({
     path: '',
     tag: '',
@@ -98,7 +102,17 @@ const WebhookJobs = ({ mode = 'all' }) => {
     setLoading(true);
     try {
       const [jobsRes, configRes] = await Promise.all([getWebhookJobs(), getWebhookConfig()]);
-      setJobs(jobsRes.data.jobs || []);
+      const nextJobs = jobsRes.data.jobs || [];
+      setJobs(nextJobs);
+      if (selectedJob) {
+        const latestSelected = nextJobs.find((job) => job.id === selectedJob.id);
+        if (latestSelected) {
+          setSelectedJob(latestSelected);
+        } else {
+          setSelectedJob(null);
+          setDetailOpen(false);
+        }
+      }
       setConfig(configRes.data);
       setConfigForm(configToForm(configRes.data));
     } catch (err) {
@@ -117,6 +131,9 @@ const WebhookJobs = ({ mode = 'all' }) => {
         const latestSelected = nextJobs.find((job) => job.id === selectedJob.id);
         if (latestSelected) {
           setSelectedJob(latestSelected);
+        } else {
+          setSelectedJob(null);
+          setDetailOpen(false);
         }
       }
     } catch (err) {
@@ -137,6 +154,7 @@ const WebhookJobs = ({ mode = 'all' }) => {
     try {
       const res = await getWebhookJob(id);
       setSelectedJob(res.data);
+      setDetailOpen(true);
     } catch (err) {
       toast.error('查询任务失败');
     }
@@ -202,6 +220,29 @@ const WebhookJobs = ({ mode = 'all' }) => {
     }
   };
 
+  const deleteJob = async (job) => {
+    if (!job) return;
+    if (!['success', 'failed'].includes(job.status)) {
+      toast.error('只能删除成功或失败的历史任务');
+      return;
+    }
+    if (!window.confirm(`确定删除历史任务 ${job.id}？`)) {
+      return;
+    }
+    try {
+      await deleteWebhookJob(job.id);
+      toast.success('历史任务已删除');
+      setJobs((prev) => prev.filter((item) => item.id !== job.id));
+      if (selectedJob?.id === job.id) {
+        setSelectedJob(null);
+        setDetailOpen(false);
+      }
+      await loadJobs();
+    } catch (err) {
+      toast.error(err.response?.data?.error || '删除失败');
+    }
+  };
+
   const copyID = async (jobID) => {
     try {
       await navigator.clipboard.writeText(jobID);
@@ -224,6 +265,10 @@ const WebhookJobs = ({ mode = 'all' }) => {
 
   const removeTagDir = (index) => {
     setConfigForm((prev) => ({ ...prev, tag_dirs: prev.tag_dirs.filter((_, itemIndex) => itemIndex !== index) }));
+  };
+
+  const closeDetail = () => {
+    setDetailOpen(false);
   };
 
   if (loading) {
@@ -539,31 +584,35 @@ const WebhookJobs = ({ mode = 'all' }) => {
                   active={selectedJob?.id === job.id}
                   onDetail={() => loadJob(job.id)}
                   onRetry={() => retryJob(job)}
+                  onDelete={() => deleteJob(job)}
                   onCopy={() => copyID(job.id)}
                 />
               ))}
             </div>
           )}
 
-          <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 min-w-0">
-            <div className="flex items-center justify-between gap-3 mb-4">
-              <h2 className="text-lg font-semibold text-gray-900">任务详情</h2>
-              {selectedJob && <StatusBadge status={selectedJob.status} />}
+          {!selectedJob && (
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 min-w-0 text-gray-500 text-sm">
+              点击任务卡片中的“详情”以弹出卡片查看完整下载、通知和 rclone 日志。
             </div>
-            {selectedJob ? (
-              <JobDetail job={selectedJob} />
-            ) : (
-              <div className="text-gray-500 text-sm">点击任务卡片中的“详情”查看完整下载、通知和 rclone 日志。</div>
-            )}
-          </div>
+          )}
         </div>
         )}
       </div>
+
+      {selectedJob && detailOpen && (
+        <JobDetailModal
+          job={selectedJob}
+          onClose={closeDetail}
+          onRetry={() => retryJob(selectedJob)}
+          onDelete={() => deleteJob(selectedJob)}
+        />
+      )}
     </div>
   );
 };
 
-const JobCard = ({ job, active, onDetail, onRetry, onCopy }) => {
+const JobCard = ({ job, active, onDetail, onRetry, onDelete, onCopy }) => {
   const headerCount = parseCurlHeaders(job.curl_headers).length;
 
   return (
@@ -607,6 +656,11 @@ const JobCard = ({ job, active, onDetail, onRetry, onCopy }) => {
           <button onClick={onDetail} className="px-3 py-1.5 text-sm bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200" type="button">
             详情
           </button>
+          {['success', 'failed'].includes(job.status) && (
+            <button onClick={onDelete} className="px-3 py-1.5 text-sm bg-gray-100 text-gray-700 rounded-lg hover:bg-red-50 hover:text-red-700 inline-flex items-center gap-1" type="button">
+              <Trash2 className="w-3.5 h-3.5" /> 删除
+            </button>
+          )}
           {job.status === 'failed' && (
             <button onClick={onRetry} className="px-3 py-1.5 text-sm bg-red-50 text-red-700 rounded-lg hover:bg-red-100 inline-flex items-center gap-1" type="button">
               <RotateCcw className="w-3.5 h-3.5" /> 重试
@@ -615,6 +669,49 @@ const JobCard = ({ job, active, onDetail, onRetry, onCopy }) => {
         </div>
       </div>
     </article>
+  );
+};
+
+const JobDetailModal = ({ job, onClose, onRetry, onDelete }) => {
+  const deletable = ['success', 'failed'].includes(job.status);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 px-3 py-6 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="webhook-job-detail-title">
+      <div className="w-full max-w-5xl max-h-[92vh] overflow-hidden rounded-3xl bg-white shadow-2xl border border-slate-200">
+        <div className="flex flex-col md:flex-row md:items-start justify-between gap-4 border-b border-slate-100 bg-slate-50/80 px-5 md:px-6 py-4">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2 mb-2">
+              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-slate-900 text-white text-xs font-semibold">
+                <CheckCircle className="w-3.5 h-3.5" /> 一次性任务
+              </span>
+              <StatusBadge status={job.status} />
+            </div>
+            <h2 id="webhook-job-detail-title" className="text-lg font-semibold text-slate-950 break-all font-mono">
+              {job.id}
+            </h2>
+            <p className="text-sm text-slate-500 mt-1">下载、校验、回调与 rclone 日志详情</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {job.status === 'failed' && (
+              <button onClick={onRetry} className="inline-flex items-center gap-1.5 px-3 py-2 text-sm rounded-xl bg-red-50 text-red-700 hover:bg-red-100" type="button">
+                <RotateCcw className="w-4 h-4" /> 重试
+              </button>
+            )}
+            {deletable && (
+              <button onClick={onDelete} className="inline-flex items-center gap-1.5 px-3 py-2 text-sm rounded-xl bg-slate-100 text-slate-700 hover:bg-red-50 hover:text-red-700" type="button">
+                <Trash2 className="w-4 h-4" /> 删除历史
+              </button>
+            )}
+            <button onClick={onClose} className="inline-flex items-center justify-center w-10 h-10 rounded-xl bg-white text-slate-500 border border-slate-200 hover:bg-slate-100 hover:text-slate-900" type="button" aria-label="关闭任务详情">
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+        </div>
+        <div className="overflow-y-auto max-h-[calc(92vh-116px)] px-5 md:px-6 py-5">
+          <JobDetail job={job} />
+        </div>
+      </div>
+    </div>
   );
 };
 

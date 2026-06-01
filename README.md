@@ -161,6 +161,7 @@ curl -X GET "http://localhost:5244/api/fs/list?path=/&refresh=true" \
 ```
 
 这是一次性任务。任务会写入 SQLite，并在 WebUI 左侧 **Webhook 任务** 页面以任务卡片展示；点击卡片 **详情** 可查看 Tag、远端名、远端路径、本地路径、callback/curl URL、curl headers、错误和 rclone 日志。
+任务详情以弹出式卡片展示；成功或失败的历史任务可在卡片或详情弹窗中删除。
 
 保存路径规则：按 `tag` 找 WebUI 配置的保存目录，再拼接远端路径最后一级名称。例如 `tag=动画电影`、保存目录 `/opt/adjak`、`path=/up1/电影/绝命毒师`，最终保存到 `/opt/adjak/绝命毒师`。
 
@@ -172,6 +173,7 @@ curl -X GET "http://localhost:5244/api/fs/list?path=/&refresh=true" \
 - `POST /api/webhook-jobs`
 - `GET /api/webhook-jobs/:id`
 - `POST /api/webhook-jobs/:id/retry`
+- `DELETE /api/webhook-jobs/:id`
 - `GET /api/webhook-jobs/config`
 - `PUT /api/webhook-jobs/config`
 

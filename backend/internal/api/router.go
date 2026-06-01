@@ -194,6 +194,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			webhookJobsGroup.PUT("/config", updateWebhookConfig)
 			webhookJobsGroup.GET("/:id", getWebhookJob)
 			webhookJobsGroup.POST("/:id/retry", retryWebhookJob)
+			webhookJobsGroup.DELETE("/:id", deleteWebhookJob)
 		}
 	}
 

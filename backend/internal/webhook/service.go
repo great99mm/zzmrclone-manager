@@ -245,6 +245,17 @@ func (s *Service) RetryJob(ctx context.Context, id string) (*models.WebhookJob, 
 	return &job, s.Enqueue(ctx, job.ID)
 }
 
+func (s *Service) DeleteJob(ctx context.Context, id string) error {
+	var job models.WebhookJob
+	if err := s.db.WithContext(ctx).First(&job, "id = ?", id).Error; err != nil {
+		return err
+	}
+	if job.Status != StatusSuccess && job.Status != StatusFailed {
+		return errors.New("only success or failed jobs can be deleted")
+	}
+	return s.db.WithContext(ctx).Delete(&job).Error
+}
+
 func (s *Service) worker(ctx context.Context) {
 	for {
 		select {
