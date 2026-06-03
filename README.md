@@ -1,6 +1,6 @@
 # ZZMRClone Manager
 
-> 当前 `api` 分支是 **Webhook 一次性下载任务增强分支**：面向外部系统通过 `POST /webhook` 创建单次 rclone 下载任务，任务自动执行 `rclone copy` + `rclone check`，完成后可回调业务系统或刷新 OpenList，并在 WebUI 中以任务卡片展示执行详情。
+> 当前 `api` 分支是 **Webhook 一次性下载任务增强分支**：面向外部系统通过 `POST /webhook` 创建单次 rclone 下载任务，任务自动执行 `rclone copy` + `rclone check`，完成后先回调业务系统，再通知 SmartStrm 触发 STRM 任务，并在 WebUI 中以任务卡片展示执行详情。
 
 基于 Web 的 Rclone 自动化管理工具，支持任务调度、目录监控、实时日志、结构化转移记录、**云盘本地挂载**、**OpenList 目录自动刷新** 和 **Webhook 一次性下载 API**。提供可视化界面和持久化数据库，一条命令即可部署。
 
@@ -16,7 +16,7 @@
 - **实时日志** — WebSocket 推送任务执行日志，支持倒序查看和关键字高亮
 - **结构化转移记录** — 每条文件传输自动生成持久化记录，支持分页查询和筛选
 - **云盘本地挂载** — 参考 CloudDrive2 的使用方式，将远程云盘挂载到容器本地目录
-- **Webhook 下载 API** — 外部 POST `/webhook` 后立即入队，后台执行 `rclone copy` + `rclone check`，成功后依次回调 `callback_url` 和 `curl_url`
+- **Webhook 下载 API** — 外部 POST `/webhook` 后立即入队，后台执行 `rclone copy` + `rclone check`，成功后依次回调 `callback_url` 和 SmartStrm webhook
 
 ### OpenList 集成
 
@@ -126,10 +126,11 @@ Docker 部署默认无需额外 Webhook 环境变量，镜像默认使用上海�
 启动后在 WebUI 配置：
 
 1. **系统设置**：配置 API/Webhook 共用 Token。
-2. **Webhook 配置**：配置 rclone 远端名、Tag 保存目录、callback/curl host 白名单、并发和超时。
+2. **Webhook 配置**：配置 rclone 远端名、Tag 保存目录、SmartStrm webhook、转移后路径映射、host 白名单、并发和超时。
 
 远端名在 WebUI 中配置，只写远端名，不带冒号；例如 `webdav`，服务会拼成 `webdav:/remote/folder/a`。
 Tag 保存目录在 WebUI 中配置，例如 `动画电影 => /opt/adjak`。
+SmartStrm webhook 在 WebUI 中配置，任务完成后会先请求 `callback_url`，再向 SmartStrm 发送 `event=a_task`。转移后路径可配置映射，例如 `/opt/media => /s2/media`，最终传给 SmartStrm 的 `task.storage_path` 使用映射后的路径。
 
 ### 调用示例
 
@@ -142,16 +143,21 @@ curl -X POST http://ip:6050/webhook \
   -d '{
     "path": "/up1/电影/绝命毒师",
     "tag": "动画电影",
-    "callback_url": "https://sender.example.com/download-finished",
-    "curl_url": "http://localhost:5244/api/fs/list?path=/&refresh=true"
+    "callback_url": "https://sender.example.com/download-finished"
   }'
 ```
 
-`curl_url` 和 `curl_headers` 可选。`curl_headers` 用于需要额外请求头的刷新接口，例如 OpenList：
+SmartStrm webhook 请求体由系统自动发送，格式示例：
 
-```bash
-curl -X GET "http://localhost:5244/api/fs/list?path=/&refresh=true" \
-  -H "Authorization: openlist-xxx"
+```json
+{
+  "event": "a_task",
+  "task": {
+    "name": "movie_task",
+    "storage_path": "/s2/media/电影/绝命毒师"
+  },
+  "delay": 0
+}
 ```
 
 返回 `202 Accepted`：
@@ -160,7 +166,7 @@ curl -X GET "http://localhost:5244/api/fs/list?path=/&refresh=true" \
 {"job_id":"job_xxx","job_type":"one_time","status":"pending"}
 ```
 
-这是一次性任务。任务会写入 SQLite，并在 WebUI 左侧 **Webhook 任务** 页面以任务卡片展示；点击卡片 **详情** 可查看 Tag、远端名、远端路径、本地路径、callback/curl URL、curl headers、错误和 rclone 日志。
+这是一次性任务。任务会写入 SQLite，并在 WebUI 左侧 **Webhook 任务** 页面以任务卡片展示；点击卡片 **详情** 可查看 Tag、远端名、远端路径、本地路径、SmartStrm 路径、callback URL、错误和 rclone 日志。
 任务详情以弹出式卡片展示；成功或失败的历史任务可在卡片或详情弹窗中删除。
 
 保存路径规则：按 `tag` 找 WebUI 配置的保存目录，再拼接远端路径最后一级名称。例如 `tag=动画电影`、保存目录 `/opt/adjak`、`path=/up1/电影/绝命毒师`，最终保存到 `/opt/adjak/绝命毒师`。
@@ -177,7 +183,7 @@ curl -X GET "http://localhost:5244/api/fs/list?path=/&refresh=true" \
 - `GET /api/webhook-jobs/config`
 - `PUT /api/webhook-jobs/config`
 
-状态：`pending`、`running`、`copying`、`checking`、`notifying_callback`、`calling_curl_url`、`success`、`failed`。
+状态：`pending`、`running`、`copying`、`checking`、`notifying_callback`、`notifying_smartstrm`、`success`、`failed`。
 
 安全规则：
 
@@ -185,7 +191,7 @@ curl -X GET "http://localhost:5244/api/fs/list?path=/&refresh=true" \
 - path 拒绝空值、`..`、反斜杠、NUL 字节。
 - tag 必填且必须已在 WebUI 中配置保存目录。
 - 本地路径固定为 `tag保存目录/path最后一级名称`，并拒绝已存在 symlink 路径组件。
-- `callback_url` / `curl_url` 建议配置域名白名单。
+- `callback_url` / SmartStrm webhook 建议配置域名白名单。
 
 ---
 

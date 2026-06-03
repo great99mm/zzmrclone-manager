@@ -14,29 +14,38 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
+	"rclone-manager/internal/config"
 	"rclone-manager/internal/models"
 	webhooksvc "rclone-manager/internal/webhook"
 )
 
 type webhookConfigRequest struct {
-	LocalBaseDir         string   `json:"local_base_dir"`
-	RcloneRemote         string   `json:"rclone_remote"`
-	Transfers            int      `json:"transfers"`
-	Checkers             int      `json:"checkers"`
-	Retries              int      `json:"retries"`
-	LowLevelRetries      int      `json:"low_level_retries"`
-	BWLimit              string   `json:"bwlimit"`
-	JobTimeout           string   `json:"job_timeout"`
-	HTTPTimeout          string   `json:"http_timeout"`
-	MaxRcloneLogBytes    int      `json:"max_rclone_log_bytes"`
-	TagDirs              []tagDir `json:"tag_dirs"`
-	AllowedCallbackHosts []string `json:"allowed_callback_hosts"`
-	AllowedCurlHosts     []string `json:"allowed_curl_hosts"`
+	LocalBaseDir          string        `json:"local_base_dir"`
+	RcloneRemote          string        `json:"rclone_remote"`
+	Transfers             int           `json:"transfers"`
+	Checkers              int           `json:"checkers"`
+	Retries               int           `json:"retries"`
+	LowLevelRetries       int           `json:"low_level_retries"`
+	BWLimit               string        `json:"bwlimit"`
+	JobTimeout            string        `json:"job_timeout"`
+	HTTPTimeout           string        `json:"http_timeout"`
+	MaxRcloneLogBytes     int           `json:"max_rclone_log_bytes"`
+	TagDirs               []tagDir      `json:"tag_dirs"`
+	SmartStrmWebhookURL   string        `json:"smartstrm_webhook_url"`
+	SmartStrmTaskName     string        `json:"smartstrm_task_name"`
+	SmartStrmPathMappings []pathMapping `json:"smartstrm_path_mappings"`
+	AllowedCallbackHosts  []string      `json:"allowed_callback_hosts"`
+	AllowedSmartStrmHosts []string      `json:"allowed_smartstrm_hosts"`
 }
 
 type tagDir struct {
 	Tag string `json:"tag"`
 	Dir string `json:"dir"`
+}
+
+type pathMapping struct {
+	From string `json:"from"`
+	To   string `json:"to"`
 }
 
 func webhookAuthMiddleware(c *gin.Context) {
@@ -136,26 +145,29 @@ func deleteWebhookJob(c *gin.Context) {
 
 func getWebhookConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
-		"local_base_dir":         cfgGlobal.WebhookLocalBaseDir,
-		"rclone_path":            cfgGlobal.WebhookRclonePath,
-		"rclone_config":          cfgGlobal.RcloneConfig,
-		"rclone_remote":          cfgGlobal.WebhookRcloneRemote,
-		"transfers":              cfgGlobal.WebhookTransfers,
-		"checkers":               cfgGlobal.WebhookCheckers,
-		"retries":                cfgGlobal.WebhookRetries,
-		"low_level_retries":      cfgGlobal.WebhookLowLevelRetries,
-		"bwlimit":                cfgGlobal.WebhookBWLimit,
-		"workers":                cfgGlobal.WebhookWorkers,
-		"queue_size":             cfgGlobal.WebhookQueueSize,
-		"job_timeout":            cfgGlobal.WebhookJobTimeout,
-		"http_timeout":           cfgGlobal.WebhookHTTPTimeout,
-		"max_rclone_log_bytes":   cfgGlobal.WebhookMaxRcloneLogSize,
-		"tag_dirs":               tagDirsToList(cfgGlobal.WebhookTagDirs),
-		"allowed_callback_hosts": cfgGlobal.AllowedCallbackHosts,
-		"allowed_curl_hosts":     cfgGlobal.AllowedCurlHosts,
-		"token_required":         webhookJobs.AuthEnabled(),
-		"api_token_enabled":      strings.TrimSpace(cfgGlobal.APIToken) != "",
-		"token_source":           "RCLONE_MANAGER_API_TOKEN",
+		"local_base_dir":          cfgGlobal.WebhookLocalBaseDir,
+		"rclone_path":             cfgGlobal.WebhookRclonePath,
+		"rclone_config":           cfgGlobal.RcloneConfig,
+		"rclone_remote":           cfgGlobal.WebhookRcloneRemote,
+		"transfers":               cfgGlobal.WebhookTransfers,
+		"checkers":                cfgGlobal.WebhookCheckers,
+		"retries":                 cfgGlobal.WebhookRetries,
+		"low_level_retries":       cfgGlobal.WebhookLowLevelRetries,
+		"bwlimit":                 cfgGlobal.WebhookBWLimit,
+		"workers":                 cfgGlobal.WebhookWorkers,
+		"queue_size":              cfgGlobal.WebhookQueueSize,
+		"job_timeout":             cfgGlobal.WebhookJobTimeout,
+		"http_timeout":            cfgGlobal.WebhookHTTPTimeout,
+		"max_rclone_log_bytes":    cfgGlobal.WebhookMaxRcloneLogSize,
+		"tag_dirs":                tagDirsToList(cfgGlobal.WebhookTagDirs),
+		"smartstrm_webhook_url":   cfgGlobal.SmartStrmWebhookURL,
+		"smartstrm_task_name":     cfgGlobal.SmartStrmTaskName,
+		"smartstrm_path_mappings": pathMappingsToList(cfgGlobal.SmartStrmPathMappings),
+		"allowed_callback_hosts":  cfgGlobal.AllowedCallbackHosts,
+		"allowed_smartstrm_hosts": cfgGlobal.AllowedSmartStrmHosts,
+		"token_required":          webhookJobs.AuthEnabled(),
+		"api_token_enabled":       strings.TrimSpace(cfgGlobal.APIToken) != "",
+		"token_source":            "RCLONE_MANAGER_API_TOKEN",
 	})
 }
 
@@ -213,13 +225,35 @@ func applyWebhookConfigRequest(req *webhookConfigRequest) error {
 		return err
 	}
 	cfgGlobal.WebhookTagDirs = tagDirs
+	allowedSmartStrmHosts := cleanHostList(req.AllowedSmartStrmHosts)
+	smartStrmWebhookURL := strings.TrimSpace(req.SmartStrmWebhookURL)
+	smartStrmTaskName := strings.TrimSpace(req.SmartStrmTaskName)
+	if smartStrmWebhookURL != "" {
+		if smartStrmTaskName == "" {
+			return errors.New("smartstrm_task_name is required when smartstrm_webhook_url is configured")
+		}
+		if _, err := webhooksvc.ValidateOutboundURLForConfig(smartStrmWebhookURL, allowedSmartStrmHosts); err != nil {
+			return fmt.Errorf("invalid smartstrm_webhook_url: %w", err)
+		}
+	}
+	pathMappings, err := cleanPathMappings(req.SmartStrmPathMappings)
+	if err != nil {
+		return err
+	}
+	cfgGlobal.SmartStrmWebhookURL = smartStrmWebhookURL
+	cfgGlobal.SmartStrmTaskName = smartStrmTaskName
+	cfgGlobal.SmartStrmPathMappings = pathMappings
 	cfgGlobal.AllowedCallbackHosts = cleanHostList(req.AllowedCallbackHosts)
-	cfgGlobal.AllowedCurlHosts = cleanHostList(req.AllowedCurlHosts)
+	cfgGlobal.AllowedSmartStrmHosts = allowedSmartStrmHosts
 	return nil
 }
 
 func saveWebhookConfigRequest(req *webhookConfigRequest) error {
 	tagDirsJSON, err := json.Marshal(cfgGlobal.WebhookTagDirs)
+	if err != nil {
+		return err
+	}
+	pathMappingsJSON, err := json.Marshal(cfgGlobal.SmartStrmPathMappings)
 	if err != nil {
 		return err
 	}
@@ -235,8 +269,11 @@ func saveWebhookConfigRequest(req *webhookConfigRequest) error {
 		"webhook_http_timeout":           cfgGlobal.WebhookHTTPTimeout,
 		"webhook_max_rclone_log_bytes":   strconv.Itoa(cfgGlobal.WebhookMaxRcloneLogSize),
 		"webhook_tag_dirs":               string(tagDirsJSON),
+		"smartstrm_webhook_url":          cfgGlobal.SmartStrmWebhookURL,
+		"smartstrm_task_name":            cfgGlobal.SmartStrmTaskName,
+		"smartstrm_path_mappings":        string(pathMappingsJSON),
 		"webhook_allowed_callback_hosts": strings.Join(cfgGlobal.AllowedCallbackHosts, ","),
-		"webhook_allowed_curl_hosts":     strings.Join(cfgGlobal.AllowedCurlHosts, ","),
+		"smartstrm_allowed_hosts":        strings.Join(cfgGlobal.AllowedSmartStrmHosts, ","),
 	}
 	for key, value := range settings {
 		var setting models.SystemSetting
@@ -318,6 +355,39 @@ func tagDirsToList(values map[string]string) []tagDir {
 	sort.Slice(items, func(i, j int) bool {
 		return items[i].Tag < items[j].Tag
 	})
+	return items
+}
+
+func cleanPathMappings(values []pathMapping) ([]config.PathMapping, error) {
+	items := make([]config.PathMapping, 0, len(values))
+	for _, item := range values {
+		from := strings.TrimSpace(item.From)
+		to := strings.TrimSpace(item.To)
+		if from == "" && to == "" {
+			continue
+		}
+		if from == "" || to == "" {
+			return nil, errors.New("from and to are required for each SmartStrm path mapping")
+		}
+		if strings.ContainsAny(from, "\x00\r\n") || strings.ContainsAny(to, "\x00\r\n") {
+			return nil, errors.New("SmartStrm path mapping contains invalid characters")
+		}
+		if !filepath.IsAbs(from) {
+			return nil, fmt.Errorf("SmartStrm mapping source %q must be absolute", from)
+		}
+		items = append(items, config.PathMapping{From: filepath.Clean(from), To: strings.TrimRight(to, "/")})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return len(items[i].From) > len(items[j].From)
+	})
+	return items, nil
+}
+
+func pathMappingsToList(values []config.PathMapping) []pathMapping {
+	items := make([]pathMapping, 0, len(values))
+	for _, item := range values {
+		items = append(items, pathMapping{From: item.From, To: item.To})
+	}
 	return items
 }
 

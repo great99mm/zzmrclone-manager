@@ -25,7 +25,7 @@ const statusStyles = {
   copying: 'bg-indigo-100 text-indigo-700 border-indigo-200',
   checking: 'bg-purple-100 text-purple-700 border-purple-200',
   notifying_callback: 'bg-cyan-100 text-cyan-700 border-cyan-200',
-  calling_curl_url: 'bg-cyan-100 text-cyan-700 border-cyan-200',
+  notifying_smartstrm: 'bg-cyan-100 text-cyan-700 border-cyan-200',
   success: 'bg-green-100 text-green-700 border-green-200',
   failed: 'bg-red-100 text-red-700 border-red-200',
 };
@@ -36,7 +36,7 @@ const statusLabels = {
   copying: '下载中',
   checking: '校验中',
   notifying_callback: '回调中',
-  calling_curl_url: '刷新中',
+  notifying_smartstrm: '通知 SmartStrm',
   success: '成功',
   failed: '失败',
 };
@@ -53,8 +53,11 @@ const defaultWebhookConfig = {
   http_timeout: '30s',
   max_rclone_log_bytes: 1048576,
   tag_dirs: [],
+  smartstrm_webhook_url: '',
+  smartstrm_task_name: '',
+  smartstrm_path_mappings: [],
   allowed_callback_hosts: '',
-  allowed_curl_hosts: '',
+  allowed_smartstrm_hosts: '',
 };
 
 const configToForm = (data) => ({
@@ -69,8 +72,11 @@ const configToForm = (data) => ({
   http_timeout: data?.http_timeout || defaultWebhookConfig.http_timeout,
   max_rclone_log_bytes: data?.max_rclone_log_bytes ?? defaultWebhookConfig.max_rclone_log_bytes,
   tag_dirs: Array.isArray(data?.tag_dirs) ? data.tag_dirs : [],
+  smartstrm_webhook_url: data?.smartstrm_webhook_url || '',
+  smartstrm_task_name: data?.smartstrm_task_name || '',
+  smartstrm_path_mappings: Array.isArray(data?.smartstrm_path_mappings) ? data.smartstrm_path_mappings : [],
   allowed_callback_hosts: Array.isArray(data?.allowed_callback_hosts) ? data.allowed_callback_hosts.join(', ') : '',
-  allowed_curl_hosts: Array.isArray(data?.allowed_curl_hosts) ? data.allowed_curl_hosts.join(', ') : '',
+  allowed_smartstrm_hosts: Array.isArray(data?.allowed_smartstrm_hosts) ? data.allowed_smartstrm_hosts.join(', ') : '',
 });
 
 const WebhookJobs = ({ mode = 'all' }) => {
@@ -85,8 +91,6 @@ const WebhookJobs = ({ mode = 'all' }) => {
     path: '',
     tag: '',
     callback_url: '',
-    curl_url: '',
-    curl_headers: '',
   });
   const [configForm, setConfigForm] = useState(defaultWebhookConfig);
 
@@ -165,14 +169,9 @@ const WebhookJobs = ({ mode = 'all' }) => {
     setSubmitting(true);
     try {
       const payload = { ...form };
-      if (form.curl_headers.trim()) {
-        payload.curl_headers = JSON.parse(form.curl_headers);
-      } else {
-        delete payload.curl_headers;
-      }
       const res = await createWebhookJob(payload);
       toast.success(`一次性任务已创建：${res.data.job_id}`);
-      setForm({ path: '', tag: '', callback_url: '', curl_url: '', curl_headers: '' });
+      setForm({ path: '', tag: '', callback_url: '' });
       await loadJobs();
       await loadJob(res.data.job_id);
     } catch (err) {
@@ -194,8 +193,9 @@ const WebhookJobs = ({ mode = 'all' }) => {
         low_level_retries: Number(configForm.low_level_retries),
         max_rclone_log_bytes: Number(configForm.max_rclone_log_bytes),
         tag_dirs: configForm.tag_dirs,
+        smartstrm_path_mappings: configForm.smartstrm_path_mappings,
         allowed_callback_hosts: splitHosts(configForm.allowed_callback_hosts),
-        allowed_curl_hosts: splitHosts(configForm.allowed_curl_hosts),
+        allowed_smartstrm_hosts: splitHosts(configForm.allowed_smartstrm_hosts),
       };
       await updateWebhookConfig(payload);
       const res = await getWebhookConfig();
@@ -265,6 +265,27 @@ const WebhookJobs = ({ mode = 'all' }) => {
 
   const removeTagDir = (index) => {
     setConfigForm((prev) => ({ ...prev, tag_dirs: prev.tag_dirs.filter((_, itemIndex) => itemIndex !== index) }));
+  };
+
+  const updateSmartStrmPathMapping = (index, field, value) => {
+    setConfigForm((prev) => ({
+      ...prev,
+      smartstrm_path_mappings: prev.smartstrm_path_mappings.map((item, itemIndex) => (itemIndex === index ? { ...item, [field]: value } : item)),
+    }));
+  };
+
+  const addSmartStrmPathMapping = () => {
+    setConfigForm((prev) => ({
+      ...prev,
+      smartstrm_path_mappings: [...prev.smartstrm_path_mappings, { from: '', to: '' }],
+    }));
+  };
+
+  const removeSmartStrmPathMapping = (index) => {
+    setConfigForm((prev) => ({
+      ...prev,
+      smartstrm_path_mappings: prev.smartstrm_path_mappings.filter((_, itemIndex) => itemIndex !== index),
+    }));
   };
 
   const closeDetail = () => {
@@ -450,6 +471,74 @@ const WebhookJobs = ({ mode = 'all' }) => {
                   </div>
                 )}
               </div>
+              <div className="rounded-2xl border border-emerald-100 bg-emerald-50/60 p-4 space-y-4">
+                <div>
+                  <div className="text-sm font-semibold text-emerald-900">SmartStrm 完成通知</div>
+                  <p className="text-xs text-emerald-700 mt-1">任务完成并完成 callback 后，向 SmartStrm 发送 a_task webhook。</p>
+                </div>
+                <Field label="SmartStrm Webhook 地址">
+                  <input
+                    value={configForm.smartstrm_webhook_url}
+                    onChange={(event) => setConfigForm((prev) => ({ ...prev, smartstrm_webhook_url: event.target.value }))}
+                    placeholder="http://yourip:8024/webhook/abcdef123456"
+                    className="w-full px-3 py-2 border border-emerald-200 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                  />
+                </Field>
+                <Field label="SmartStrm 任务名">
+                  <input
+                    value={configForm.smartstrm_task_name}
+                    onChange={(event) => setConfigForm((prev) => ({ ...prev, smartstrm_task_name: event.target.value }))}
+                    placeholder="movie_task"
+                    className="w-full px-3 py-2 border border-emerald-200 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
+                  />
+                </Field>
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-medium text-emerald-900">转移后路径映射</div>
+                      <p className="text-xs text-emerald-700 mt-1">例如把本地 /opt/media 映射为 SmartStrm 可识别的 /s2/media。</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={addSmartStrmPathMapping}
+                      className="px-3 py-1.5 text-sm rounded-lg bg-white text-emerald-700 border border-emerald-200 hover:bg-emerald-100"
+                    >
+                      添加映射
+                    </button>
+                  </div>
+                  {configForm.smartstrm_path_mappings.length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-emerald-200 bg-white/60 px-3 py-4 text-sm text-emerald-700">
+                      暂未配置映射，默认直接把本地路径传给 SmartStrm。
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {configForm.smartstrm_path_mappings.map((item, index) => (
+                        <div key={`${index}-${item.from}`} className="grid grid-cols-1 md:grid-cols-[1fr,1fr,auto] gap-2">
+                          <input
+                            value={item.from}
+                            onChange={(event) => updateSmartStrmPathMapping(index, 'from', event.target.value)}
+                            placeholder="/opt/media"
+                            className="px-3 py-2 border border-emerald-200 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 font-mono text-sm"
+                          />
+                          <input
+                            value={item.to}
+                            onChange={(event) => updateSmartStrmPathMapping(index, 'to', event.target.value)}
+                            placeholder="/s2/media"
+                            className="px-3 py-2 border border-emerald-200 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 font-mono text-sm"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => removeSmartStrmPathMapping(index)}
+                            className="px-3 py-2 text-sm rounded-lg bg-white text-emerald-700 border border-emerald-200 hover:bg-red-50 hover:text-red-700"
+                          >
+                            删除
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
               <Field label="Callback host 白名单（逗号分隔，留空允许全部）">
                 <input
                   value={configForm.allowed_callback_hosts}
@@ -458,11 +547,11 @@ const WebhookJobs = ({ mode = 'all' }) => {
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 />
               </Field>
-              <Field label="Curl host 白名单（逗号分隔，留空允许全部）">
+              <Field label="SmartStrm host 白名单（逗号分隔，留空允许全部）">
                 <input
-                  value={configForm.allowed_curl_hosts}
-                  onChange={(event) => setConfigForm((prev) => ({ ...prev, allowed_curl_hosts: event.target.value }))}
-                  placeholder="localhost, 127.0.0.1, api.example.com"
+                  value={configForm.allowed_smartstrm_hosts}
+                  onChange={(event) => setConfigForm((prev) => ({ ...prev, allowed_smartstrm_hosts: event.target.value }))}
+                  placeholder="smartstrm.example.com, localhost, 127.0.0.1"
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 />
               </Field>
@@ -515,23 +604,6 @@ const WebhookJobs = ({ mode = 'all' }) => {
                   className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                 />
               </Field>
-              <Field label="Curl URL">
-                <input
-                  value={form.curl_url}
-                  onChange={(event) => setForm((prev) => ({ ...prev, curl_url: event.target.value }))}
-                  placeholder="http://localhost:5244/api/fs/list?path=/&refresh=true"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-              </Field>
-              <Field label="Curl Headers（JSON，可选）">
-                <textarea
-                  value={form.curl_headers}
-                  onChange={(event) => setForm((prev) => ({ ...prev, curl_headers: event.target.value }))}
-                  placeholder={'{\n  "Authorization": "openlist-xxx"\n}'}
-                  rows={4}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-xs"
-                />
-              </Field>
               <button
                 type="submit"
                 disabled={submitting}
@@ -553,9 +625,11 @@ const WebhookJobs = ({ mode = 'all' }) => {
             <Info label="Endpoint" value={webhookEndpoint} mono />
             <Info label="Remote" value={config?.rclone_remote || '未配置，请在本页 Webhook 运行配置中填写'} mono />
             <Info label="Tag Dirs" value={formatTagDirs(config?.tag_dirs)} mono />
+            <Info label="SmartStrm" value={config?.smartstrm_webhook_url ? `${config.smartstrm_task_name || '未配置任务名'} @ ${hostOf(config.smartstrm_webhook_url)}` : '未配置'} mono />
+            <Info label="Path Map" value={formatPathMappings(config?.smartstrm_path_mappings)} mono />
             <Info label="Token" value={config?.api_token_enabled ? '已配置：Authorization: Bearer <token>' : '未配置，/webhook 会拒绝请求'} />
             <div className="mt-4 text-xs text-slate-400 leading-6">
-              请求体必须包含 path、tag、callback_url。系统按 tag 映射目录保存，例如 tag=动画电影、目录=/opt/adjak、path=/up1/电影/绝命毒师，会保存到 /opt/adjak/绝命毒师。
+              请求体必须包含 path、tag、callback_url。完成下载、校验和 callback 后，会把映射后的本地路径发送给 SmartStrm。
             </div>
           </div>
           )}
@@ -612,10 +686,7 @@ const WebhookJobs = ({ mode = 'all' }) => {
   );
 };
 
-const JobCard = ({ job, active, onDetail, onRetry, onDelete, onCopy }) => {
-  const headerCount = parseCurlHeaders(job.curl_headers).length;
-
-  return (
+const JobCard = ({ job, active, onDetail, onRetry, onDelete, onCopy }) => (
     <article className={`rounded-2xl border bg-white shadow-sm transition-all ${active ? 'border-blue-300 ring-2 ring-blue-100' : 'border-gray-200 hover:border-blue-200'}`}>
       <div className="p-5 space-y-4">
         <div className="flex items-start justify-between gap-3">
@@ -637,12 +708,12 @@ const JobCard = ({ job, active, onDetail, onRetry, onDelete, onCopy }) => {
           <CardLine icon={MapPin} label="远端" value={formatRemote(job)} mono />
           <CardLine icon={FileText} label="Tag" value={job.tag || '未设置'} />
           <CardLine icon={FileText} label="本地" value={job.local_path || '等待生成'} mono muted={!job.local_path} />
+          <CardLine icon={ExternalLink} label="SmartStrm" value={job.smartstrm_path || '等待生成'} mono muted={!job.smartstrm_path} />
           <CardLine icon={Bell} label="Callback" value={hostOf(job.callback_url)} />
-          <CardLine icon={ExternalLink} label="Curl" value={hostOf(job.curl_url)} />
         </div>
 
         <div className="grid grid-cols-2 gap-2 text-xs">
-          <MiniMetric label="Header" value={`${headerCount} 个`} />
+          <MiniMetric label="完成" value={formatTime(job.finished_at)} />
           <MiniMetric label="更新" value={formatTime(job.updated_at)} />
         </div>
 
@@ -669,8 +740,7 @@ const JobCard = ({ job, active, onDetail, onRetry, onDelete, onCopy }) => {
         </div>
       </div>
     </article>
-  );
-};
+);
 
 const JobDetailModal = ({ job, onClose, onRetry, onDelete }) => {
   const deletable = ['success', 'failed'].includes(job.status);
@@ -724,14 +794,13 @@ const JobDetail = ({ job }) => (
       <DetailItem label="Tag" value={job.tag || '-'} />
       <DetailItem label="远端路径" value={job.remote_path} mono />
       <DetailItem label="本地路径" value={job.local_path || '-'} mono />
+      <DetailItem label="SmartStrm 路径" value={job.smartstrm_path || '-'} mono />
       <DetailItem label="创建时间" value={formatTime(job.created_at)} />
       <DetailItem label="更新时间" value={formatTime(job.updated_at)} />
       <DetailItem label="完成时间" value={formatTime(job.finished_at)} />
-      <DetailItem label="Curl Headers" value={formatHeaders(job.curl_headers)} mono />
     </div>
 
     <DetailBlock label="Callback URL" value={job.callback_url} />
-    <DetailBlock label="Curl URL" value={job.curl_url} />
     {job.error && <DetailBlock label="错误" value={job.error} danger />}
 
     <div>
@@ -799,33 +868,10 @@ const StatusBadge = ({ status }) => (
   </span>
 );
 
-const parseCurlHeaders = (value) => {
-  if (!value) return [];
-  try {
-    return Object.entries(JSON.parse(value));
-  } catch (err) {
-    return [];
-  }
-};
-
 const splitHosts = (value) => value
   .split(',')
   .map((item) => item.trim())
   .filter(Boolean);
-
-const formatHeaders = (value) => {
-  const headers = parseCurlHeaders(value);
-  if (headers.length === 0) return '-';
-  return headers.map(([key, val]) => `${key}: ${maskHeaderValue(key, val)}`).join('\n');
-};
-
-const maskHeaderValue = (key, value) => {
-  if (!value) return '';
-  if (key.toLowerCase() === 'authorization') {
-    return `${String(value).slice(0, 12)}...${String(value).slice(-6)}`;
-  }
-  return value;
-};
 
 const hostOf = (value) => {
   if (!value) return '-';
@@ -841,6 +887,11 @@ const formatRemote = (job) => (job.remote ? `${job.remote}:${job.remote_path || 
 const formatTagDirs = (items) => {
   if (!Array.isArray(items) || items.length === 0) return '未配置';
   return items.map((item) => `${item.tag || '-'} => ${item.dir || '-'}`).join('\n');
+};
+
+const formatPathMappings = (items) => {
+  if (!Array.isArray(items) || items.length === 0) return '未配置';
+  return items.map((item) => `${item.from || '-'} => ${item.to || '-'}`).join('\n');
 };
 
 const formatTime = (value) => {

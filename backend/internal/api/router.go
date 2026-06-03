@@ -256,10 +256,19 @@ func applySystemSetting(cfg *config.Config, key, value string) {
 		if err := json.Unmarshal([]byte(value), &tagDirs); err == nil {
 			cfg.WebhookTagDirs = tagDirs
 		}
+	case "smartstrm_webhook_url":
+		cfg.SmartStrmWebhookURL = value
+	case "smartstrm_task_name":
+		cfg.SmartStrmTaskName = value
+	case "smartstrm_path_mappings":
+		var pathMappings []config.PathMapping
+		if err := json.Unmarshal([]byte(value), &pathMappings); err == nil {
+			cfg.SmartStrmPathMappings = pathMappings
+		}
 	case "webhook_allowed_callback_hosts":
 		cfg.AllowedCallbackHosts = splitSettingList(value)
-	case "webhook_allowed_curl_hosts":
-		cfg.AllowedCurlHosts = splitSettingList(value)
+	case "smartstrm_allowed_hosts":
+		cfg.AllowedSmartStrmHosts = splitSettingList(value)
 	}
 }
 

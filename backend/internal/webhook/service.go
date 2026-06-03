@@ -28,22 +28,20 @@ import (
 )
 
 const (
-	StatusPending           = "pending"
-	StatusRunning           = "running"
-	StatusCopying           = "copying"
-	StatusChecking          = "checking"
-	StatusNotifyingCallback = "notifying_callback"
-	StatusCallingCurlURL    = "calling_curl_url"
-	StatusSuccess           = "success"
-	StatusFailed            = "failed"
+	StatusPending            = "pending"
+	StatusRunning            = "running"
+	StatusCopying            = "copying"
+	StatusChecking           = "checking"
+	StatusNotifyingCallback  = "notifying_callback"
+	StatusNotifyingSmartStrm = "notifying_smartstrm"
+	StatusSuccess            = "success"
+	StatusFailed             = "failed"
 )
 
 type CreateRequest struct {
-	Path        string            `json:"path" binding:"required"`
-	Tag         string            `json:"tag" binding:"required"`
-	CallbackURL string            `json:"callback_url" binding:"required"`
-	CurlURL     string            `json:"curl_url"`
-	CurlHeaders map[string]string `json:"curl_headers"`
+	Path        string `json:"path" binding:"required"`
+	Tag         string `json:"tag" binding:"required"`
+	CallbackURL string `json:"callback_url" binding:"required"`
 }
 
 type Service struct {
@@ -141,19 +139,6 @@ func (s *Service) CreateJob(ctx context.Context, req CreateRequest) (*models.Web
 	if _, err := validateOutboundURL(req.CallbackURL, s.cfg.AllowedCallbackHosts); err != nil {
 		return nil, fmt.Errorf("invalid callback_url: %w", err)
 	}
-	if strings.TrimSpace(req.CurlURL) != "" {
-		if _, err := validateOutboundURL(req.CurlURL, s.cfg.AllowedCurlHosts); err != nil {
-			return nil, fmt.Errorf("invalid curl_url: %w", err)
-		}
-	}
-	curlHeaders, err := cleanHeaders(req.CurlHeaders)
-	if err != nil {
-		return nil, err
-	}
-	curlHeadersJSON, err := encodeHeaders(curlHeaders)
-	if err != nil {
-		return nil, err
-	}
 
 	jobID, err := newJobID()
 	if err != nil {
@@ -166,8 +151,6 @@ func (s *Service) CreateJob(ctx context.Context, req CreateRequest) (*models.Web
 		Tag:         tag,
 		RemotePath:  req.Path,
 		CallbackURL: req.CallbackURL,
-		CurlURL:     req.CurlURL,
-		CurlHeaders: curlHeadersJSON,
 		Status:      StatusPending,
 	}
 	if err := s.db.WithContext(ctx).Create(job).Error; err != nil {
@@ -315,12 +298,14 @@ func (s *Service) process(ctx context.Context, jobID string) {
 		s.fail(job.ID, "build local path", err, job.RcloneLog)
 		return
 	}
+	smartStrmPath := s.mapSmartStrmPath(localPath)
 	remoteSpec := remoteSpec(remoteName, cleanPath)
 	job.RemoteName = remoteName
 	job.Tag = tag
 	job.RemotePath = cleanPath
 	job.LocalPath = localPath
-	s.db.Model(job).Updates(map[string]interface{}{"remote_name": remoteName, "tag": tag, "remote_path": cleanPath, "local_path": localPath})
+	job.SmartStrmPath = smartStrmPath
+	s.db.Model(job).Updates(map[string]interface{}{"remote_name": remoteName, "tag": tag, "remote_path": cleanPath, "local_path": localPath, "smartstrm_path": smartStrmPath})
 
 	rcloneLog := job.RcloneLog
 	if err := s.setStatus(job.ID, StatusCopying); err != nil {
@@ -362,20 +347,15 @@ func (s *Service) process(ctx context.Context, jobID string) {
 		return
 	}
 
-	if strings.TrimSpace(job.CurlURL) != "" {
-		if err := s.setStatus(job.ID, StatusCallingCurlURL); err != nil {
+	if strings.TrimSpace(s.cfg.SmartStrmWebhookURL) != "" {
+		if err := s.setStatus(job.ID, StatusNotifyingSmartStrm); err != nil {
 			return
 		}
-		curlHeaders, err := decodeHeaders(job.CurlHeaders)
-		if err != nil {
-			s.fail(job.ID, "curl_url headers", err, rcloneLog)
-			return
-		}
-		if err := s.callCurlURL(jobCtx, job.CurlURL, curlHeaders); err != nil {
+		if err := s.callSmartStrmWebhook(jobCtx, job); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			s.fail(job.ID, "curl_url", err, rcloneLog)
+			s.fail(job.ID, "smartstrm webhook", err, rcloneLog)
 			return
 		}
 	}
@@ -404,7 +384,7 @@ func (s *Service) recoverJobs(ctx context.Context) error {
 
 func (s *Service) failInterruptedNotificationJobs() error {
 	now := time.Now()
-	return s.db.Model(&models.WebhookJob{}).Where("status IN ?", []string{StatusNotifyingCallback, StatusCallingCurlURL}).Updates(map[string]interface{}{
+	return s.db.Model(&models.WebhookJob{}).Where("status IN ?", []string{StatusNotifyingCallback, StatusNotifyingSmartStrm}).Updates(map[string]interface{}{
 		"status":      StatusFailed,
 		"error":       "service stopped during notification stage; retry manually if needed",
 		"finished_at": &now,
@@ -433,6 +413,44 @@ func (s *Service) fail(jobID, step string, err error, rcloneLog string) {
 
 func remoteSpec(remoteName, remotePath string) string {
 	return remoteName + ":" + remotePath
+}
+
+func (s *Service) mapSmartStrmPath(localPath string) string {
+	cleanLocal := filepath.Clean(strings.TrimSpace(localPath))
+	if cleanLocal == "." {
+		return strings.TrimSpace(localPath)
+	}
+	bestFrom := ""
+	bestTo := ""
+	for _, mapping := range s.cfg.SmartStrmPathMappings {
+		from := filepath.Clean(strings.TrimSpace(mapping.From))
+		to := strings.TrimSpace(mapping.To)
+		if from == "." || to == "" {
+			continue
+		}
+		if cleanLocal == from || strings.HasPrefix(cleanLocal, from+string(os.PathSeparator)) {
+			if len(from) > len(bestFrom) {
+				bestFrom = from
+				bestTo = to
+			}
+		}
+	}
+	if bestFrom == "" {
+		return cleanLocal
+	}
+	rel := strings.TrimPrefix(cleanLocal, bestFrom)
+	rel = strings.TrimPrefix(filepath.ToSlash(rel), "/")
+	base := strings.TrimRight(bestTo, "/")
+	if bestTo == "/" {
+		base = "/"
+	}
+	if rel == "" {
+		return base
+	}
+	if base == "" || base == "/" {
+		return "/" + rel
+	}
+	return base + "/" + rel
 }
 
 func (s *Service) runRclone(ctx context.Context, subcommand string, args ...string) (string, error) {
@@ -465,12 +483,13 @@ func (s *Service) postCallback(ctx context.Context, job *models.WebhookJob) erro
 		return err
 	}
 	body, err := json.Marshal(map[string]string{
-		"job_id":      job.ID,
-		"status":      StatusSuccess,
-		"remote":      job.RemoteName,
-		"tag":         job.Tag,
-		"remote_path": job.RemotePath,
-		"local_path":  job.LocalPath,
+		"job_id":         job.ID,
+		"status":         StatusSuccess,
+		"remote":         job.RemoteName,
+		"tag":            job.Tag,
+		"remote_path":    job.RemotePath,
+		"local_path":     job.LocalPath,
+		"smartstrm_path": job.SmartStrmPath,
 	})
 	if err != nil {
 		return err
@@ -484,61 +503,37 @@ func (s *Service) postCallback(ctx context.Context, job *models.WebhookJob) erro
 	return s.do2xx(req, "callback")
 }
 
-func (s *Service) callCurlURL(ctx context.Context, raw string, headers map[string]string) error {
-	curlURL, err := validateOutboundURL(raw, s.cfg.AllowedCurlHosts)
+func (s *Service) callSmartStrmWebhook(ctx context.Context, job *models.WebhookJob) error {
+	webhookURL, err := validateOutboundURL(s.cfg.SmartStrmWebhookURL, s.cfg.AllowedSmartStrmHosts)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, curlURL.String(), nil)
+	taskName := strings.TrimSpace(s.cfg.SmartStrmTaskName)
+	if taskName == "" {
+		return errors.New("smartstrm task name is required")
+	}
+	storagePath := strings.TrimSpace(job.SmartStrmPath)
+	if storagePath == "" {
+		storagePath = s.mapSmartStrmPath(job.LocalPath)
+	}
+	body, err := json.Marshal(map[string]interface{}{
+		"event": "a_task",
+		"task": map[string]interface{}{
+			"name":         taskName,
+			"storage_path": storagePath,
+		},
+		"delay": 0,
+	})
 	if err != nil {
 		return err
 	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL.String(), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "zzmrclone-manager/1.0")
-	for key, value := range headers {
-		req.Header.Set(key, value)
-	}
-	return s.do2xx(req, "curl_url")
-}
-
-func cleanHeaders(headers map[string]string) (map[string]string, error) {
-	if len(headers) == 0 {
-		return nil, nil
-	}
-	cleaned := make(map[string]string, len(headers))
-	for key, value := range headers {
-		key = strings.TrimSpace(key)
-		value = strings.TrimSpace(value)
-		if key == "" {
-			return nil, errors.New("curl_headers contains empty header name")
-		}
-		if strings.ContainsAny(key, "\r\n:") || strings.ContainsAny(value, "\r\n") {
-			return nil, fmt.Errorf("curl_headers contains invalid header %q", key)
-		}
-		cleaned[key] = value
-	}
-	return cleaned, nil
-}
-
-func encodeHeaders(headers map[string]string) (string, error) {
-	if len(headers) == 0 {
-		return "", nil
-	}
-	data, err := json.Marshal(headers)
-	if err != nil {
-		return "", fmt.Errorf("encode curl_headers: %w", err)
-	}
-	return string(data), nil
-}
-
-func decodeHeaders(encoded string) (map[string]string, error) {
-	if strings.TrimSpace(encoded) == "" {
-		return nil, nil
-	}
-	var headers map[string]string
-	if err := json.Unmarshal([]byte(encoded), &headers); err != nil {
-		return nil, fmt.Errorf("decode curl_headers: %w", err)
-	}
-	return cleanHeaders(headers)
+	return s.do2xx(req, "smartstrm webhook")
 }
 
 func (s *Service) do2xx(req *http.Request, name string) error {
@@ -710,6 +705,10 @@ func validateOutboundURL(raw string, allowedHosts []string) (*url.URL, error) {
 		return nil, fmt.Errorf("url host %q is not allowed", parsed.Hostname())
 	}
 	return parsed, nil
+}
+
+func ValidateOutboundURLForConfig(raw string, allowedHosts []string) (*url.URL, error) {
+	return validateOutboundURL(raw, allowedHosts)
 }
 
 func hostAllowed(host string, allowedHosts []string) bool {

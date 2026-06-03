@@ -27,8 +27,16 @@ type Config struct {
 	WebhookHTTPTimeout      string
 	WebhookMaxRcloneLogSize int
 	WebhookTagDirs          map[string]string
+	SmartStrmWebhookURL     string
+	SmartStrmTaskName       string
+	SmartStrmPathMappings   []PathMapping
 	AllowedCallbackHosts    []string
-	AllowedCurlHosts        []string
+	AllowedSmartStrmHosts   []string
+}
+
+type PathMapping struct {
+	From string `json:"from"`
+	To   string `json:"to"`
 }
 
 func Load() *Config {
@@ -54,8 +62,10 @@ func Load() *Config {
 		WebhookHTTPTimeout:      getEnv("RCLONE_MANAGER_WEBHOOK_HTTP_TIMEOUT", "30s"),
 		WebhookMaxRcloneLogSize: getEnvInt("RCLONE_MANAGER_WEBHOOK_MAX_RCLONE_LOG_BYTES", 1048576),
 		WebhookTagDirs:          map[string]string{},
+		SmartStrmWebhookURL:     getEnv("RCLONE_MANAGER_SMARTSTRM_WEBHOOK_URL", ""),
+		SmartStrmTaskName:       getEnv("RCLONE_MANAGER_SMARTSTRM_TASK_NAME", ""),
 		AllowedCallbackHosts:    getEnvList("RCLONE_MANAGER_WEBHOOK_ALLOWED_CALLBACK_HOSTS"),
-		AllowedCurlHosts:        getEnvList("RCLONE_MANAGER_WEBHOOK_ALLOWED_CURL_HOSTS"),
+		AllowedSmartStrmHosts:   getEnvList("RCLONE_MANAGER_SMARTSTRM_ALLOWED_HOSTS"),
 	}
 }
 

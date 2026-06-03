@@ -120,21 +120,20 @@ type SystemSetting struct {
 }
 
 type WebhookJob struct {
-	ID          string     `json:"id" gorm:"primaryKey"`
-	JobType     string     `json:"job_type" gorm:"default:'one_time'"`
-	RemoteName  string     `json:"remote" gorm:"column:remote_name"`
-	Tag         string     `json:"tag"`
-	RemotePath  string     `json:"remote_path" gorm:"not null"`
-	LocalPath   string     `json:"local_path"`
-	CallbackURL string     `json:"callback_url" gorm:"not null"`
-	CurlURL     string     `json:"curl_url"`
-	CurlHeaders string     `json:"curl_headers" gorm:"type:text"`
-	Status      string     `json:"status" gorm:"index;not null"`
-	Error       string     `json:"error" gorm:"type:text"`
-	RcloneLog   string     `json:"rclone_log" gorm:"type:text"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
-	FinishedAt  *time.Time `json:"finished_at"`
+	ID            string     `json:"id" gorm:"primaryKey"`
+	JobType       string     `json:"job_type" gorm:"default:'one_time'"`
+	RemoteName    string     `json:"remote" gorm:"column:remote_name"`
+	Tag           string     `json:"tag"`
+	RemotePath    string     `json:"remote_path" gorm:"not null"`
+	LocalPath     string     `json:"local_path"`
+	CallbackURL   string     `json:"callback_url" gorm:"not null"`
+	SmartStrmPath string     `json:"smartstrm_path"`
+	Status        string     `json:"status" gorm:"index;not null"`
+	Error         string     `json:"error" gorm:"type:text"`
+	RcloneLog     string     `json:"rclone_log" gorm:"type:text"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+	FinishedAt    *time.Time `json:"finished_at"`
 }
 
 type User struct {
