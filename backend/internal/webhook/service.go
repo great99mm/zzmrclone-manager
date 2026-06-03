@@ -136,6 +136,11 @@ func (s *Service) CreateJob(ctx context.Context, req CreateRequest) (*models.Web
 	if err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(s.cfg.SmartStrmWebhookURL) != "" {
+		if _, err := s.resolveSmartStrmTaskName(tag); err != nil {
+			return nil, err
+		}
+	}
 	if _, err := validateOutboundURL(req.CallbackURL, s.cfg.AllowedCallbackHosts); err != nil {
 		return nil, fmt.Errorf("invalid callback_url: %w", err)
 	}
@@ -214,16 +219,20 @@ func (s *Service) RetryJob(ctx context.Context, id string) (*models.WebhookJob, 
 		return nil, errors.New("only failed jobs can be retried")
 	}
 	if err := s.db.WithContext(ctx).Model(&job).Updates(map[string]interface{}{
-		"status":      StatusPending,
-		"error":       "",
-		"rclone_log":  "",
-		"finished_at": nil,
+		"status":         StatusPending,
+		"error":          "",
+		"rclone_log":     "",
+		"smartstrm_path": "",
+		"smartstrm_task": "",
+		"finished_at":    nil,
 	}).Error; err != nil {
 		return nil, err
 	}
 	job.Status = StatusPending
 	job.Error = ""
 	job.RcloneLog = ""
+	job.SmartStrmPath = ""
+	job.SmartStrmTask = ""
 	job.FinishedAt = nil
 	return &job, s.Enqueue(ctx, job.ID)
 }
@@ -299,13 +308,22 @@ func (s *Service) process(ctx context.Context, jobID string) {
 		return
 	}
 	smartStrmPath := s.mapSmartStrmPath(localPath)
+	smartStrmTask := ""
+	if strings.TrimSpace(s.cfg.SmartStrmWebhookURL) != "" {
+		smartStrmTask, err = s.resolveSmartStrmTaskName(tag)
+		if err != nil {
+			s.fail(job.ID, "resolve smartstrm task", err, job.RcloneLog)
+			return
+		}
+	}
 	remoteSpec := remoteSpec(remoteName, cleanPath)
 	job.RemoteName = remoteName
 	job.Tag = tag
 	job.RemotePath = cleanPath
 	job.LocalPath = localPath
 	job.SmartStrmPath = smartStrmPath
-	s.db.Model(job).Updates(map[string]interface{}{"remote_name": remoteName, "tag": tag, "remote_path": cleanPath, "local_path": localPath, "smartstrm_path": smartStrmPath})
+	job.SmartStrmTask = smartStrmTask
+	s.db.Model(job).Updates(map[string]interface{}{"remote_name": remoteName, "tag": tag, "remote_path": cleanPath, "local_path": localPath, "smartstrm_path": smartStrmPath, "smartstrm_task": smartStrmTask})
 
 	rcloneLog := job.RcloneLog
 	if err := s.setStatus(job.ID, StatusCopying); err != nil {
@@ -490,6 +508,7 @@ func (s *Service) postCallback(ctx context.Context, job *models.WebhookJob) erro
 		"remote_path":    job.RemotePath,
 		"local_path":     job.LocalPath,
 		"smartstrm_path": job.SmartStrmPath,
+		"smartstrm_task": job.SmartStrmTask,
 	})
 	if err != nil {
 		return err
@@ -508,9 +527,13 @@ func (s *Service) callSmartStrmWebhook(ctx context.Context, job *models.WebhookJ
 	if err != nil {
 		return err
 	}
-	taskName := strings.TrimSpace(s.cfg.SmartStrmTaskName)
+	taskName := strings.TrimSpace(job.SmartStrmTask)
 	if taskName == "" {
-		return errors.New("smartstrm task name is required")
+		var err error
+		taskName, err = s.resolveSmartStrmTaskName(job.Tag)
+		if err != nil {
+			return err
+		}
 	}
 	storagePath := strings.TrimSpace(job.SmartStrmPath)
 	if storagePath == "" {
@@ -624,6 +647,18 @@ func (s *Service) resolveTagDir(raw string) (string, string, error) {
 		return "", "", err
 	}
 	return tag, dir, nil
+}
+
+func (s *Service) resolveSmartStrmTaskName(tag string) (string, error) {
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
+		return "", errors.New("tag is required")
+	}
+	taskName := strings.TrimSpace(s.cfg.WebhookTagTasks[tag])
+	if taskName == "" {
+		return "", fmt.Errorf("SmartStrm task is not configured for tag %q", tag)
+	}
+	return taskName, nil
 }
 
 func buildLocalPath(baseDir, remoteRelativePath string) (string, error) {

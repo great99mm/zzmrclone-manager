@@ -54,7 +54,6 @@ const defaultWebhookConfig = {
   max_rclone_log_bytes: 1048576,
   tag_dirs: [],
   smartstrm_webhook_url: '',
-  smartstrm_task_name: '',
   smartstrm_path_mappings: [],
   allowed_callback_hosts: '',
   allowed_smartstrm_hosts: '',
@@ -73,7 +72,6 @@ const configToForm = (data) => ({
   max_rclone_log_bytes: data?.max_rclone_log_bytes ?? defaultWebhookConfig.max_rclone_log_bytes,
   tag_dirs: Array.isArray(data?.tag_dirs) ? data.tag_dirs : [],
   smartstrm_webhook_url: data?.smartstrm_webhook_url || '',
-  smartstrm_task_name: data?.smartstrm_task_name || '',
   smartstrm_path_mappings: Array.isArray(data?.smartstrm_path_mappings) ? data.smartstrm_path_mappings : [],
   allowed_callback_hosts: Array.isArray(data?.allowed_callback_hosts) ? data.allowed_callback_hosts.join(', ') : '',
   allowed_smartstrm_hosts: Array.isArray(data?.allowed_smartstrm_hosts) ? data.allowed_smartstrm_hosts.join(', ') : '',
@@ -260,7 +258,7 @@ const WebhookJobs = ({ mode = 'all' }) => {
   };
 
   const addTagDir = () => {
-    setConfigForm((prev) => ({ ...prev, tag_dirs: [...prev.tag_dirs, { tag: '', dir: '' }] }));
+    setConfigForm((prev) => ({ ...prev, tag_dirs: [...prev.tag_dirs, { tag: '', dir: '', task: '' }] }));
   };
 
   const removeTagDir = (index) => {
@@ -428,8 +426,8 @@ const WebhookJobs = ({ mode = 'all' }) => {
               <div className="space-y-3">
                 <div className="flex items-center justify-between gap-3">
                   <div>
-                    <div className="text-sm font-medium text-gray-700">Tag 保存目录</div>
-                    <p className="text-xs text-gray-500 mt-1">Webhook 传入 tag 后，会保存到对应目录下的最后一级文件夹。</p>
+                    <div className="text-sm font-medium text-gray-700">Tag 保存目录与任务归属</div>
+                    <p className="text-xs text-gray-500 mt-1">每个 tag 配置保存目录和对应 SmartStrm 任务名。</p>
                   </div>
                   <button
                     type="button"
@@ -446,18 +444,24 @@ const WebhookJobs = ({ mode = 'all' }) => {
                 ) : (
                   <div className="space-y-2">
                     {configForm.tag_dirs.map((item, index) => (
-                      <div key={`${index}-${item.tag}`} className="grid grid-cols-1 md:grid-cols-[120px,1fr,auto] gap-2">
+                      <div key={`${index}-${item.tag}`} className="grid grid-cols-1 md:grid-cols-[120px,1fr,120px,auto] gap-2">
                         <input
                           value={item.tag}
                           onChange={(event) => updateTagDir(index, 'tag', event.target.value)}
-                          placeholder="动画电影"
+                          placeholder="国产剧"
                           className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                         />
                         <input
                           value={item.dir}
                           onChange={(event) => updateTagDir(index, 'dir', event.target.value)}
-                          placeholder="/opt/adjak"
+                          placeholder="/opt/media/zlmedia/国产剧"
                           className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-sm"
+                        />
+                        <input
+                          value={item.task || ''}
+                          onChange={(event) => updateTagDir(index, 'task', event.target.value)}
+                          placeholder="s2"
+                          className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                         />
                         <button
                           type="button"
@@ -481,14 +485,6 @@ const WebhookJobs = ({ mode = 'all' }) => {
                     value={configForm.smartstrm_webhook_url}
                     onChange={(event) => setConfigForm((prev) => ({ ...prev, smartstrm_webhook_url: event.target.value }))}
                     placeholder="http://yourip:8024/webhook/abcdef123456"
-                    className="w-full px-3 py-2 border border-emerald-200 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
-                  />
-                </Field>
-                <Field label="SmartStrm 任务名">
-                  <input
-                    value={configForm.smartstrm_task_name}
-                    onChange={(event) => setConfigForm((prev) => ({ ...prev, smartstrm_task_name: event.target.value }))}
-                    placeholder="movie_task"
                     className="w-full px-3 py-2 border border-emerald-200 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500"
                   />
                 </Field>
@@ -625,7 +621,7 @@ const WebhookJobs = ({ mode = 'all' }) => {
             <Info label="Endpoint" value={webhookEndpoint} mono />
             <Info label="Remote" value={config?.rclone_remote || '未配置，请在本页 Webhook 运行配置中填写'} mono />
             <Info label="Tag Dirs" value={formatTagDirs(config?.tag_dirs)} mono />
-            <Info label="SmartStrm" value={config?.smartstrm_webhook_url ? `${config.smartstrm_task_name || '未配置任务名'} @ ${hostOf(config.smartstrm_webhook_url)}` : '未配置'} mono />
+            <Info label="SmartStrm" value={config?.smartstrm_webhook_url ? hostOf(config.smartstrm_webhook_url) : '未配置'} mono />
             <Info label="Path Map" value={formatPathMappings(config?.smartstrm_path_mappings)} mono />
             <Info label="Token" value={config?.api_token_enabled ? '已配置：Authorization: Bearer <token>' : '未配置，/webhook 会拒绝请求'} />
             <div className="mt-4 text-xs text-slate-400 leading-6">
@@ -707,6 +703,7 @@ const JobCard = ({ job, active, onDetail, onRetry, onDelete, onCopy }) => (
         <div className="space-y-2 text-sm">
           <CardLine icon={MapPin} label="远端" value={formatRemote(job)} mono />
           <CardLine icon={FileText} label="Tag" value={job.tag || '未设置'} />
+          <CardLine icon={FileText} label="任务" value={job.smartstrm_task || '未设置'} />
           <CardLine icon={FileText} label="本地" value={job.local_path || '等待生成'} mono muted={!job.local_path} />
           <CardLine icon={ExternalLink} label="SmartStrm" value={job.smartstrm_path || '等待生成'} mono muted={!job.smartstrm_path} />
           <CardLine icon={Bell} label="Callback" value={hostOf(job.callback_url)} />
@@ -792,6 +789,7 @@ const JobDetail = ({ job }) => (
       <DetailItem label="任务类型" value={job.job_type || 'one_time'} />
       <DetailItem label="远端名" value={job.remote || '-'} mono />
       <DetailItem label="Tag" value={job.tag || '-'} />
+      <DetailItem label="SmartStrm 任务" value={job.smartstrm_task || '-'} />
       <DetailItem label="远端路径" value={job.remote_path} mono />
       <DetailItem label="本地路径" value={job.local_path || '-'} mono />
       <DetailItem label="SmartStrm 路径" value={job.smartstrm_path || '-'} mono />
@@ -886,7 +884,7 @@ const formatRemote = (job) => (job.remote ? `${job.remote}:${job.remote_path || 
 
 const formatTagDirs = (items) => {
   if (!Array.isArray(items) || items.length === 0) return '未配置';
-  return items.map((item) => `${item.tag || '-'} => ${item.dir || '-'}`).join('\n');
+  return items.map((item) => `${item.tag || '-'} => ${item.dir || '-'} (${item.task || '未配置任务'})`).join('\n');
 };
 
 const formatPathMappings = (items) => {

@@ -256,10 +256,13 @@ func applySystemSetting(cfg *config.Config, key, value string) {
 		if err := json.Unmarshal([]byte(value), &tagDirs); err == nil {
 			cfg.WebhookTagDirs = tagDirs
 		}
+	case "webhook_tag_tasks":
+		var tagTasks map[string]string
+		if err := json.Unmarshal([]byte(value), &tagTasks); err == nil {
+			cfg.WebhookTagTasks = tagTasks
+		}
 	case "smartstrm_webhook_url":
 		cfg.SmartStrmWebhookURL = value
-	case "smartstrm_task_name":
-		cfg.SmartStrmTaskName = value
 	case "smartstrm_path_mappings":
 		var pathMappings []config.PathMapping
 		if err := json.Unmarshal([]byte(value), &pathMappings); err == nil {

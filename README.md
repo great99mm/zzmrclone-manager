@@ -129,8 +129,7 @@ Docker 部署默认无需额外 Webhook 环境变量，镜像默认使用上海�
 2. **Webhook 配置**：配置 rclone 远端名、Tag 保存目录、SmartStrm webhook、转移后路径映射、host 白名单、并发和超时。
 
 远端名在 WebUI 中配置，只写远端名，不带冒号；例如 `webdav`，服务会拼成 `webdav:/remote/folder/a`。
-Tag 保存目录在 WebUI 中配置，例如 `动画电影 => /opt/adjak`。
-SmartStrm webhook 在 WebUI 中配置，任务完成后会先请求 `callback_url`，再向 SmartStrm 发送 `event=a_task`。转移后路径可配置映射，例如 `/opt/media => /s2/media`，最终传给 SmartStrm 的 `task.storage_path` 使用映射后的路径。
+Tag 保存目录和 SmartStrm 任务名在 WebUI 中逐条配置，例如 `国产剧 => /opt/media/zlmedia/国产剧 => s2`。任务完成后会先请求 `callback_url`，再按当前任务的 `tag` 找到对应 SmartStrm 任务名发送 `event=a_task`。转移后路径可配置映射，例如 `/opt/media => /s2/media`，最终传给 SmartStrm 的 `task.storage_path` 使用映射后的路径。
 
 ### 调用示例
 
@@ -153,8 +152,8 @@ SmartStrm webhook 请求体由系统自动发送，格式示例：
 {
   "event": "a_task",
   "task": {
-    "name": "movie_task",
-    "storage_path": "/s2/media/电影/绝命毒师"
+    "name": "s2",
+    "storage_path": "/s2/media/zlmedia/国产剧/001"
   },
   "delay": 0
 }
@@ -166,7 +165,7 @@ SmartStrm webhook 请求体由系统自动发送，格式示例：
 {"job_id":"job_xxx","job_type":"one_time","status":"pending"}
 ```
 
-这是一次性任务。任务会写入 SQLite，并在 WebUI 左侧 **Webhook 任务** 页面以任务卡片展示；点击卡片 **详情** 可查看 Tag、远端名、远端路径、本地路径、SmartStrm 路径、callback URL、错误和 rclone 日志。
+这是一次性任务。任务会写入 SQLite，并在 WebUI 左侧 **Webhook 任务** 页面以任务卡片展示；点击卡片 **详情** 可查看 Tag、SmartStrm 任务名、远端名、远端路径、本地路径、SmartStrm 路径、callback URL、错误和 rclone 日志。
 任务详情以弹出式卡片展示；成功或失败的历史任务可在卡片或详情弹窗中删除。
 
 保存路径规则：按 `tag` 找 WebUI 配置的保存目录，再拼接远端路径最后一级名称。例如 `tag=动画电影`、保存目录 `/opt/adjak`、`path=/up1/电影/绝命毒师`，最终保存到 `/opt/adjak/绝命毒师`。

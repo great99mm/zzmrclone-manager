@@ -128,6 +128,7 @@ type WebhookJob struct {
 	LocalPath     string     `json:"local_path"`
 	CallbackURL   string     `json:"callback_url" gorm:"not null"`
 	SmartStrmPath string     `json:"smartstrm_path"`
+	SmartStrmTask string     `json:"smartstrm_task"`
 	Status        string     `json:"status" gorm:"index;not null"`
 	Error         string     `json:"error" gorm:"type:text"`
 	RcloneLog     string     `json:"rclone_log" gorm:"type:text"`

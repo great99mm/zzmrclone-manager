@@ -121,6 +121,7 @@ func ensureWebhookJobColumns(db *gorm.DB) error {
 		"remote_name":    "text DEFAULT ''",
 		"tag":            "text DEFAULT ''",
 		"smartstrm_path": "text DEFAULT ''",
+		"smartstrm_task": "text DEFAULT ''",
 	}
 	for name, definition := range columns {
 		exists, err := sqliteColumnExists(db, "webhook_jobs", name)

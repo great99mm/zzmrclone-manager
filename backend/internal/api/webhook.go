@@ -32,15 +32,15 @@ type webhookConfigRequest struct {
 	MaxRcloneLogBytes     int           `json:"max_rclone_log_bytes"`
 	TagDirs               []tagDir      `json:"tag_dirs"`
 	SmartStrmWebhookURL   string        `json:"smartstrm_webhook_url"`
-	SmartStrmTaskName     string        `json:"smartstrm_task_name"`
 	SmartStrmPathMappings []pathMapping `json:"smartstrm_path_mappings"`
 	AllowedCallbackHosts  []string      `json:"allowed_callback_hosts"`
 	AllowedSmartStrmHosts []string      `json:"allowed_smartstrm_hosts"`
 }
 
 type tagDir struct {
-	Tag string `json:"tag"`
-	Dir string `json:"dir"`
+	Tag  string `json:"tag"`
+	Dir  string `json:"dir"`
+	Task string `json:"task"`
 }
 
 type pathMapping struct {
@@ -159,9 +159,8 @@ func getWebhookConfig(c *gin.Context) {
 		"job_timeout":             cfgGlobal.WebhookJobTimeout,
 		"http_timeout":            cfgGlobal.WebhookHTTPTimeout,
 		"max_rclone_log_bytes":    cfgGlobal.WebhookMaxRcloneLogSize,
-		"tag_dirs":                tagDirsToList(cfgGlobal.WebhookTagDirs),
+		"tag_dirs":                tagDirsToList(cfgGlobal.WebhookTagDirs, cfgGlobal.WebhookTagTasks),
 		"smartstrm_webhook_url":   cfgGlobal.SmartStrmWebhookURL,
-		"smartstrm_task_name":     cfgGlobal.SmartStrmTaskName,
 		"smartstrm_path_mappings": pathMappingsToList(cfgGlobal.SmartStrmPathMappings),
 		"allowed_callback_hosts":  cfgGlobal.AllowedCallbackHosts,
 		"allowed_smartstrm_hosts": cfgGlobal.AllowedSmartStrmHosts,
@@ -220,17 +219,19 @@ func applyWebhookConfigRequest(req *webhookConfigRequest) error {
 	cfgGlobal.WebhookJobTimeout = defaultString(req.JobTimeout, "0s")
 	cfgGlobal.WebhookHTTPTimeout = defaultString(req.HTTPTimeout, "30s")
 	cfgGlobal.WebhookMaxRcloneLogSize = clampInt(req.MaxRcloneLogBytes, 1024, 10485760, 1048576)
-	tagDirs, err := cleanTagDirs(req.TagDirs)
+	tagDirs, tagTasks, err := cleanTagDirs(req.TagDirs)
 	if err != nil {
 		return err
 	}
 	cfgGlobal.WebhookTagDirs = tagDirs
+	cfgGlobal.WebhookTagTasks = tagTasks
 	allowedSmartStrmHosts := cleanHostList(req.AllowedSmartStrmHosts)
 	smartStrmWebhookURL := strings.TrimSpace(req.SmartStrmWebhookURL)
-	smartStrmTaskName := strings.TrimSpace(req.SmartStrmTaskName)
 	if smartStrmWebhookURL != "" {
-		if smartStrmTaskName == "" {
-			return errors.New("smartstrm_task_name is required when smartstrm_webhook_url is configured")
+		for tag := range tagDirs {
+			if strings.TrimSpace(tagTasks[tag]) == "" {
+				return fmt.Errorf("SmartStrm task is required for tag %q when smartstrm_webhook_url is configured", tag)
+			}
 		}
 		if _, err := webhooksvc.ValidateOutboundURLForConfig(smartStrmWebhookURL, allowedSmartStrmHosts); err != nil {
 			return fmt.Errorf("invalid smartstrm_webhook_url: %w", err)
@@ -241,7 +242,6 @@ func applyWebhookConfigRequest(req *webhookConfigRequest) error {
 		return err
 	}
 	cfgGlobal.SmartStrmWebhookURL = smartStrmWebhookURL
-	cfgGlobal.SmartStrmTaskName = smartStrmTaskName
 	cfgGlobal.SmartStrmPathMappings = pathMappings
 	cfgGlobal.AllowedCallbackHosts = cleanHostList(req.AllowedCallbackHosts)
 	cfgGlobal.AllowedSmartStrmHosts = allowedSmartStrmHosts
@@ -250,6 +250,10 @@ func applyWebhookConfigRequest(req *webhookConfigRequest) error {
 
 func saveWebhookConfigRequest(req *webhookConfigRequest) error {
 	tagDirsJSON, err := json.Marshal(cfgGlobal.WebhookTagDirs)
+	if err != nil {
+		return err
+	}
+	tagTasksJSON, err := json.Marshal(cfgGlobal.WebhookTagTasks)
 	if err != nil {
 		return err
 	}
@@ -269,8 +273,8 @@ func saveWebhookConfigRequest(req *webhookConfigRequest) error {
 		"webhook_http_timeout":           cfgGlobal.WebhookHTTPTimeout,
 		"webhook_max_rclone_log_bytes":   strconv.Itoa(cfgGlobal.WebhookMaxRcloneLogSize),
 		"webhook_tag_dirs":               string(tagDirsJSON),
+		"webhook_tag_tasks":              string(tagTasksJSON),
 		"smartstrm_webhook_url":          cfgGlobal.SmartStrmWebhookURL,
-		"smartstrm_task_name":            cfgGlobal.SmartStrmTaskName,
 		"smartstrm_path_mappings":        string(pathMappingsJSON),
 		"webhook_allowed_callback_hosts": strings.Join(cfgGlobal.AllowedCallbackHosts, ","),
 		"smartstrm_allowed_hosts":        strings.Join(cfgGlobal.AllowedSmartStrmHosts, ","),
@@ -288,39 +292,42 @@ func saveWebhookConfigRequest(req *webhookConfigRequest) error {
 	return nil
 }
 
-func cleanTagDirs(values []tagDir) (map[string]string, error) {
+func cleanTagDirs(values []tagDir) (map[string]string, map[string]string, error) {
 	items := make(map[string]string, len(values))
+	tasks := make(map[string]string, len(values))
 	for _, item := range values {
 		tag := strings.TrimSpace(item.Tag)
 		dir := strings.TrimSpace(item.Dir)
-		if tag == "" && dir == "" {
+		task := strings.TrimSpace(item.Task)
+		if tag == "" && dir == "" && task == "" {
 			continue
 		}
 		if tag == "" || dir == "" {
-			return nil, errors.New("tag and dir are required for each tag mapping")
+			return nil, nil, errors.New("tag and dir are required for each tag mapping")
 		}
 		if strings.ContainsAny(tag, "\x00\r\n") {
-			return nil, fmt.Errorf("tag %q contains invalid characters", tag)
+			return nil, nil, fmt.Errorf("tag %q contains invalid characters", tag)
 		}
-		if strings.ContainsAny(dir, "\x00\r\n") {
-			return nil, fmt.Errorf("tag %q dir contains invalid characters", tag)
+		if strings.ContainsAny(dir, "\x00\r\n") || strings.ContainsAny(task, "\x00\r\n") {
+			return nil, nil, fmt.Errorf("tag %q contains invalid mapping value", tag)
 		}
 		if !filepath.IsAbs(dir) {
-			return nil, fmt.Errorf("tag %q dir must be absolute", tag)
+			return nil, nil, fmt.Errorf("tag %q dir must be absolute", tag)
 		}
 		dir = filepath.Clean(dir)
 		if err := rejectExistingSymlinkComponents(dir); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if err := rejectExistingSymlinkComponents(dir); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		items[tag] = dir
+		tasks[tag] = task
 	}
-	return items, nil
+	return items, tasks, nil
 }
 
 func rejectExistingSymlinkComponents(absPath string) error {
@@ -347,10 +354,10 @@ func rejectExistingSymlinkComponents(absPath string) error {
 	return nil
 }
 
-func tagDirsToList(values map[string]string) []tagDir {
+func tagDirsToList(values map[string]string, tasks map[string]string) []tagDir {
 	items := make([]tagDir, 0, len(values))
 	for tag, dir := range values {
-		items = append(items, tagDir{Tag: tag, Dir: dir})
+		items = append(items, tagDir{Tag: tag, Dir: dir, Task: tasks[tag]})
 	}
 	sort.Slice(items, func(i, j int) bool {
 		return items[i].Tag < items[j].Tag
