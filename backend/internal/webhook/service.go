@@ -150,13 +150,15 @@ func (s *Service) CreateJob(ctx context.Context, req CreateRequest) (*models.Web
 		return nil, err
 	}
 	job := &models.WebhookJob{
-		ID:          jobID,
-		JobType:     "one_time",
-		RemoteName:  remoteName,
-		Tag:         tag,
-		RemotePath:  req.Path,
-		CallbackURL: req.CallbackURL,
-		Status:      StatusPending,
+		ID:                jobID,
+		JobType:           "one_time",
+		RemoteName:        remoteName,
+		Tag:               tag,
+		RemotePath:        req.Path,
+		CallbackURL:       req.CallbackURL,
+		LegacyCurlURL:     "",
+		LegacyCurlHeaders: "",
+		Status:            StatusPending,
 	}
 	if err := s.db.WithContext(ctx).Create(job).Error; err != nil {
 		return nil, fmt.Errorf("create webhook job: %w", err)
