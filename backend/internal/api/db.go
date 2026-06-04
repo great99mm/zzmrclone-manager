@@ -64,6 +64,9 @@ func InitDB(dataDir string) error {
 	if err := ensureMountConfigColumns(db); err != nil {
 		return fmt.Errorf("failed to migrate mount config columns: %v", err)
 	}
+	if err := ensureTaskColumns(db); err != nil {
+		return fmt.Errorf("failed to migrate task columns: %v", err)
+	}
 	if err := ensureWebhookJobColumns(db); err != nil {
 		return fmt.Errorf("failed to migrate webhook job columns: %v", err)
 	}
@@ -113,6 +116,34 @@ func InitDB(dataDir string) error {
 		}
 	}()
 
+	return nil
+}
+
+func ensureTaskColumns(db *gorm.DB) error {
+	columns := map[string]string{
+		"interface_log_enabled":    "numeric DEFAULT 0",
+		"interface_log_url":        "text DEFAULT ''",
+		"interface_log_token":      "text DEFAULT ''",
+		"interface_log_interval":   "integer DEFAULT 30",
+		"interface_log_match_path": "text DEFAULT ''",
+		"interface_log_last_id":    "integer DEFAULT 0",
+		"completion_action":        "text DEFAULT ''",
+		"smartstrm_webhook_url":    "text DEFAULT ''",
+		"smartstrm_task_name":      "text DEFAULT ''",
+		"smartstrm_path_mapping":   "text DEFAULT ''",
+		"smartstrm_delay":          "integer DEFAULT 0",
+	}
+	for name, definition := range columns {
+		exists, err := sqliteColumnExists(db, "tasks", name)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if err := db.Exec(fmt.Sprintf("ALTER TABLE tasks ADD COLUMN %s %s", name, definition)).Error; err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 

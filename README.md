@@ -2,7 +2,7 @@
 
 > 当前 `api` 分支是 **Webhook 一次性下载任务增强分支**：面向外部系统通过 `POST /webhook` 创建单次 rclone 下载任务，任务自动执行 `rclone copy` + `rclone check`，完成后先回调业务系统，再通知 SmartStrm 触发 STRM 任务，并在 WebUI 中以任务卡片展示执行详情。
 
-基于 Web 的 Rclone 自动化管理工具，支持任务调度、目录监控、实时日志、结构化转移记录、**云盘本地挂载**、**OpenList 目录自动刷新** 和 **Webhook 一次性下载 API**。提供可视化界面和持久化数据库，一条命令即可部署。
+基于 Web 的 Rclone 自动化管理工具，支持任务调度、目录监控、接口日志监听、实时日志、结构化转移记录、**云盘本地挂载**、**OpenList 目录自动刷新**、**SmartStrm 完成动作** 和 **Webhook 一次性下载 API**。提供可视化界面和持久化数据库，一条命令即可部署。
 
 ---
 
@@ -12,7 +12,9 @@
 
 - **任务管理** — 创建、编辑、启停、删除 Rclone 传输任务
 - **目录监控** — 实时监听源目录变化，文件新增后自动触发传输
+- **接口日志监听** — 参考 `openlist-refresh` 的 MoviePilot 转移历史轮询方式，监听 `/api/v1/history/transfer` 新记录并触发普通任务传输
 - **定时执行** — 支持按固定间隔（分钟）自动执行任务
+- **传输完成动作** — 普通任务传输成功后可通知 SmartStrm webhook 生成 STRM
 - **实时日志** — WebSocket 推送任务执行日志，支持倒序查看和关键字高亮
 - **结构化转移记录** — 每条文件传输自动生成持久化记录，支持分页查询和筛选
 - **云盘本地挂载** — 参考 CloudDrive2 的使用方式，将远程云盘挂载到容器本地目录
@@ -114,6 +116,44 @@ Docker 镜像内已有默认运行配置，`docker-compose.yml` 默认不需要�
 | `RCLONE_MANAGER_WEBHOOK_RCLONE_PATH` | `rclone` | rclone 可执行文件路径；通常不需要改 |
 | `RCLONE_MANAGER_WEBHOOK_WORKERS` | `2` | Webhook worker 数；当前需重启生效 |
 | `RCLONE_MANAGER_WEBHOOK_QUEUE_SIZE` | `100` | Webhook 队列长度；当前需重启生效 |
+
+---
+
+## 普通任务：接口日志监听与 SmartStrm 完成动作
+
+普通任务除了本地目录监控、定时执行外，还可以在 **任务创建/编辑** 页面开启 **接口日志监听**：
+
+1. 打开 **接口日志监听**。
+2. 填写 MoviePilot 地址，例如 `http://moviepilot:3001`，系统会按 `openlist-refresh` 的方式轮询：
+   ```text
+   /api/v1/history/transfer?token=xxx&page=1&count=50
+   ```
+   也可以直接填写完整接口地址。
+3. 填写接口 Token 和轮询间隔。
+4. 可选填写 **匹配路径前缀**；留空时使用任务源目录作为前缀。只有新日志的 `file_path` / `dest` / `src` 命中此前缀，才会触发当前任务。
+
+首次启用接口日志监听时只建立历史基线，不会处理旧记录；后续检测到新的成功转移记录后，如果任务未在运行，就自动执行该普通 rclone 任务。
+
+普通任务还可以在 **传输完成动作** 中启用 **通知 SmartStrm 生成 STRM**：
+
+```json
+{
+  "event": "a_task",
+  "task": {
+    "name": "s2",
+    "storage_path": "/s2/media/国产剧"
+  },
+  "delay": 0
+}
+```
+
+SmartStrm 的 `storage_path` 来自本次 rclone 成功转移记录的目标路径，并会按任务里配置的 JSON 映射转换，例如：
+
+```json
+{"op:/media":"/s2/media"}
+```
+
+如果转移记录是 `op:/media/国产剧/001.mkv`，通知 SmartStrm 时会使用 `/s2/media/国产剧`。
 
 ---
 
@@ -281,7 +321,7 @@ zzmrclone-manager/
 │   │   ├── models/           # GORM 数据模型
 │   │   ├── rclone/           # Rclone 执行器 + OpenList 刷新
 │   │   ├── scheduler/        # 定时任务调度
-│   │   ├── watcher/          # 目录监控
+│   │   ├── watcher/          # 目录监控 + 接口日志监听
 │   │   └── websocket/        # WebSocket 推送
 │   ├── go.mod
 │   └── Dockerfile

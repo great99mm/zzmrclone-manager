@@ -47,6 +47,16 @@ const TaskForm = () => {
     schedule_enabled: false,
     schedule_interval: 15,
     watch_enabled: true,
+    interface_log_enabled: false,
+    interface_log_url: '',
+    interface_log_token: '',
+    interface_log_interval: 30,
+    interface_log_match_path: '',
+    completion_action: '',
+    smartstrm_webhook_url: '',
+    smartstrm_task_name: '',
+    smartstrm_path_mapping: '',
+    smartstrm_delay: 0,
     openlist_enabled: false,
     openlist_url: '',
     openlist_mapping: '',
@@ -695,6 +705,77 @@ const TaskForm = () => {
 
             <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
               <div>
+                <div className="font-medium text-gray-900">接口日志监听</div>
+                <div className="text-sm text-gray-500">监听 MoviePilot 转移历史，有新记录时自动触发传输</div>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={form.interface_log_enabled}
+                  onChange={(e) => handleChange('interface_log_enabled', e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-gray-200 peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+              </label>
+            </div>
+
+            {form.interface_log_enabled && (
+              <div className="md:ml-4 p-4 border-l-2 border-blue-200 space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    接口地址 <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="url"
+                    required={form.interface_log_enabled}
+                    value={form.interface_log_url}
+                    onChange={(e) => handleChange('interface_log_url', e.target.value)}
+                    placeholder="http://moviepilot:3001 或完整 /api/v1/history/transfer 地址"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 font-mono text-sm"
+                  />
+                  <p className="text-xs text-gray-400 mt-1">参考 openlist-refresh：默认轮询 /api/v1/history/transfer?page=1&count=50。</p>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="md:col-span-2">
+                    <label className="block text-sm font-medium text-gray-700 mb-1">接口 Token</label>
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      value={form.interface_log_token}
+                      onChange={(e) => handleChange('interface_log_token', e.target.value)}
+                      placeholder="MoviePilot token，可留空并写在 URL query 中"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">轮询间隔（秒）</label>
+                    <input
+                      type="number"
+                      min="5"
+                      value={form.interface_log_interval}
+                      onChange={(e) => handleChange('interface_log_interval', parseInt(e.target.value) || 30)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">匹配路径前缀（可选）</label>
+                  <input
+                    type="text"
+                    value={form.interface_log_match_path}
+                    onChange={(e) => handleChange('interface_log_match_path', e.target.value)}
+                    placeholder="留空时使用源目录作为前缀，例如 /opt/media/国产剧"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 font-mono text-sm"
+                  />
+                  <p className="text-xs text-gray-400 mt-1">新日志的 file_path/dest/src 命中此前缀才会触发当前任务；首次启用只建立基线，不会处理旧日志。</p>
+                </div>
+              </div>
+            )}
+
+            <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+              <div>
                 <div className="font-medium text-gray-900">自动去重</div>
                 <div className="text-sm text-gray-500">传输完成后自动执行 dedupe newest</div>
               </div>
@@ -755,6 +836,88 @@ const TaskForm = () => {
                 <div className="w-11 h-6 bg-gray-200 peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
               </label>
             </div>
+          </div>
+        </div>
+
+        {/* Completion Actions */}
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+          <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+            <RefreshCw className="w-5 h-5 text-cyan-500" />
+            传输完成动作
+          </h2>
+
+          <div className="space-y-4">
+            <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+              <div>
+                <div className="font-medium text-gray-900">通知 SmartStrm 生成 STRM</div>
+                <div className="text-sm text-gray-500">rclone 传输成功后发送 SmartStrm webhook</div>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={form.completion_action === 'smartstrm'}
+                  onChange={(e) => handleChange('completion_action', e.target.checked ? 'smartstrm' : '')}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-gray-200 peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+              </label>
+            </div>
+
+            {form.completion_action === 'smartstrm' && (
+              <div className="md:ml-4 p-4 border-l-2 border-cyan-200 space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    SmartStrm webhook URL <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="url"
+                    required={form.completion_action === 'smartstrm'}
+                    value={form.smartstrm_webhook_url}
+                    onChange={(e) => handleChange('smartstrm_webhook_url', e.target.value)}
+                    placeholder="http://smartstrm:端口/api/webhook"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 font-mono text-sm"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="md:col-span-2">
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      SmartStrm 任务名 <span className="text-red-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      required={form.completion_action === 'smartstrm'}
+                      value={form.smartstrm_task_name}
+                      onChange={(e) => handleChange('smartstrm_task_name', e.target.value)}
+                      placeholder="例如 s2"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">延迟（秒）</label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={form.smartstrm_delay}
+                      onChange={(e) => handleChange('smartstrm_delay', parseInt(e.target.value) || 0)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">SmartStrm 路径映射（可选 JSON）</label>
+                  <textarea
+                    rows="3"
+                    value={form.smartstrm_path_mapping}
+                    onChange={(e) => handleChange('smartstrm_path_mapping', e.target.value)}
+                    placeholder='{"op:/media":"/s2/media"}'
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 font-mono text-sm"
+                  />
+                  <p className="text-xs text-gray-400 mt-1">系统会把传输后的目标路径映射成 SmartStrm 的 storage_path，并自动取文件所在目录。</p>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 

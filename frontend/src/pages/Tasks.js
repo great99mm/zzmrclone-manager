@@ -200,8 +200,14 @@ const Tasks = () => {
                         {task.watch_enabled && (
                           <span className="px-2 py-0.5 bg-blue-100 text-blue-700 text-xs rounded-full">监控</span>
                         )}
+                        {task.interface_log_enabled && (
+                          <span className="px-2 py-0.5 bg-cyan-100 text-cyan-700 text-xs rounded-full">接口日志</span>
+                        )}
                         {task.schedule_enabled && (
                           <span className="px-2 py-0.5 bg-purple-100 text-purple-700 text-xs rounded-full">定时</span>
+                        )}
+                        {task.completion_action === 'smartstrm' && (
+                          <span className="px-2 py-0.5 bg-orange-100 text-orange-700 text-xs rounded-full">SmartStrm</span>
                         )}
                         {task.auto_dedupe && (
                           <span className="px-2 py-0.5 bg-green-100 text-green-700 text-xs rounded-full">去重</span>
@@ -308,8 +314,14 @@ const Tasks = () => {
                 {task.watch_enabled && (
                   <span className="px-2 py-0.5 bg-blue-100 text-blue-700 text-xs rounded-full">监控</span>
                 )}
+                {task.interface_log_enabled && (
+                  <span className="px-2 py-0.5 bg-cyan-100 text-cyan-700 text-xs rounded-full">接口日志</span>
+                )}
                 {task.schedule_enabled && (
                   <span className="px-2 py-0.5 bg-purple-100 text-purple-700 text-xs rounded-full">定时</span>
+                )}
+                {task.completion_action === 'smartstrm' && (
+                  <span className="px-2 py-0.5 bg-orange-100 text-orange-700 text-xs rounded-full">SmartStrm</span>
                 )}
                 {task.auto_dedupe && (
                   <span className="px-2 py-0.5 bg-green-100 text-green-700 text-xs rounded-full">去重</span>

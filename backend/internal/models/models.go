@@ -53,6 +53,24 @@ type Task struct {
 	UpdatedAt        time.Time      `json:"updated_at"`
 	DeletedAt        gorm.DeletedAt `json:"-" gorm:"index"`
 
+	// Interface log listener: poll a MoviePilot-style transfer history API and
+	// trigger this task when a new matching record appears.
+	InterfaceLogEnabled   bool   `json:"interface_log_enabled" gorm:"default:false"`
+	InterfaceLogURL       string `json:"interface_log_url" gorm:"default:''"`
+	InterfaceLogToken     string `json:"interface_log_token" gorm:"default:''"`
+	InterfaceLogInterval  int    `json:"interface_log_interval" gorm:"default:30"`
+	InterfaceLogMatchPath string `json:"interface_log_match_path" gorm:"default:''"`
+	InterfaceLogLastID    int64  `json:"interface_log_last_id" gorm:"default:0"`
+
+	// Completion action: notify SmartStrm to generate STRM after a successful
+	// transfer. smartstrm_path_mapping is a JSON object, for example
+	// {"op:/media":"/s2/media"}.
+	CompletionAction     string `json:"completion_action" gorm:"default:''"`
+	SmartStrmWebhookURL  string `json:"smartstrm_webhook_url" gorm:"default:''"`
+	SmartStrmTaskName    string `json:"smartstrm_task_name" gorm:"default:''"`
+	SmartStrmPathMapping string `json:"smartstrm_path_mapping" gorm:"type:text"`
+	SmartStrmDelay       int    `json:"smartstrm_delay" gorm:"default:0"`
+
 	// OpenList refresh configuration
 	OpenlistEnabled  bool   `json:"openlist_enabled" gorm:"default:false"`
 	OpenlistURL      string `json:"openlist_url" gorm:"default:''"`

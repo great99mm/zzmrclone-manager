@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -85,7 +86,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	sched.Start()
 
 	// Init watcher
-	watch = watcher.NewWatcher(executor)
+	watch = watcher.NewWatcher(executor, db)
 
 	// Init mount manager and auto-mount enabled mount configs
 	mountMgr = mountsvc.NewManager(db, cfg.MountRoot, cfg.DataDir)
@@ -106,6 +107,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	for _, task := range tasks {
 		if task.WatchEnabled {
 			watch.StartTaskWatch(&task, executor)
+		}
+		if task.InterfaceLogEnabled {
+			watch.StartInterfaceLogWatch(&task, executor)
 		}
 		if task.ScheduleEnabled {
 			sched.AddTask(&task)
@@ -541,6 +545,10 @@ func createTask(c *gin.Context) {
 	if task.OpenlistURL != "" {
 		task.OpenlistURL = strings.TrimRight(task.OpenlistURL, "/")
 	}
+	if err := normalizeTaskIntegrations(&task); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	// Validate OpenList mapping JSON if provided
 	if task.OpenlistMapping != "" {
 		if !isValidJSON(task.OpenlistMapping) {
@@ -561,6 +569,9 @@ func createTask(c *gin.Context) {
 	// Start watcher if enabled
 	if task.WatchEnabled {
 		watch.StartTaskWatch(&task, executor)
+	}
+	if task.InterfaceLogEnabled {
+		watch.StartInterfaceLogWatch(&task, executor)
 	}
 	if task.ScheduleEnabled {
 		sched.AddTask(&task)
@@ -708,6 +719,10 @@ func updateTask(c *gin.Context) {
 	if updates.OpenlistURL != "" {
 		updates.OpenlistURL = strings.TrimRight(updates.OpenlistURL, "/")
 	}
+	if err := normalizeTaskIntegrations(&updates); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	// Validate OpenList mapping JSON if provided
 	if updates.OpenlistMapping != "" {
 		if !isValidJSON(updates.OpenlistMapping) {
@@ -726,6 +741,9 @@ func updateTask(c *gin.Context) {
 
 	// Update
 	updates.ID = uint(id)
+	// interface_log_last_id is runtime state maintained by the listener. Do not
+	// let a stale edit form reset or roll it back.
+	updates.InterfaceLogLastID = task.InterfaceLogLastID
 	if err := db.Model(&task).Updates(updates).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -733,23 +751,57 @@ func updateTask(c *gin.Context) {
 	// GORM struct updates ignore zero values. Persist OpenList fields explicitly so
 	// disabling refresh, clearing mappings, or clearing config IDs works reliably.
 	if err := db.Model(&task).Updates(map[string]interface{}{
-		"openlist_enabled":     updates.OpenlistEnabled,
-		"openlist_config_id":   updates.OpenlistConfigID,
-		"openlist_url":         updates.OpenlistURL,
-		"openlist_token":       updates.OpenlistToken,
-		"openlist_mapping":     updates.OpenlistMapping,
-		"openlist_refresh_dir": updates.OpenlistRefreshDir,
+		"name":                     updates.Name,
+		"source_type":              updates.SourceType,
+		"source_dir":               updates.SourceDir,
+		"dest_type":                updates.DestType,
+		"remote_name":              updates.RemoteName,
+		"remote_dir":               updates.RemoteDir,
+		"transfer_mode":            updates.TransferMode,
+		"transfers":                updates.Transfers,
+		"checkers":                 updates.Checkers,
+		"bind_ip":                  updates.BindIP,
+		"rclone_config":            updates.RcloneConfig,
+		"enabled":                  updates.Enabled,
+		"auto_dedupe":              updates.AutoDedupe,
+		"min_age":                  updates.MinAge,
+		"drive_chunk_size":         updates.DriveChunkSize,
+		"buffer_size":              updates.BufferSize,
+		"retries":                  updates.Retries,
+		"schedule_enabled":         updates.ScheduleEnabled,
+		"schedule_interval":        updates.ScheduleInterval,
+		"watch_enabled":            updates.WatchEnabled,
+		"openlist_enabled":         updates.OpenlistEnabled,
+		"openlist_config_id":       updates.OpenlistConfigID,
+		"openlist_url":             updates.OpenlistURL,
+		"openlist_token":           updates.OpenlistToken,
+		"openlist_mapping":         updates.OpenlistMapping,
+		"openlist_refresh_dir":     updates.OpenlistRefreshDir,
+		"interface_log_enabled":    updates.InterfaceLogEnabled,
+		"interface_log_url":        updates.InterfaceLogURL,
+		"interface_log_token":      updates.InterfaceLogToken,
+		"interface_log_interval":   updates.InterfaceLogInterval,
+		"interface_log_match_path": updates.InterfaceLogMatchPath,
+		"completion_action":        updates.CompletionAction,
+		"smartstrm_webhook_url":    updates.SmartStrmWebhookURL,
+		"smartstrm_task_name":      updates.SmartStrmTaskName,
+		"smartstrm_path_mapping":   updates.SmartStrmPathMapping,
+		"smartstrm_delay":          updates.SmartStrmDelay,
 	}).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
 	// Restart if enabled
-	if updates.WatchEnabled || task.WatchEnabled {
+	if updates.WatchEnabled {
 		db.First(&task, id)
 		watch.StartTaskWatch(&task, executor)
 	}
-	if updates.ScheduleEnabled || task.ScheduleEnabled {
+	if updates.InterfaceLogEnabled {
+		db.First(&task, id)
+		watch.StartInterfaceLogWatch(&task, executor)
+	}
+	if updates.ScheduleEnabled {
 		db.First(&task, id)
 		sched.AddTask(&task)
 	}
@@ -1003,6 +1055,63 @@ func applyOpenlistConfigToTask(task *models.Task) error {
 	}
 	task.OpenlistURL = strings.TrimRight(cfg.URL, "/")
 	task.OpenlistToken = cfg.Token
+	return nil
+}
+
+func normalizeTaskIntegrations(task *models.Task) error {
+	task.InterfaceLogURL = strings.TrimRight(strings.TrimSpace(task.InterfaceLogURL), "/")
+	task.InterfaceLogToken = strings.TrimSpace(task.InterfaceLogToken)
+	task.InterfaceLogMatchPath = strings.TrimSpace(task.InterfaceLogMatchPath)
+	if task.InterfaceLogEnabled {
+		if task.InterfaceLogURL == "" {
+			return fmt.Errorf("启用接口日志监听时，请填写接口地址")
+		}
+		parsedURL, err := url.Parse(task.InterfaceLogURL)
+		if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+			return fmt.Errorf("接口日志地址必须是 http/https 地址")
+		}
+		if task.InterfaceLogInterval <= 0 {
+			task.InterfaceLogInterval = 30
+		}
+		if task.InterfaceLogInterval < 5 {
+			task.InterfaceLogInterval = 5
+		}
+	}
+
+	task.CompletionAction = strings.TrimSpace(task.CompletionAction)
+	task.SmartStrmWebhookURL = strings.TrimRight(strings.TrimSpace(task.SmartStrmWebhookURL), "/")
+	task.SmartStrmTaskName = strings.TrimSpace(task.SmartStrmTaskName)
+	task.SmartStrmPathMapping = strings.TrimSpace(task.SmartStrmPathMapping)
+	if task.SmartStrmDelay < 0 {
+		task.SmartStrmDelay = 0
+	}
+	if task.CompletionAction == "" {
+		return nil
+	}
+	if task.CompletionAction != "smartstrm" {
+		return fmt.Errorf("不支持的传输完成动作")
+	}
+	if task.SmartStrmWebhookURL == "" {
+		return fmt.Errorf("启用 SmartStrm 完成动作时，请填写 SmartStrm webhook URL")
+	}
+	parsedURL, err := url.Parse(task.SmartStrmWebhookURL)
+	if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+		return fmt.Errorf("SmartStrm webhook URL 必须是 http/https 地址")
+	}
+	if task.SmartStrmTaskName == "" {
+		return fmt.Errorf("启用 SmartStrm 完成动作时，请填写 SmartStrm 任务名")
+	}
+	if task.SmartStrmPathMapping != "" {
+		var mappings map[string]string
+		if err := json.Unmarshal([]byte(task.SmartStrmPathMapping), &mappings); err != nil {
+			return fmt.Errorf("SmartStrm 路径映射必须是 JSON 对象，例如 {\"op:/media\":\"/s2/media\"}")
+		}
+		for key, value := range mappings {
+			if strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
+				return fmt.Errorf("SmartStrm 路径映射不能包含空路径")
+			}
+		}
+	}
 	return nil
 }
 

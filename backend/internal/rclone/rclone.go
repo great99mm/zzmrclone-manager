@@ -26,19 +26,21 @@ import (
 const RcloneRCAddr = "http://127.0.0.1:5572"
 
 // fileLineRegex matches rclone per-file transfer log lines like:
-//   INFO  : filename.mkv: Copied (new)
-//   INFO  : filename.mkv: Copied (replaced existing)
-//   INFO  : filename.mkv: Deleted
-//   INFO  : filename.mkv: Moved
-//   INFO  : filename.mkv: Checked (rclone already there)
+//
+//	INFO  : filename.mkv: Copied (new)
+//	INFO  : filename.mkv: Copied (replaced existing)
+//	INFO  : filename.mkv: Deleted
+//	INFO  : filename.mkv: Moved
+//	INFO  : filename.mkv: Checked (rclone already there)
 var fileLineRegex = regexp.MustCompile(`INFO\s*:\s*(.+?)\s*:\s*(Copied|Deleted|Moved|Transferred|Checked)`)
 
 // statsLineRegex matches rclone --stats output like:
-//   Transferred:    1.234 GiB / 5.678 GiB, 22%, 10.234 MiB/s, ETA 4m32s
+//
+//	Transferred:    1.234 GiB / 5.678 GiB, 22%, 10.234 MiB/s, ETA 4m32s
 var statsLineRegex = regexp.MustCompile(`Transferred:\s+[^,]+,\s*([\d\.]+)%`)
 
 // transferringLineRegex matches rclone per-file progress like:
-//   * filename.mkv: 22% /5.678Gi, 10.234Mi/s, 4m32s
+//   - filename.mkv: 22% /5.678Gi, 10.234Mi/s, 4m32s
 var transferringLineRegex = regexp.MustCompile(`\*\s+(.+?):\s*([\d\.]+)%`)
 
 type Executor struct {
@@ -46,8 +48,10 @@ type Executor struct {
 	mu            sync.RWMutex
 	hub           *websocket.Hub
 	db            *gorm.DB
-	logQueue      chan *models.OutputLog   // async log persistence queue
-	recentRefresh map[string]time.Time     // dir -> last refresh time (dedup)
+	logQueue      chan *models.OutputLog // async log persistence queue
+	runDests      map[uint]map[string]struct{}
+	runDestsMu    sync.Mutex
+	recentRefresh map[string]time.Time // dir -> last refresh time (dedup)
 	refreshMu     sync.Mutex
 }
 
@@ -57,6 +61,7 @@ func NewExecutor(hub *websocket.Hub, database *gorm.DB) *Executor {
 		hub:           hub,
 		db:            database,
 		logQueue:      make(chan *models.OutputLog, 1000),
+		runDests:      make(map[uint]map[string]struct{}),
 		recentRefresh: make(map[string]time.Time),
 	}
 	if database != nil {
@@ -185,6 +190,36 @@ func (e *Executor) IsRunning(taskID uint) bool {
 	return cmd.Process != nil && cmd.ProcessState == nil
 }
 
+func (e *Executor) startRunTracking(taskID uint) {
+	e.runDestsMu.Lock()
+	e.runDests[taskID] = make(map[string]struct{})
+	e.runDestsMu.Unlock()
+}
+
+func (e *Executor) recordRunDest(taskID uint, dest string) {
+	dest = strings.TrimSpace(dest)
+	if dest == "" {
+		return
+	}
+	e.runDestsMu.Lock()
+	if dests, ok := e.runDests[taskID]; ok {
+		dests[dest] = struct{}{}
+	}
+	e.runDestsMu.Unlock()
+}
+
+func (e *Executor) finishRunTracking(taskID uint) []string {
+	e.runDestsMu.Lock()
+	defer e.runDestsMu.Unlock()
+	destsMap := e.runDests[taskID]
+	delete(e.runDests, taskID)
+	dests := make([]string, 0, len(destsMap))
+	for dest := range destsMap {
+		dests = append(dests, dest)
+	}
+	return dests
+}
+
 // buildSourcePath returns the rclone source path based on task's source_type.
 func buildSourcePath(task *models.Task) string {
 	if task.SourceType == "remote" {
@@ -220,6 +255,7 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 	mode := transferMode(task)
 	src := buildSourcePath(task)
 	dst := buildDestPath(task)
+	e.startRunTracking(task.ID)
 
 	args := []string{
 		mode,
@@ -260,42 +296,26 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 	// Setup output pipes
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		e.finishRunTracking(task.ID)
 		return err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
+		e.finishRunTracking(task.ID)
 		return err
 	}
 
 	// Log file
 	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
+		e.finishRunTracking(task.ID)
 		return err
 	}
-
-	// Read stdout and stderr in separate goroutines. io.MultiReader was tried
-	// but causes a deadlock: rclone logs to stderr, and MultiReader blocks on
-	// stdout EOF before ever reading stderr, so all log data piles up in the
-	// pipe buffer and WebSocket / log file get nothing.
-	// os.File.WriteString is concurrency-safe at the kernel level, so both
-	// goroutines can write to the same log file safely.
-	go e.streamOutput(task, stdout, f, "stdout")
-	go e.streamOutput(task, stderr, f, "stderr")
-
-	// Start progress polling goroutine
-	stopProgress := make(chan struct{})
-	go e.pollProgress(task, stopProgress)
-
-	e.mu.Lock()
-	e.runningTasks[task.ID] = cmd
-	e.mu.Unlock()
 
 	err = cmd.Start()
 	if err != nil {
 		f.Close()
-		e.mu.Lock()
-		delete(e.runningTasks, task.ID)
-		e.mu.Unlock()
+		e.finishRunTracking(task.ID)
 		// Start failed — roll status back to error so the UI doesn’t
 		// show "running" for a process that never launched.
 		if e.db != nil {
@@ -308,6 +328,30 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 		}
 		return err
 	}
+
+	// Read stdout and stderr in separate goroutines. io.MultiReader was tried
+	// but causes a deadlock: rclone logs to stderr, and MultiReader blocks on
+	// stdout EOF before ever reading stderr, so all log data piles up in the
+	// pipe buffer and WebSocket / log file get nothing.
+	// os.File.WriteString is concurrency-safe at the kernel level, so both
+	// goroutines can write to the same log file safely.
+	streamDone := make(chan struct{}, 2)
+	go func() {
+		e.streamOutput(task, stdout, f, "stdout")
+		streamDone <- struct{}{}
+	}()
+	go func() {
+		e.streamOutput(task, stderr, f, "stderr")
+		streamDone <- struct{}{}
+	}()
+
+	// Start progress polling goroutine
+	stopProgress := make(chan struct{})
+	go e.pollProgress(task, stopProgress)
+
+	e.mu.Lock()
+	e.runningTasks[task.ID] = cmd
+	e.mu.Unlock()
 
 	// Process started successfully — commit "running" state so that
 	// watcher / scheduler triggered tasks also show correctly.
@@ -326,7 +370,10 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 	// Wait for completion
 	go func() {
 		err := cmd.Wait()
+		<-streamDone
+		<-streamDone
 		f.Close()
+		runDests := e.finishRunTracking(task.ID)
 
 		e.mu.Lock()
 		delete(e.runningTasks, task.ID)
@@ -370,6 +417,11 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 		// Refresh OpenList directories after successful transfer
 		if task.OpenlistEnabled && task.OpenlistURL != "" && err == nil {
 			e.refreshOpenListForTask(task)
+		}
+
+		// Optional completion action: notify SmartStrm to generate STRM files.
+		if err == nil {
+			e.notifySmartStrmForTask(task, runDests)
 		}
 
 		// Auto dedupe if enabled
@@ -546,6 +598,9 @@ func (e *Executor) parseAndSaveLog(task *models.Task, line string) {
 		if strings.Contains(line, "ERROR") || strings.Contains(line, "Failed") || strings.Contains(line, "failed") {
 			status = false
 			errmsg = line
+		}
+		if status {
+			e.recordRunDest(task.ID, destPath)
 		}
 
 		log := &models.OutputLog{
@@ -914,4 +969,144 @@ func (e *Executor) refreshOpenListForTask(task *models.Task) {
 				"openlist_msg":    msg,
 			})
 	}
+}
+
+func (e *Executor) notifySmartStrmForTask(task *models.Task, dests []string) {
+	if task.CompletionAction != "smartstrm" || task.SmartStrmWebhookURL == "" || task.SmartStrmTaskName == "" {
+		return
+	}
+
+	paths := smartStrmStoragePathsFromDests(dests, task.SmartStrmPathMapping)
+	if len(paths) == 0 {
+		fallback := buildDestPath(task)
+		paths = append(paths, smartStrmMappedPath(fallback, task.SmartStrmPathMapping))
+	}
+
+	seen := make(map[string]struct{}, len(paths))
+	for _, storagePath := range paths {
+		storagePath = strings.TrimSpace(storagePath)
+		if storagePath == "" {
+			continue
+		}
+		if _, ok := seen[storagePath]; ok {
+			continue
+		}
+		seen[storagePath] = struct{}{}
+		if err := postSmartStrmWebhook(task, storagePath); err != nil {
+			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("SmartStrm notify [%s] failed: %v", storagePath, err))
+		} else {
+			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("SmartStrm notify [%s]: ok", storagePath))
+		}
+	}
+}
+
+func smartStrmStoragePathsFromDests(dests []string, mappingJSON string) []string {
+	paths := make([]string, 0, len(dests))
+	for _, dest := range dests {
+		dest = strings.TrimSpace(dest)
+		if dest == "" {
+			continue
+		}
+		paths = append(paths, smartStrmMappedPath(filepath.Dir(filepath.ToSlash(dest)), mappingJSON))
+	}
+	return paths
+}
+
+func smartStrmMappedPath(pathValue, mappingJSON string) string {
+	pathValue = filepath.ToSlash(strings.TrimSpace(pathValue))
+	if pathValue == "" {
+		return ""
+	}
+	mapped := applySmartStrmMapping(pathValue, mappingJSON)
+	if mapped == "." {
+		return "/"
+	}
+	return filepath.ToSlash(mapped)
+}
+
+func applySmartStrmMapping(pathValue, mappingJSON string) string {
+	if strings.TrimSpace(mappingJSON) == "" {
+		return stripRemotePrefix(pathValue)
+	}
+	var mappings map[string]string
+	if err := json.Unmarshal([]byte(mappingJSON), &mappings); err != nil {
+		return stripRemotePrefix(pathValue)
+	}
+
+	bestKey := ""
+	bestValue := ""
+	for key, value := range mappings {
+		key = filepath.ToSlash(strings.TrimSpace(key))
+		value = filepath.ToSlash(strings.TrimSpace(value))
+		if key == "" || value == "" {
+			continue
+		}
+		if pathMatchesPrefix(pathValue, key) && len(key) > len(bestKey) {
+			bestKey = key
+			bestValue = value
+			continue
+		}
+		strippedKey := stripRemotePrefix(key)
+		strippedPath := stripRemotePrefix(pathValue)
+		if strippedKey != key && pathMatchesPrefix(strippedPath, strippedKey) && len(strippedKey) > len(bestKey) {
+			bestKey = strippedKey
+			bestValue = value
+		}
+	}
+	if bestKey == "" {
+		return stripRemotePrefix(pathValue)
+	}
+	pathForReplace := pathValue
+	if !strings.Contains(bestKey, ":") {
+		pathForReplace = stripRemotePrefix(pathValue)
+	}
+	suffix := strings.TrimPrefix(pathForReplace[len(bestKey):], "/")
+	if suffix == "" {
+		return bestValue
+	}
+	return strings.TrimRight(bestValue, "/") + "/" + suffix
+}
+
+func pathMatchesPrefix(pathValue, prefix string) bool {
+	pathValue = strings.TrimRight(filepath.ToSlash(pathValue), "/")
+	prefix = strings.TrimRight(filepath.ToSlash(prefix), "/")
+	return pathValue == prefix || strings.HasPrefix(pathValue, prefix+"/")
+}
+
+func stripRemotePrefix(pathValue string) string {
+	if idx := strings.Index(pathValue, ":"); idx >= 0 {
+		return pathValue[idx+1:]
+	}
+	return pathValue
+}
+
+func postSmartStrmWebhook(task *models.Task, storagePath string) error {
+	payload := map[string]interface{}{
+		"event": "a_task",
+		"task": map[string]string{
+			"name":         task.SmartStrmTaskName,
+			"storage_path": storagePath,
+		},
+		"delay": task.SmartStrmDelay,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, task.SmartStrmWebhookURL, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	return nil
 }
