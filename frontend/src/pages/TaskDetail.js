@@ -21,6 +21,24 @@ import { getTask, getTaskStatus, getTaskLogs, startTask, stopTask, pauseTask, ca
 import { createWebSocket } from '../services/api';
 import toast from 'react-hot-toast';
 
+const parseRotationRemotes = (value) => {
+  try {
+    const parsed = JSON.parse(value || '[]');
+    return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+  } catch {
+    return (value || '').split(',').map(item => item.trim()).filter(Boolean);
+  }
+};
+
+const formatTaskDest = (task) => {
+  if (task.dest_type === 'local') return `📂 ${task.remote_dir || ''}`;
+  if (task.task_type === 'rotation') {
+    const remotes = parseRotationRemotes(task.rotation_remotes);
+    return `☁ ${(remotes.length ? remotes.join(' / ') : task.remote_name || '')}:${task.remote_dir || ''}`;
+  }
+  return `☁ ${task.remote_name || ''}:${task.remote_dir || ''}`;
+};
+
 const TaskDetail = () => {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -97,6 +115,13 @@ const TaskDetail = () => {
     try {
       const res = await getTaskStatus(id);
       setStatus(res.data);
+      setTask(prev => prev ? {
+        ...prev,
+        remote_name: res.data.remote_name ?? prev.remote_name,
+        rotation_current_index: res.data.rotation_current_index ?? prev.rotation_current_index,
+        rotation_current_round: res.data.rotation_current_round ?? prev.rotation_current_round,
+        rotation_paused_until: res.data.rotation_paused_until ?? prev.rotation_paused_until,
+      } : prev);
     } catch (err) {
       console.error('Failed to load status');
     }
@@ -277,6 +302,8 @@ const TaskDetail = () => {
 
   const isQuickTask = !!task.is_quick_task;
   const canContinueQuickTask = isQuickTask && (status.status === 'paused' || status.status === 'error');
+  const rotationRemotes = parseRotationRemotes(task.rotation_remotes);
+  const rotationCurrentRemote = rotationRemotes[task.rotation_current_index || 0] || rotationRemotes[0] || '-';
 
   return (
     <div className="space-y-6">
@@ -297,9 +324,7 @@ const TaskDetail = () => {
             <p className="text-gray-500 mt-1">
               {(task.source_type === 'remote' ? '☁ ' : '📂 ') + task.source_dir}
               {' → '}
-              {task.dest_type === 'local'
-                ? '📂 ' + (task.remote_dir || '')
-                : '☁ ' + (task.remote_name || '') + ':' + (task.remote_dir || '')}
+              {formatTaskDest(task)}
             </p>
           </div>
         </div>
@@ -414,6 +439,28 @@ const TaskDetail = () => {
           value={task.watch_enabled ? '监控' : '手动'}
           sub={task.schedule_enabled ? `定时 ${task.schedule_interval}分` : '无定时'}
         />
+        {task.task_type === 'rotation' && (
+          <>
+            <InfoCard
+              icon={Upload}
+              label="轮转网盘"
+              value={rotationRemotes.join(' / ') || '-'}
+              sub={`目标目录: ${task.remote_dir || '/'}`}
+            />
+            <InfoCard
+              icon={RotateCcw}
+              label="当前轮转"
+              value={`第 ${(task.rotation_current_round || 0) + 1} 轮 / ${rotationCurrentRemote}`}
+              sub={`当前账号序号: ${(task.rotation_current_index || 0) + 1}`}
+            />
+            <InfoCard
+              icon={Clock}
+              label="恢复信息"
+              value={task.rotation_resume_time || '01:00'}
+              sub={`暂停至: ${task.rotation_paused_until || '未暂停'}`}
+            />
+          </>
+        )}
       </div>
 
       {/* Active File Transfers */}
@@ -579,7 +626,7 @@ const StatusBadge = ({ status }) => {
   const configs = {
     running: { text: '运行中', class: 'bg-green-100 text-green-700' },
     idle: { text: '当前空闲', class: 'bg-gray-100 text-gray-600' },
-    paused: { text: '已暂停', class: 'bg-amber-100 text-amber-700' },
+    paused: { text: '暂停', class: 'bg-amber-100 text-amber-700' },
     canceled: { text: '已停止', class: 'bg-slate-100 text-slate-600' },
     error: { text: '异常', class: 'bg-red-100 text-red-700' },
   };

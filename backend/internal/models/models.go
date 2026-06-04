@@ -1,6 +1,8 @@
 package models
 
 import (
+	"encoding/json"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -65,8 +67,59 @@ type Task struct {
 	// Quick task: created from file browser, auto-hides after completion
 	IsQuickTask bool `json:"is_quick_task" gorm:"default:false"`
 
+	// TaskType controls execution behavior:
+	//   "normal"   -> existing single-remote behavior
+	//   "rotation" -> sequentially rotates destination remotes on 403/429/quota errors
+	TaskType string `json:"task_type" gorm:"default:normal"`
+	// RotationRemotes stores a JSON string array of rclone remote names, e.g. ["a","b","c"].
+	RotationRemotes      string     `json:"rotation_remotes" gorm:"type:text"`
+	RotationMaxRounds    int        `json:"rotation_max_rounds" gorm:"default:3"`
+	RotationResumeTime   string     `json:"rotation_resume_time" gorm:"default:'01:00'"`
+	RotationCurrentIndex int        `json:"rotation_current_index" gorm:"default:0"`
+	RotationCurrentRound int        `json:"rotation_current_round" gorm:"default:0"`
+	RotationPausedUntil  *time.Time `json:"rotation_paused_until"`
+
 	// Cascading: when a Task is deleted, all its OutputLogs are deleted
 	OutputLogs []OutputLog `json:"-" gorm:"constraint:OnDelete:CASCADE;"`
+}
+
+func ParseRotationRemotes(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+
+	var parsed []string
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		parsed = strings.Split(raw, ",")
+	}
+
+	seen := make(map[string]bool, len(parsed))
+	remotes := make([]string, 0, len(parsed))
+	for _, remote := range parsed {
+		remote = strings.TrimSpace(remote)
+		if remote == "" || seen[remote] {
+			continue
+		}
+		seen[remote] = true
+		remotes = append(remotes, remote)
+	}
+	return remotes
+}
+
+func EncodeRotationRemotes(remotes []string) string {
+	cleaned := make([]string, 0, len(remotes))
+	seen := make(map[string]bool, len(remotes))
+	for _, remote := range remotes {
+		remote = strings.TrimSpace(remote)
+		if remote == "" || seen[remote] {
+			continue
+		}
+		seen[remote] = true
+		cleaned = append(cleaned, remote)
+	}
+	data, _ := json.Marshal(cleaned)
+	return string(data)
 }
 
 type OpenlistConfig struct {

@@ -28,11 +28,18 @@ const TaskForm = () => {
 
   const [form, setForm] = useState({
     name: '',
+    task_type: 'normal',
     source_type: 'local',
     source_dir: '',
     dest_type: 'remote',
     remote_name: '',
     remote_dir: '',
+    rotation_remotes: '[]',
+    rotation_max_rounds: 3,
+    rotation_resume_time: '01:00',
+    rotation_current_index: 0,
+    rotation_current_round: 0,
+    rotation_paused_until: null,
     transfer_mode: 'move',
     transfers: 16,
     checkers: 32,
@@ -73,6 +80,31 @@ const TaskForm = () => {
   const [browserLoading, setBrowserLoading] = useState(false);
   const [browserBreadcrumbs, setBrowserBreadcrumbs] = useState([{ name: '/', path: '/' }]);
 
+  const isRotationTask = form.task_type === 'rotation';
+
+  const parseRotationRemotes = useCallback((value = form.rotation_remotes) => {
+    try {
+      const parsed = JSON.parse(value || '[]');
+      return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+    } catch {
+      return [];
+    }
+  }, [form.rotation_remotes]);
+
+  const selectedRotationRemotes = useMemo(() => parseRotationRemotes(), [parseRotationRemotes]);
+
+  const isValidResumeTime = useCallback((value) => /^([01]\d|2[0-3]):([0-5]\d)$/.test(value), []);
+
+  const rotationLogicText = useMemo(() => {
+    if (!isRotationTask) return null;
+    const remotesText = selectedRotationRemotes.length > 0 ? selectedRotationRemotes.join(' → ') : 'A → B → C';
+    const sourceText = form.source_dir || '/x';
+    const destPath = form.remote_dir || '/目标目录';
+    const rounds = form.rotation_max_rounds || 3;
+    const resumeTime = form.rotation_resume_time || '01:00';
+    return `当前逻辑：监控 ${sourceText} 后按 ${remotesText} 顺序上传到同一目标目录 ${destPath}；某个账号返回 403/429/限额后自动切到下一个；连续轮转 ${rounds} 轮后暂停，到 ${resumeTime} 自动从 ${selectedRotationRemotes[0] || 'A'} 重新开始。`;
+  }, [isRotationTask, selectedRotationRemotes, form.source_dir, form.remote_dir, form.rotation_max_rounds, form.rotation_resume_time]);
+
   const loadRemotes = useCallback(async () => {
     try {
       const res = await getRemotes();
@@ -95,7 +127,14 @@ const TaskForm = () => {
   const loadTask = useCallback(async () => {
     try {
       const res = await getTask(id);
-      setForm({ ...res.data, openlist_config_id: res.data.openlist_config_id || 0 });
+      setForm({
+        ...res.data,
+        task_type: res.data.task_type || 'normal',
+        rotation_remotes: res.data.rotation_remotes || '[]',
+        rotation_max_rounds: res.data.rotation_max_rounds || 3,
+        rotation_resume_time: res.data.rotation_resume_time || '01:00',
+        openlist_config_id: res.data.openlist_config_id || 0,
+      });
     } catch (err) {
       toast.error('加载任务失败');
       navigate('/tasks');
@@ -141,7 +180,7 @@ const TaskForm = () => {
       currentPath = parsed.path;
     } else {
       if (form.dest_type !== 'remote') return;
-      remote = form.remote_name;
+      remote = isRotationTask ? selectedRotationRemotes[0] : form.remote_name;
       currentPath = form.remote_dir || '/';
     }
     if (!remote) {
@@ -216,14 +255,40 @@ const TaskForm = () => {
       return;
     }
 
+    let submitForm = { ...form };
+
+    if (isRotationTask) {
+      if (submitForm.dest_type !== 'remote') {
+        toast.error('调度轮转任务的目标必须是云盘');
+        return;
+      }
+
+      const normalizedRemotes = parseRotationRemotes(submitForm.rotation_remotes);
+      if (normalizedRemotes.length === 0) {
+        toast.error('调度轮转任务至少选择一个网盘');
+        return;
+      }
+
+      if (!isValidResumeTime(submitForm.rotation_resume_time)) {
+        toast.error('恢复时间格式应为 HH:MM');
+        return;
+      }
+
+      submitForm = {
+        ...submitForm,
+        rotation_remotes: JSON.stringify(normalizedRemotes),
+        remote_name: normalizedRemotes[0],
+      };
+    }
+
     setSaving(true);
 
     try {
       if (isEdit) {
-        await updateTask(id, form);
+        await updateTask(id, submitForm);
         toast.success('任务已更新');
       } else {
-        await createTask(form);
+        await createTask(submitForm);
         toast.success('任务已创建');
       }
       navigate('/tasks');
@@ -236,6 +301,31 @@ const TaskForm = () => {
 
   const handleChange = (field, value) => {
     setForm(prev => ({ ...prev, [field]: value }));
+  };
+
+  const handleTaskTypeChange = (taskType) => {
+    setForm(prev => ({
+      ...prev,
+      task_type: taskType,
+      dest_type: taskType === 'rotation' ? 'remote' : prev.dest_type,
+      rotation_remotes: taskType === 'rotation' && parseRotationRemotes(prev.rotation_remotes).length === 0 && prev.remote_name
+        ? JSON.stringify([prev.remote_name])
+        : prev.rotation_remotes,
+      remote_name: taskType === 'rotation' ? (parseRotationRemotes(prev.rotation_remotes)[0] || prev.remote_name) : prev.remote_name,
+    }));
+  };
+
+  const toggleRotationRemote = (remote) => {
+    const current = parseRotationRemotes();
+    const next = current.includes(remote)
+      ? current.filter(item => item !== remote)
+      : [...current, remote];
+
+    setForm(prev => ({
+      ...prev,
+      rotation_remotes: JSON.stringify(next),
+      remote_name: next[0] || '',
+    }));
   };
 
   const parseMappings = useMemo(() => {
@@ -353,6 +443,28 @@ const TaskForm = () => {
                 placeholder="例如：每日媒体同步"
                 className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
               />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">任务类型</label>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {[
+                  { value: 'normal', label: '普通任务', desc: '普通任务保持现在逻辑' },
+                  { value: 'rotation', label: '调度轮转任务', desc: '用于 Google Drive 多子账号顺序上传' },
+                ].map(type => (
+                  <button
+                    key={type.value}
+                    type="button"
+                    onClick={() => handleTaskTypeChange(type.value)}
+                    className={`p-3 rounded-lg border-2 text-left transition-colors ${
+                      form.task_type === type.value ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'
+                    }`}
+                  >
+                    <div className="font-medium text-sm text-gray-900">{type.label}</div>
+                    <div className="text-xs text-gray-500 mt-0.5">{type.desc}</div>
+                  </button>
+                ))}
+              </div>
             </div>
 
             {/* Transfer mode */}
@@ -492,14 +604,18 @@ const TaskForm = () => {
                     </button>
                     <button
                       type="button"
-                      onClick={() => handleChange('dest_type', 'local')}
+                      onClick={() => !isRotationTask && handleChange('dest_type', 'local')}
+                      disabled={isRotationTask}
                       className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
                         form.dest_type === 'local' ? 'bg-white shadow text-blue-600' : 'text-gray-500'
-                      }`}
+                      } ${isRotationTask ? 'opacity-50 cursor-not-allowed' : ''}`}
                     >
                       <HardDrive className="w-3 h-3 inline mr-1" />本地
                     </button>
                   </div>
+                  {isRotationTask && (
+                    <p className="text-xs text-amber-600 mt-2">调度轮转任务目标固定为云盘，避免误配置到本地目录。</p>
+                  )}
                 </div>
 
                 <div className="min-w-0">
@@ -507,21 +623,41 @@ const TaskForm = () => {
                     <div className="space-y-2">
                       <div className="grid grid-cols-1 md:grid-cols-[220px_minmax(0,1fr)_92px] gap-2 items-start">
                         <div>
-                          <div className="text-xs text-gray-500 mb-1">远程盘符</div>
-                          <div className="relative">
-                            <select
-                              required
-                              value={form.remote_name}
-                              onChange={(e) => handleChange('remote_name', e.target.value)}
-                              className="w-full h-10 px-3 pr-9 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none"
-                            >
-                              <option value="">选择远程盘符</option>
-                              {remotes.map(remote => (
-                                <option key={remote} value={remote}>{remote}</option>
-                              ))}
-                            </select>
-                            <Cloud className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
-                          </div>
+                          <div className="text-xs text-gray-500 mb-1">{isRotationTask ? '轮转网盘' : '远程盘符'}</div>
+                          {isRotationTask ? (
+                            <div className="border border-gray-300 rounded-lg p-2 max-h-40 overflow-y-auto space-y-1 bg-white">
+                              {remotes.length === 0 ? (
+                                <div className="text-xs text-gray-400">暂无可选网盘</div>
+                              ) : (
+                                remotes.map(remote => (
+                                  <label key={remote} className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-50 cursor-pointer text-sm text-gray-700">
+                                    <input
+                                      type="checkbox"
+                                      checked={selectedRotationRemotes.includes(remote)}
+                                      onChange={() => toggleRotationRemote(remote)}
+                                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                    />
+                                    <span>{remote}</span>
+                                  </label>
+                                ))
+                              )}
+                            </div>
+                          ) : (
+                            <div className="relative">
+                              <select
+                                required
+                                value={form.remote_name}
+                                onChange={(e) => handleChange('remote_name', e.target.value)}
+                                className="w-full h-10 px-3 pr-9 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 appearance-none"
+                              >
+                                <option value="">选择远程盘符</option>
+                                {remotes.map(remote => (
+                                  <option key={remote} value={remote}>{remote}</option>
+                                ))}
+                              </select>
+                              <Cloud className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+                            </div>
+                          )}
                         </div>
                         <div>
                           <div className="text-xs text-gray-500 mb-1">云盘路径</div>
@@ -545,8 +681,34 @@ const TaskForm = () => {
                           </button>
                         </div>
                       </div>
+                      {isRotationTask && (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-3 bg-blue-50 border border-blue-100 rounded-lg">
+                          <div>
+                            <label className="block text-xs text-gray-500 mb-1">最大轮数</label>
+                            <input
+                              type="number"
+                              min="1"
+                              value={form.rotation_max_rounds}
+                              onChange={(e) => handleChange('rotation_max_rounds', parseInt(e.target.value) || 1)}
+                              className="w-full h-10 px-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs text-gray-500 mb-1">恢复时间</label>
+                            <input
+                              type="time"
+                              value={form.rotation_resume_time}
+                              onChange={(e) => handleChange('rotation_resume_time', e.target.value)}
+                              className="w-full h-10 px-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                            />
+                          </div>
+                        </div>
+                      )}
                       {remotes.length === 0 && (
                         <p className="text-xs text-orange-500">未检测到 rclone 配置，请确保配置文件已挂载</p>
+                      )}
+                      {isRotationTask && rotationLogicText && (
+                        <p className="text-xs text-blue-700 bg-blue-50 border border-blue-100 rounded-lg px-3 py-2">{rotationLogicText}</p>
                       )}
                     </div>
                   ) : (

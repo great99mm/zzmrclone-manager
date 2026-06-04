@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,34 +27,87 @@ import (
 const RcloneRCAddr = "http://127.0.0.1:5572"
 
 // fileLineRegex matches rclone per-file transfer log lines like:
-//   INFO  : filename.mkv: Copied (new)
-//   INFO  : filename.mkv: Copied (replaced existing)
-//   INFO  : filename.mkv: Deleted
-//   INFO  : filename.mkv: Moved
-//   INFO  : filename.mkv: Checked (rclone already there)
+//
+//	INFO  : filename.mkv: Copied (new)
+//	INFO  : filename.mkv: Copied (replaced existing)
+//	INFO  : filename.mkv: Deleted
+//	INFO  : filename.mkv: Moved
+//	INFO  : filename.mkv: Checked (rclone already there)
 var fileLineRegex = regexp.MustCompile(`INFO\s*:\s*(.+?)\s*:\s*(Copied|Deleted|Moved|Transferred|Checked)`)
 
 // statsLineRegex matches rclone --stats output like:
-//   Transferred:    1.234 GiB / 5.678 GiB, 22%, 10.234 MiB/s, ETA 4m32s
+//
+//	Transferred:    1.234 GiB / 5.678 GiB, 22%, 10.234 MiB/s, ETA 4m32s
 var statsLineRegex = regexp.MustCompile(`Transferred:\s+[^,]+,\s*([\d\.]+)%`)
 
 // transferringLineRegex matches rclone per-file progress like:
-//   * filename.mkv: 22% /5.678Gi, 10.234Mi/s, 4m32s
+//   - filename.mkv: 22% /5.678Gi, 10.234Mi/s, 4m32s
 var transferringLineRegex = regexp.MustCompile(`\*\s+(.+?):\s*([\d\.]+)%`)
 
+var rotationHTTPStatusRegex = regexp.MustCompile(`\b(403|429)\b`)
+
+var errTaskStopped = errors.New("task stopped")
+
+type runningTask struct {
+	cmd        *exec.Cmd
+	generation uint64
+	canceled   bool
+}
+
 type Executor struct {
-	runningTasks  map[uint]*exec.Cmd
-	mu            sync.RWMutex
-	hub           *websocket.Hub
-	db            *gorm.DB
-	logQueue      chan *models.OutputLog   // async log persistence queue
-	recentRefresh map[string]time.Time     // dir -> last refresh time (dedup)
-	refreshMu     sync.Mutex
+	runningTasks      map[uint]*runningTask
+	resumeTimers      map[uint]chan struct{}
+	generationCounter uint64
+	mu                sync.RWMutex
+	hub               *websocket.Hub
+	db                *gorm.DB
+	logQueue          chan *models.OutputLog // async log persistence queue
+	recentRefresh     map[string]time.Time   // dir -> last refresh time (dedup)
+	refreshMu         sync.Mutex
+}
+
+type runObserver struct {
+	mu         sync.Mutex
+	limitError string
+	cmd        *exec.Cmd
+}
+
+func (o *runObserver) setCmd(cmd *exec.Cmd) {
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	o.cmd = cmd
+	o.mu.Unlock()
+}
+
+func (o *runObserver) observe(line string) {
+	if o == nil || !isRotationLimitError(line) {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.limitError == "" {
+		o.limitError = strings.TrimSpace(line)
+		if o.cmd != nil && o.cmd.Process != nil {
+			_ = o.cmd.Process.Kill()
+		}
+	}
+}
+
+func (o *runObserver) LimitError() string {
+	if o == nil {
+		return ""
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.limitError
 }
 
 func NewExecutor(hub *websocket.Hub, database *gorm.DB) *Executor {
 	e := &Executor{
-		runningTasks:  make(map[uint]*exec.Cmd),
+		runningTasks:  make(map[uint]*runningTask),
+		resumeTimers:  make(map[uint]chan struct{}),
 		hub:           hub,
 		db:            database,
 		logQueue:      make(chan *models.OutputLog, 1000),
@@ -175,14 +229,60 @@ func (e *Executor) persistLog(log *models.OutputLog) {
 func (e *Executor) IsRunning(taskID uint) bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	cmd, exists := e.runningTasks[taskID]
-	if !exists || cmd == nil {
+	running, exists := e.runningTasks[taskID]
+	if !exists || running == nil || running.canceled {
 		return false
+	}
+	cmd := running.cmd
+	if cmd == nil {
+		return true
 	}
 	// cmd.Process != nil only means the process object was created.
 	// ProcessState is set after the process exits, so we also require
 	// it to be nil to report "truly running".
 	return cmd.Process != nil && cmd.ProcessState == nil
+}
+
+func (e *Executor) reserveTask(taskID uint) (uint64, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if running, exists := e.runningTasks[taskID]; exists && running != nil && !running.canceled {
+		return 0, false
+	}
+	e.generationCounter++
+	generation := e.generationCounter
+	e.runningTasks[taskID] = &runningTask{generation: generation}
+	return generation, true
+}
+
+func (e *Executor) startReservedTask(taskID uint, generation uint64, cmd *exec.Cmd) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	running, exists := e.runningTasks[taskID]
+	if !exists || running == nil || running.generation != generation || running.canceled {
+		return errTaskStopped
+	}
+	running.cmd = cmd
+	if err := cmd.Start(); err != nil {
+		delete(e.runningTasks, taskID)
+		return err
+	}
+	return nil
+}
+
+func (e *Executor) clearReservedTask(taskID uint, generation uint64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if running, exists := e.runningTasks[taskID]; exists && running != nil && running.generation == generation {
+		delete(e.runningTasks, taskID)
+	}
+}
+
+func (e *Executor) hasRunningEntry(taskID uint, generation uint64) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	running, exists := e.runningTasks[taskID]
+	return exists && running != nil && running.generation == generation && !running.canceled
 }
 
 // buildSourcePath returns the rclone source path based on task's source_type.
@@ -213,7 +313,15 @@ func transferMode(task *models.Task) string {
 }
 
 func (e *Executor) ExecuteMove(task *models.Task) error {
+	if strings.TrimSpace(task.TaskType) == "rotation" {
+		return e.ExecuteRotation(task)
+	}
+
 	if e.IsRunning(task.ID) {
+		return fmt.Errorf("task %d is already running", task.ID)
+	}
+	generation, ok := e.reserveTask(task.ID)
+	if !ok {
 		return fmt.Errorf("task %d is already running", task.ID)
 	}
 
@@ -260,16 +368,19 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 	// Setup output pipes
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		e.clearReservedTask(task.ID, generation)
 		return err
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
+		e.clearReservedTask(task.ID, generation)
 		return err
 	}
 
 	// Log file
 	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
+		e.clearReservedTask(task.ID, generation)
 		return err
 	}
 
@@ -279,26 +390,19 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 	// pipe buffer and WebSocket / log file get nothing.
 	// os.File.WriteString is concurrency-safe at the kernel level, so both
 	// goroutines can write to the same log file safely.
-	go e.streamOutput(task, stdout, f, "stdout")
-	go e.streamOutput(task, stderr, f, "stderr")
+	go e.streamOutput(task, stdout, f, "stdout", nil)
+	go e.streamOutput(task, stderr, f, "stderr", nil)
 
 	// Start progress polling goroutine
 	stopProgress := make(chan struct{})
 	go e.pollProgress(task, stopProgress)
 
-	e.mu.Lock()
-	e.runningTasks[task.ID] = cmd
-	e.mu.Unlock()
-
-	err = cmd.Start()
-	if err != nil {
+	if err := e.startReservedTask(task.ID, generation, cmd); err != nil {
+		close(stopProgress)
 		f.Close()
-		e.mu.Lock()
-		delete(e.runningTasks, task.ID)
-		e.mu.Unlock()
 		// Start failed — roll status back to error so the UI doesn’t
 		// show "running" for a process that never launched.
-		if e.db != nil {
+		if e.db != nil && !errors.Is(err, errTaskStopped) {
 			now := time.Now()
 			task.LastRun = &now
 			e.db.Model(task).Updates(map[string]interface{}{
@@ -328,9 +432,7 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 		err := cmd.Wait()
 		f.Close()
 
-		e.mu.Lock()
-		delete(e.runningTasks, task.ID)
-		e.mu.Unlock()
+		e.clearReservedTask(task.ID, generation)
 
 		// Close progress polling
 		close(stopProgress)
@@ -382,6 +484,424 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 	return nil
 }
 
+func (e *Executor) ExecuteRotation(task *models.Task) error {
+	if e.IsRunning(task.ID) {
+		return fmt.Errorf("task %d is already running", task.ID)
+	}
+	if e.db == nil {
+		return fmt.Errorf("rotation task requires database")
+	}
+	var current models.Task
+	if err := e.db.First(&current, task.ID).Error; err != nil {
+		return err
+	}
+	task = &current
+	if task.DestType == "local" {
+		return fmt.Errorf("rotation task only supports remote destination")
+	}
+
+	remotes := models.ParseRotationRemotes(task.RotationRemotes)
+	if len(remotes) == 0 {
+		return fmt.Errorf("rotation remotes are empty")
+	}
+	if task.RotationMaxRounds <= 0 {
+		task.RotationMaxRounds = 3
+	}
+	if task.RotationResumeTime == "" {
+		task.RotationResumeTime = "01:00"
+	}
+
+	now := time.Now()
+	if task.RotationPausedUntil != nil && task.RotationPausedUntil.After(now) {
+		return fmt.Errorf("rotation task paused until %s", task.RotationPausedUntil.Format("2006-01-02 15:04"))
+	}
+
+	if task.RotationCurrentIndex < 0 || task.RotationCurrentIndex >= len(remotes) {
+		task.RotationCurrentIndex = 0
+	}
+	if task.RotationCurrentRound < 0 || task.RotationCurrentRound >= task.RotationMaxRounds {
+		task.RotationCurrentRound = 0
+	}
+	task.RemoteName = remotes[task.RotationCurrentIndex]
+
+	generation, ok := e.reserveTask(task.ID)
+	if !ok {
+		return fmt.Errorf("task %d is already running", task.ID)
+	}
+
+	e.db.Model(task).Updates(map[string]interface{}{
+		"status":                 "running",
+		"last_error":             "",
+		"last_run":               now,
+		"remote_name":            task.RemoteName,
+		"rotation_current_index": task.RotationCurrentIndex,
+		"rotation_current_round": task.RotationCurrentRound,
+		"rotation_paused_until":  nil,
+	})
+	e.hub.Broadcast(fmt.Sprintf(`{"type":"task_started","task_id":%d}`, task.ID))
+
+	go e.runRotation(task.ID, generation)
+	return nil
+}
+
+func (e *Executor) runRotation(taskID uint, generation uint64) {
+	defer e.clearReservedTask(taskID, generation)
+
+	for {
+		if !e.hasRunningEntry(taskID, generation) {
+			return
+		}
+
+		var task models.Task
+		if err := e.db.First(&task, taskID).Error; err != nil {
+			return
+		}
+
+		remotes := models.ParseRotationRemotes(task.RotationRemotes)
+		if len(remotes) == 0 {
+			e.finishRotationWithError(&task, "轮转网盘为空")
+			return
+		}
+		if task.RotationMaxRounds <= 0 {
+			task.RotationMaxRounds = 3
+		}
+		if task.RotationCurrentIndex < 0 || task.RotationCurrentIndex >= len(remotes) {
+			task.RotationCurrentIndex = 0
+		}
+		if task.RotationCurrentRound < 0 || task.RotationCurrentRound >= task.RotationMaxRounds {
+			task.RotationCurrentRound = 0
+		}
+
+		remote := remotes[task.RotationCurrentIndex]
+		task.RemoteName = remote
+		e.db.Model(&task).Updates(map[string]interface{}{
+			"status":                 "running",
+			"last_error":             "",
+			"remote_name":            remote,
+			"rotation_current_index": task.RotationCurrentIndex,
+			"rotation_current_round": task.RotationCurrentRound,
+		})
+
+		logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("轮转传输：第 %d/%d 轮，使用 %s", task.RotationCurrentRound+1, task.RotationMaxRounds, remote))
+
+		observer, err := e.runRcloneBlocking(&task, generation)
+		if !e.hasRunningEntry(taskID, generation) || errors.Is(err, errTaskStopped) {
+			return
+		}
+
+		limitError := observer.LimitError()
+		if limitError != "" {
+			err = rotationLimitErr{message: limitError}
+		}
+
+		if err == nil {
+			e.finishRotationSuccess(&task)
+			return
+		}
+
+		if isRotationLimitFailure(err) {
+			message := err.Error()
+			if message == "" {
+				message = "当前账号触发 403/429 限制"
+			}
+			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("%s 触发限制，切换下一个网盘：%s", remote, message))
+			if !e.advanceRotation(&task, len(remotes), message) {
+				return
+			}
+			continue
+		}
+
+		e.finishRotationWithError(&task, err.Error())
+		return
+	}
+}
+
+func (e *Executor) runRcloneBlocking(task *models.Task, generation uint64) (*runObserver, error) {
+	observer := &runObserver{}
+	if !e.hasRunningEntry(task.ID, generation) {
+		return observer, errTaskStopped
+	}
+	mode := transferMode(task)
+	src := buildSourcePath(task)
+	dst := buildDestPath(task)
+
+	args := []string{
+		mode,
+		src,
+		dst,
+		"--config", getRcloneConfig(task),
+		"--fast-list",
+		"--min-age", task.MinAge,
+		"--stats", "3s",
+		"--log-level", "INFO",
+		"--ignore-errors",
+		"--transfers", strconv.Itoa(task.Transfers),
+		"--checkers", strconv.Itoa(task.Checkers),
+		"--drive-chunk-size", task.DriveChunkSize,
+		"--buffer-size", task.BufferSize,
+		"--retries", strconv.Itoa(task.Retries),
+	}
+	if mode == "move" {
+		args = append(args, "--delete-empty-src-dirs")
+	}
+	if mode != "sync" {
+		args = append(args, "--use-mmap", "--no-traverse")
+	}
+	if task.BindIP != "" {
+		args = append(args, "--bind", task.BindIP)
+	}
+
+	logFile := filepath.Join(logger.GetLogDir(), fmt.Sprintf("task_%d.log", task.ID))
+	cmd := exec.Command("rclone", args...)
+	observer.setCmd(cmd)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return observer, err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return observer, err
+	}
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return observer, err
+	}
+	defer f.Close()
+
+	go e.streamOutput(task, stdout, f, "stdout", observer)
+	go e.streamOutput(task, stderr, f, "stderr", observer)
+
+	stopProgress := make(chan struct{})
+	go e.pollProgress(task, stopProgress)
+
+	if err := e.startReservedTask(task.ID, generation, cmd); err != nil {
+		close(stopProgress)
+		return observer, err
+	}
+
+	err = cmd.Wait()
+	close(stopProgress)
+
+	if e.hasRunningEntry(task.ID, generation) {
+		e.mu.Lock()
+		if running, exists := e.runningTasks[task.ID]; exists && running != nil && running.generation == generation {
+			running.cmd = nil
+		}
+		e.mu.Unlock()
+	}
+
+	if task.OpenlistEnabled && task.OpenlistURL != "" && err == nil {
+		e.refreshOpenListForTask(task)
+	}
+	if task.AutoDedupe && err == nil {
+		time.Sleep(2 * time.Second)
+		e.ExecuteDedupe(task)
+	}
+	return observer, err
+}
+
+func (e *Executor) finishRotationSuccess(task *models.Task) {
+	e.db.Model(task).Updates(map[string]interface{}{
+		"status":                "idle",
+		"last_error":            "",
+		"rotation_paused_until": nil,
+	})
+	e.hub.Broadcast(fmt.Sprintf(`{"type":"task_complete","task_id":%d}`, task.ID))
+	logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), "轮转传输完成")
+}
+
+func (e *Executor) finishRotationWithError(task *models.Task, message string) {
+	e.db.Model(task).Updates(map[string]interface{}{
+		"status":     "error",
+		"last_error": message,
+	})
+	e.hub.Broadcast(fmt.Sprintf(`{"type":"task_error","task_id":%d,"error":"%s"}`, task.ID, escapeJSON(message)))
+	logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("轮转传输失败: %s", message))
+}
+
+func (e *Executor) advanceRotation(task *models.Task, remoteCount int, reason string) bool {
+	nextIndex := task.RotationCurrentIndex + 1
+	nextRound := task.RotationCurrentRound
+	if nextIndex >= remoteCount {
+		nextIndex = 0
+		nextRound++
+	}
+
+	if nextRound >= task.RotationMaxRounds {
+		pausedUntil := nextRotationResumeAt(task.RotationResumeTime, time.Now())
+		message := fmt.Sprintf("已连续轮转 %d 轮仍触发限制，暂停至 %s 后自动恢复", task.RotationMaxRounds, pausedUntil.Format("2006-01-02 15:04"))
+		e.db.Model(task).Updates(map[string]interface{}{
+			"status":                 "paused",
+			"last_error":             message,
+			"rotation_current_index": 0,
+			"rotation_current_round": 0,
+			"rotation_paused_until":  pausedUntil,
+		})
+		e.hub.Broadcast(fmt.Sprintf(`{"type":"task_error","task_id":%d,"error":"%s"}`, task.ID, escapeJSON(message)))
+		logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("%s；最后错误：%s", message, reason))
+		e.ScheduleRotationResume(task.ID, pausedUntil)
+		return false
+	}
+
+	e.db.Model(task).Updates(map[string]interface{}{
+		"rotation_current_index": nextIndex,
+		"rotation_current_round": nextRound,
+		"last_error":             "",
+	})
+	return true
+}
+
+func (e *Executor) ScheduleRotationResume(taskID uint, resumeAt time.Time) {
+	e.CancelRotationResume(taskID)
+	done := make(chan struct{})
+	e.mu.Lock()
+	e.resumeTimers[taskID] = done
+	e.mu.Unlock()
+
+	go func() {
+		delay := time.Until(resumeAt)
+		if delay < 0 {
+			delay = 0
+		}
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-done:
+			return
+		}
+		e.mu.Lock()
+		if current, ok := e.resumeTimers[taskID]; ok && current == done {
+			delete(e.resumeTimers, taskID)
+		}
+		e.mu.Unlock()
+		if e.db == nil {
+			return
+		}
+		var task models.Task
+		if err := e.db.First(&task, taskID).Error; err != nil {
+			return
+		}
+		if task.TaskType != "rotation" || !task.Enabled || task.Status != "paused" {
+			return
+		}
+		if task.RotationPausedUntil != nil && task.RotationPausedUntil.After(time.Now()) {
+			return
+		}
+		e.db.Model(&task).Updates(map[string]interface{}{
+			"status":                 "idle",
+			"last_error":             "",
+			"rotation_current_index": 0,
+			"rotation_current_round": 0,
+			"rotation_paused_until":  nil,
+		})
+		task.Status = "idle"
+		task.LastError = ""
+		task.RotationCurrentIndex = 0
+		task.RotationCurrentRound = 0
+		task.RotationPausedUntil = nil
+		if err := e.ExecuteMove(&task); err != nil {
+			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("轮转恢复启动失败: %v", err))
+		}
+	}()
+}
+
+func (e *Executor) CancelRotationResume(taskID uint) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if done, exists := e.resumeTimers[taskID]; exists {
+		delete(e.resumeTimers, taskID)
+		close(done)
+	}
+}
+
+func nextRotationResumeAt(value string, now time.Time) time.Time {
+	parts := strings.Split(strings.TrimSpace(value), ":")
+	hour, minute := 1, 0
+	if len(parts) >= 2 {
+		if parsedHour, err := strconv.Atoi(parts[0]); err == nil && parsedHour >= 0 && parsedHour <= 23 {
+			hour = parsedHour
+		}
+		if parsedMinute, err := strconv.Atoi(parts[1]); err == nil && parsedMinute >= 0 && parsedMinute <= 59 {
+			minute = parsedMinute
+		}
+	}
+	resume := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location())
+	if !resume.After(now) {
+		resume = resume.Add(24 * time.Hour)
+	}
+	return resume
+}
+
+type rotationLimitErr struct {
+	message string
+}
+
+func (e rotationLimitErr) Error() string {
+	return e.message
+}
+
+func isRotationLimitFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	var limit rotationLimitErr
+	if errors.As(err, &limit) {
+		return true
+	}
+	return isRotationLimitError(err.Error())
+}
+
+func isRotationLimitError(text string) bool {
+	if isSuccessfulInfoTransferLine(text) {
+		return false
+	}
+	lower := strings.ToLower(text)
+	phrasePatterns := []string{
+		"too many requests",
+		"rate limit",
+		"ratelimit",
+		"user rate limit",
+		"quota exceeded",
+		"daily limit",
+		"download quota",
+		"upload limit",
+		"storage quota",
+	}
+	for _, pattern := range phrasePatterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	contextualError := strings.Contains(lower, "error") ||
+		strings.Contains(lower, "failed") ||
+		strings.Contains(lower, "fatal") ||
+		strings.Contains(lower, "googleapi") ||
+		strings.Contains(lower, "http") ||
+		strings.Contains(lower, "status code") ||
+		strings.Contains(lower, "response")
+	return contextualError && rotationHTTPStatusRegex.MatchString(lower)
+}
+
+func isSuccessfulInfoTransferLine(text string) bool {
+	line := strings.TrimSpace(text)
+	if !strings.HasPrefix(line, "INFO") {
+		return false
+	}
+	return fileLineRegex.MatchString(line) &&
+		!strings.Contains(line, "ERROR") &&
+		!strings.Contains(line, "Failed") &&
+		!strings.Contains(line, "failed")
+}
+
+func escapeJSON(value string) string {
+	data, _ := json.Marshal(value)
+	if len(data) < 2 {
+		return strings.ReplaceAll(value, `"`, `\"`)
+	}
+	return string(data[1 : len(data)-1])
+}
+
 func (e *Executor) ExecuteDedupe(task *models.Task) error {
 	// Dedupe only makes sense for remote destinations
 	if task.DestType == "local" {
@@ -410,12 +930,22 @@ func (e *Executor) ExecuteDedupe(task *models.Task) error {
 
 func (e *Executor) StopTask(taskID uint) error {
 	e.mu.Lock()
-	cmd, exists := e.runningTasks[taskID]
-	if exists && cmd != nil && cmd.Process != nil {
-		cmd.Process.Kill()
+	running, exists := e.runningTasks[taskID]
+	if exists && running != nil {
+		running.canceled = true
+		if running.cmd != nil && running.cmd.Process != nil {
+			_ = running.cmd.Process.Kill()
+		}
 	}
 	delete(e.runningTasks, taskID)
 	e.mu.Unlock()
+	e.CancelRotationResume(taskID)
+	if e.db != nil {
+		e.db.Model(&models.Task{}).Where("id = ?", taskID).Updates(map[string]interface{}{
+			"status":     "idle",
+			"last_error": "",
+		})
+	}
 	return nil
 }
 
@@ -425,7 +955,7 @@ func (e *Executor) StopTask(taskID uint) error {
 // FIX: set a max token size (64KB) so rclone output lines that contain
 // extremely long pathnames don't cause the Scanner to auto-grow its buffer
 // into multi-megabyte territory.
-func (e *Executor) streamOutput(task *models.Task, reader io.Reader, logFile *os.File, streamType string) {
+func (e *Executor) streamOutput(task *models.Task, reader io.Reader, logFile *os.File, streamType string, observer *runObserver) {
 	scanner := bufio.NewScanner(reader)
 	// Cap individual line buffer at 64KB.  This prevents unbounded memory
 	// growth when rclone prints very long single-line JSON / path output.
@@ -437,6 +967,9 @@ func (e *Executor) streamOutput(task *models.Task, reader io.Reader, logFile *os
 		line := scanner.Text()
 		if strings.TrimSpace(line) == "" {
 			continue
+		}
+		if observer != nil && streamType == "stderr" {
+			observer.observe(line)
 		}
 
 		timestamp := time.Now().Format("2006-01-02 15:04:05")

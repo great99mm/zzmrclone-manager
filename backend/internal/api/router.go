@@ -89,11 +89,15 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	var tasks []models.Task
 	db.Where("enabled = ?", true).Find(&tasks)
 	for _, task := range tasks {
+		normalizeTaskDefaults(&task)
 		if task.WatchEnabled {
 			watch.StartTaskWatch(&task, executor)
 		}
 		if task.ScheduleEnabled {
 			sched.AddTask(&task)
+		}
+		if task.TaskType == "rotation" && task.Status == "paused" && task.RotationPausedUntil != nil {
+			executor.ScheduleRotationResume(task.ID, *task.RotationPausedUntil)
 		}
 	}
 
@@ -346,6 +350,86 @@ func clampRcloneParams(task *models.Task) {
 	}
 }
 
+func normalizeTaskDefaults(task *models.Task) {
+	if strings.TrimSpace(task.TaskType) == "" {
+		task.TaskType = "normal"
+	}
+	if task.RotationMaxRounds <= 0 {
+		task.RotationMaxRounds = 3
+	}
+	if strings.TrimSpace(task.RotationResumeTime) == "" {
+		task.RotationResumeTime = "01:00"
+	}
+	if task.RotationCurrentIndex < 0 {
+		task.RotationCurrentIndex = 0
+	}
+	if task.RotationCurrentRound < 0 {
+		task.RotationCurrentRound = 0
+	}
+	if task.MinAge == "" {
+		task.MinAge = "10s"
+	}
+	if task.Retries == 0 {
+		task.Retries = 3
+	}
+}
+
+func validateAndNormalizeTask(task *models.Task) error {
+	normalizeTaskDefaults(task)
+	if task.TaskType != "normal" && task.TaskType != "rotation" {
+		return fmt.Errorf("任务类型无效")
+	}
+
+	if task.OpenlistURL != "" {
+		task.OpenlistURL = strings.TrimRight(task.OpenlistURL, "/")
+	}
+	if task.OpenlistMapping != "" && !isValidJSON(task.OpenlistMapping) {
+		return fmt.Errorf("OpenList mapping must be a valid JSON object like '{\"op:s1\":\"/s2\"}'")
+	}
+	if err := applyOpenlistConfigToTask(task); err != nil {
+		return err
+	}
+
+	if task.TaskType != "rotation" {
+		return nil
+	}
+	if task.DestType == "local" {
+		return fmt.Errorf("调度轮转任务只支持云盘目标目录")
+	}
+	remotes := models.ParseRotationRemotes(task.RotationRemotes)
+	if len(remotes) == 0 {
+		return fmt.Errorf("请选择至少一个轮转网盘")
+	}
+	if task.RotationMaxRounds <= 0 {
+		return fmt.Errorf("轮数必须大于 0")
+	}
+	if task.RotationResumeTime == "" || !isValidHHMM(task.RotationResumeTime) {
+		return fmt.Errorf("恢复时间格式应为 HH:MM")
+	}
+	task.RotationRemotes = models.EncodeRotationRemotes(remotes)
+	if task.RotationCurrentIndex >= len(remotes) {
+		task.RotationCurrentIndex = 0
+	}
+	if task.RotationCurrentRound >= task.RotationMaxRounds {
+		task.RotationCurrentRound = 0
+	}
+	task.RemoteName = remotes[task.RotationCurrentIndex]
+	return nil
+}
+
+func isValidHHMM(value string) bool {
+	parts := strings.Split(value, ":")
+	if len(parts) != 2 {
+		return false
+	}
+	hour, err := strconv.Atoi(parts[0])
+	if err != nil || hour < 0 || hour > 23 {
+		return false
+	}
+	minute, err := strconv.Atoi(parts[1])
+	return err == nil && minute >= 0 && minute <= 59
+}
+
 // parseSize converts human-readable sizes like "512M" or "1G" to a comparable
 // numeric value (megabytes).  Used only for clamping.
 func parseSize(s string) int64 {
@@ -410,25 +494,7 @@ func createTask(c *gin.Context) {
 
 	// Enforce safe memory defaults / caps before the task ever reaches rclone.
 	clampRcloneParams(&task)
-
-	if task.MinAge == "" {
-		task.MinAge = "10s"
-	}
-	if task.Retries == 0 {
-		task.Retries = 3
-	}
-	// Trim trailing slash from OpenList URL to avoid double slashes
-	if task.OpenlistURL != "" {
-		task.OpenlistURL = strings.TrimRight(task.OpenlistURL, "/")
-	}
-	// Validate OpenList mapping JSON if provided
-	if task.OpenlistMapping != "" {
-		if !isValidJSON(task.OpenlistMapping) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "OpenList mapping must be a valid JSON object like '{\"op:s1\":\"/s2\"}'"})
-			return
-		}
-	}
-	if err := applyOpenlistConfigToTask(&task); err != nil {
+	if err := validateAndNormalizeTask(&task); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -583,19 +649,7 @@ func updateTask(c *gin.Context) {
 
 	// Clamp memory params on updates as well
 	clampRcloneParams(&updates)
-
-	// Trim trailing slash from OpenList URL
-	if updates.OpenlistURL != "" {
-		updates.OpenlistURL = strings.TrimRight(updates.OpenlistURL, "/")
-	}
-	// Validate OpenList mapping JSON if provided
-	if updates.OpenlistMapping != "" {
-		if !isValidJSON(updates.OpenlistMapping) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "OpenList mapping must be a valid JSON object like '{\"op:s1\":\"/s2\"}'"})
-			return
-		}
-	}
-	if err := applyOpenlistConfigToTask(&updates); err != nil {
+	if err := validateAndNormalizeTask(&updates); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -603,22 +657,53 @@ func updateTask(c *gin.Context) {
 	// Stop existing watchers/schedules
 	watch.StopTaskWatch(uint(id))
 	sched.RemoveTask(uint(id))
+	executor.CancelRotationResume(uint(id))
 
-	// Update
-	updates.ID = uint(id)
-	if err := db.Model(&task).Updates(updates).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+	status := task.Status
+	lastError := task.LastError
+	if task.TaskType == "rotation" || updates.TaskType == "rotation" {
+		status = "idle"
+		lastError = ""
+		updates.RotationCurrentIndex = 0
+		updates.RotationCurrentRound = 0
 	}
-	// GORM struct updates ignore zero values. Persist OpenList fields explicitly so
-	// disabling refresh, clearing mappings, or clearing config IDs works reliably.
+
 	if err := db.Model(&task).Updates(map[string]interface{}{
-		"openlist_enabled":     updates.OpenlistEnabled,
-		"openlist_config_id":   updates.OpenlistConfigID,
-		"openlist_url":         updates.OpenlistURL,
-		"openlist_token":       updates.OpenlistToken,
-		"openlist_mapping":     updates.OpenlistMapping,
-		"openlist_refresh_dir": updates.OpenlistRefreshDir,
+		"name":                   updates.Name,
+		"source_type":            updates.SourceType,
+		"source_dir":             updates.SourceDir,
+		"dest_type":              updates.DestType,
+		"remote_name":            updates.RemoteName,
+		"remote_dir":             updates.RemoteDir,
+		"transfer_mode":          updates.TransferMode,
+		"transfers":              updates.Transfers,
+		"checkers":               updates.Checkers,
+		"bind_ip":                updates.BindIP,
+		"rclone_config":          updates.RcloneConfig,
+		"enabled":                updates.Enabled,
+		"auto_dedupe":            updates.AutoDedupe,
+		"min_age":                updates.MinAge,
+		"drive_chunk_size":       updates.DriveChunkSize,
+		"buffer_size":            updates.BufferSize,
+		"retries":                updates.Retries,
+		"schedule_enabled":       updates.ScheduleEnabled,
+		"schedule_interval":      updates.ScheduleInterval,
+		"watch_enabled":          updates.WatchEnabled,
+		"status":                 status,
+		"last_error":             lastError,
+		"openlist_enabled":       updates.OpenlistEnabled,
+		"openlist_config_id":     updates.OpenlistConfigID,
+		"openlist_url":           updates.OpenlistURL,
+		"openlist_token":         updates.OpenlistToken,
+		"openlist_mapping":       updates.OpenlistMapping,
+		"openlist_refresh_dir":   updates.OpenlistRefreshDir,
+		"task_type":              updates.TaskType,
+		"rotation_remotes":       updates.RotationRemotes,
+		"rotation_max_rounds":    updates.RotationMaxRounds,
+		"rotation_resume_time":   updates.RotationResumeTime,
+		"rotation_current_index": updates.RotationCurrentIndex,
+		"rotation_current_round": updates.RotationCurrentRound,
+		"rotation_paused_until":  nil,
 	}).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -736,9 +821,11 @@ func stopTask(c *gin.Context) {
 
 	var task models.Task
 	db.First(&task, id)
-	task.Status = "idle"
-	task.LastError = ""
-	db.Save(&task)
+	db.Model(&task).Updates(map[string]interface{}{
+		"status":                "idle",
+		"last_error":            "",
+		"rotation_paused_until": nil,
+	})
 
 	hub.Broadcast(fmt.Sprintf(`{"type":"task_stopped","task_id":%d}`, id))
 
@@ -796,11 +883,15 @@ func getTaskStatus(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"id":         task.ID,
-		"status":     status,
-		"running":    isRunning,
-		"last_run":   task.LastRun,
-		"last_error": task.LastError,
+		"id":                     task.ID,
+		"status":                 status,
+		"running":                isRunning,
+		"last_run":               task.LastRun,
+		"last_error":             task.LastError,
+		"remote_name":            task.RemoteName,
+		"rotation_current_index": task.RotationCurrentIndex,
+		"rotation_current_round": task.RotationCurrentRound,
+		"rotation_paused_until":  task.RotationPausedUntil,
 	})
 }
 

@@ -76,10 +76,29 @@ const Tasks = () => {
     }
   };
 
+  const parseRotationRemotes = (value) => {
+    try {
+      const parsed = JSON.parse(value || '[]');
+      return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+    } catch {
+      return (value || '').split(',').map(item => item.trim()).filter(Boolean);
+    }
+  };
+
+  const formatTaskDest = (task) => {
+    if (task.dest_type === 'local') return task.remote_dir || '';
+    if (task.task_type === 'rotation') {
+      const remotes = parseRotationRemotes(task.rotation_remotes);
+      return `${(remotes.length ? remotes.join(' / ') : task.remote_name || '')}:${task.remote_dir || ''}`;
+    }
+    return `${task.remote_name || ''}:${task.remote_dir || ''}`;
+  };
+
   const filteredTasks = tasks.filter(task => {
     const matchesSearch = task.name.toLowerCase().includes(search.toLowerCase()) ||
                          task.source_dir.toLowerCase().includes(search.toLowerCase()) ||
                          (task.remote_name || '').toLowerCase().includes(search.toLowerCase()) ||
+                         (task.rotation_remotes || '').toLowerCase().includes(search.toLowerCase()) ||
                          (task.remote_dir || '').toLowerCase().includes(search.toLowerCase());
     const matchesFilter = filter === 'all' || task.status === filter;
     return matchesSearch && matchesFilter;
@@ -129,6 +148,7 @@ const Tasks = () => {
               { value: 'all', label: '全部' },
               { value: 'idle', label: '待机' },
               { value: 'running', label: '运行中' },
+              { value: 'paused', label: '暂停' },
               { value: 'error', label: '异常' },
             ].map(({ value, label }) => (
               <button
@@ -172,7 +192,12 @@ const Tasks = () => {
                 filteredTasks.map(task => (
                   <tr key={task.id} className="hover:bg-gray-50 transition-colors">
                     <td className="px-6 py-4">
-                      <div className="font-medium text-gray-900">{task.name}</div>
+                      <div className="flex items-center gap-2">
+                        <div className="font-medium text-gray-900">{task.name}</div>
+                        {task.task_type === 'rotation' && (
+                          <span className="px-2 py-0.5 bg-amber-100 text-amber-700 text-xs rounded-full">轮转</span>
+                        )}
+                      </div>
                       <div className="text-xs text-gray-500 mt-0.5">ID: {task.id}</div>
                     </td>
                     <td className="px-6 py-4">
@@ -182,7 +207,7 @@ const Tasks = () => {
                       <div className="text-sm text-gray-500">→ {
                         task.dest_type === 'local'
                           ? '📂 ' + (task.remote_dir || '')
-                          : '☁ ' + (task.remote_name || '') + ':' + (task.remote_dir || '')
+                          : '☁ ' + formatTaskDest(task)
                       }</div>
                     </td>
                     <td className="px-6 py-4">
@@ -270,8 +295,11 @@ const Tasks = () => {
               {/* Card Header */}
               <div className="flex items-start justify-between mb-3">
                 <div className="min-w-0 flex-1 mr-2">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <h3 className="font-semibold text-gray-900 truncate">{task.name}</h3>
+                    {task.task_type === 'rotation' && (
+                      <span className="px-2 py-0.5 bg-amber-100 text-amber-700 text-xs rounded-full">轮转</span>
+                    )}
                     <StatusBadge status={task.status} />
                   </div>
                   <p className="text-xs text-gray-500 mt-0.5">ID: {task.id}</p>
@@ -291,7 +319,7 @@ const Tasks = () => {
                   <span className="text-gray-700 break-all">{
                     task.dest_type === 'local'
                       ? task.remote_dir || ''
-                      : (task.remote_name || '') + ':' + (task.remote_dir || '')
+                      : formatTaskDest(task)
                   }</span>
                 </div>
               </div>
@@ -369,6 +397,7 @@ const StatusBadge = ({ status }) => {
   const configs = {
     running: { icon: Play, text: '运行中', class: 'bg-green-100 text-green-700' },
     idle: { icon: Clock, text: '待机', class: 'bg-gray-100 text-gray-600' },
+    paused: { icon: Clock, text: '暂停', class: 'bg-amber-100 text-amber-700' },
     error: { icon: XCircle, text: '异常', class: 'bg-red-100 text-red-700' },
   };
 
