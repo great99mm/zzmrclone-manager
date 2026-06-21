@@ -19,6 +19,7 @@ import (
 	"rclone-manager/internal/logger"
 	"rclone-manager/internal/models"
 	mountsvc "rclone-manager/internal/mounts"
+	qbsvc "rclone-manager/internal/qbittorrent"
 	"rclone-manager/internal/rclone"
 	"rclone-manager/internal/scheduler"
 	"rclone-manager/internal/watcher"
@@ -29,6 +30,7 @@ var (
 	executor  *rclone.Executor
 	sched     *scheduler.Scheduler
 	watch     *watcher.Watcher
+	qbWatch   *qbsvc.Watcher
 	hub       *websocket.Hub
 	cfgGlobal *config.Config
 	mountMgr  *mountsvc.Manager
@@ -80,6 +82,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 
 	// Init watcher
 	watch = watcher.NewWatcher(executor)
+	qbWatch = qbsvc.NewWatcher(executor)
 
 	// Init mount manager and auto-mount enabled mount configs
 	mountMgr = mountsvc.NewManager(db, cfg.MountRoot, cfg.DataDir)
@@ -95,6 +98,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		}
 		if task.ScheduleEnabled {
 			sched.AddTask(&task)
+		}
+		if task.QBEnabled {
+			qbWatch.StartTaskWatch(&task)
 		}
 		if task.TaskType == "rotation" && task.Status == "paused" && task.RotationPausedUntil != nil {
 			executor.ScheduleRotationResume(task.ID, *task.RotationPausedUntil)
@@ -372,6 +378,9 @@ func normalizeTaskDefaults(task *models.Task) {
 	if task.Retries == 0 {
 		task.Retries = 3
 	}
+	if task.QBPollInterval <= 0 {
+		task.QBPollInterval = 60
+	}
 }
 
 func validateAndNormalizeTask(task *models.Task) error {
@@ -391,6 +400,9 @@ func validateAndNormalizeTask(task *models.Task) error {
 	}
 
 	if task.TaskType != "rotation" {
+		if task.QBEnabled {
+			return validateQBTask(task)
+		}
 		return nil
 	}
 	if task.DestType == "local" {
@@ -414,6 +426,24 @@ func validateAndNormalizeTask(task *models.Task) error {
 		task.RotationCurrentRound = 0
 	}
 	task.RemoteName = remotes[task.RotationCurrentIndex]
+	if task.QBEnabled {
+		return validateQBTask(task)
+	}
+	return nil
+}
+
+func validateQBTask(task *models.Task) error {
+	if task.SourceType == "remote" {
+		return fmt.Errorf("qBittorrent 完成触发只支持本地源目录")
+	}
+	if strings.TrimSpace(task.QBURL) == "" {
+		return fmt.Errorf("启用 qBittorrent 触发时，请填写 qBittorrent 地址")
+	}
+	task.QBURL = strings.TrimRight(strings.TrimSpace(task.QBURL), "/")
+	task.QBUsername = strings.TrimSpace(task.QBUsername)
+	if task.QBPollInterval <= 0 {
+		task.QBPollInterval = 60
+	}
 	return nil
 }
 
@@ -510,6 +540,9 @@ func createTask(c *gin.Context) {
 	}
 	if task.ScheduleEnabled {
 		sched.AddTask(&task)
+	}
+	if task.QBEnabled {
+		qbWatch.StartTaskWatch(&task)
 	}
 
 	c.JSON(http.StatusCreated, task)
@@ -657,6 +690,7 @@ func updateTask(c *gin.Context) {
 	// Stop existing watchers/schedules
 	watch.StopTaskWatch(uint(id))
 	sched.RemoveTask(uint(id))
+	qbWatch.StopTaskWatch(uint(id))
 	executor.CancelRotationResume(uint(id))
 
 	status := task.Status
@@ -689,6 +723,12 @@ func updateTask(c *gin.Context) {
 		"schedule_enabled":       updates.ScheduleEnabled,
 		"schedule_interval":      updates.ScheduleInterval,
 		"watch_enabled":          updates.WatchEnabled,
+		"qb_enabled":             updates.QBEnabled,
+		"qb_url":                 updates.QBURL,
+		"qb_username":            updates.QBUsername,
+		"qb_password":            updates.QBPassword,
+		"qb_poll_interval":       updates.QBPollInterval,
+		"qb_delete_files":        updates.QBDeleteFiles,
 		"status":                 status,
 		"last_error":             lastError,
 		"openlist_enabled":       updates.OpenlistEnabled,
@@ -718,6 +758,10 @@ func updateTask(c *gin.Context) {
 		db.First(&task, id)
 		sched.AddTask(&task)
 	}
+	if updates.QBEnabled || task.QBEnabled {
+		db.First(&task, id)
+		qbWatch.StartTaskWatch(&task)
+	}
 	db.First(&task, id)
 
 	c.JSON(http.StatusOK, task)
@@ -728,6 +772,7 @@ func deleteTask(c *gin.Context) {
 
 	watch.StopTaskWatch(uint(id))
 	sched.RemoveTask(uint(id))
+	qbWatch.StopTaskWatch(uint(id))
 	executor.StopTask(uint(id))
 
 	// GORM will CASCADE delete associated OutputLogs because of the

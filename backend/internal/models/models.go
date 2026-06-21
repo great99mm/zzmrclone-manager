@@ -48,6 +48,12 @@ type Task struct {
 	ScheduleEnabled  bool           `json:"schedule_enabled" gorm:"default:false"`
 	ScheduleInterval int            `json:"schedule_interval" gorm:"default:15"`
 	WatchEnabled     bool           `json:"watch_enabled" gorm:"default:true"`
+	QBEnabled        bool           `json:"qb_enabled" gorm:"default:false"`
+	QBURL            string         `json:"qb_url" gorm:"default:''"`
+	QBUsername       string         `json:"qb_username" gorm:"default:''"`
+	QBPassword       string         `json:"qb_password" gorm:"default:''"`
+	QBPollInterval   int            `json:"qb_poll_interval" gorm:"default:60"`
+	QBDeleteFiles    bool           `json:"qb_delete_files" gorm:"default:false"`
 	Status           string         `json:"status" gorm:"default:idle"`
 	LastRun          *time.Time     `json:"last_run"`
 	LastError        string         `json:"last_error"`

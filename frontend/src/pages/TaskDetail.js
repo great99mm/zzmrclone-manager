@@ -436,9 +436,17 @@ const TaskDetail = () => {
         <InfoCard
           icon={CheckCircle2}
           label="自动化"
-          value={task.watch_enabled ? '监控' : '手动'}
-          sub={task.schedule_enabled ? `定时 ${task.schedule_interval}分` : '无定时'}
+          value={task.qb_enabled ? 'qB完成触发' : (task.watch_enabled ? '监控' : '手动')}
+          sub={task.qb_enabled ? `轮询 ${task.qb_poll_interval || 60}秒` : (task.schedule_enabled ? `定时 ${task.schedule_interval}分` : '无定时')}
         />
+        {task.qb_enabled && (
+          <InfoCard
+            icon={CheckCircle2}
+            label="qBittorrent"
+            value={task.qb_url || '-'}
+            sub={task.qb_delete_files ? '转移后删种并删除文件' : '转移后只删除种子'}
+          />
+        )}
         {task.task_type === 'rotation' && (
           <>
             <InfoCard

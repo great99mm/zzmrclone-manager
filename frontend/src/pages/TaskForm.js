@@ -54,6 +54,12 @@ const TaskForm = () => {
     schedule_enabled: false,
     schedule_interval: 15,
     watch_enabled: true,
+    qb_enabled: false,
+    qb_url: '',
+    qb_username: '',
+    qb_password: '',
+    qb_poll_interval: 60,
+    qb_delete_files: false,
     openlist_enabled: false,
     openlist_url: '',
     openlist_mapping: '',
@@ -253,6 +259,17 @@ const TaskForm = () => {
     if (form.openlist_enabled && !form.openlist_config_id) {
       toast.error('启用 OpenList 刷新时，请选择一个 OpenList 配置');
       return;
+    }
+
+    if (form.qb_enabled) {
+      if (form.source_type !== 'local') {
+        toast.error('qBittorrent 完成触发只支持本地源目录');
+        return;
+      }
+      if (!form.qb_url.trim()) {
+        toast.error('请填写 qBittorrent 地址');
+        return;
+      }
     }
 
     let submitForm = { ...form };
@@ -899,6 +916,79 @@ const TaskForm = () => {
                   onChange={(e) => handleChange('schedule_interval', parseInt(e.target.value))}
                   className="w-32 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
                 />
+              </div>
+            )}
+
+            <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+              <div>
+                <div className="font-medium text-gray-900">qBittorrent 完成触发</div>
+                <div className="text-sm text-gray-500">种子 100% 完成后自动转移，转移成功后删除种子</div>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={form.qb_enabled}
+                  onChange={(e) => handleChange('qb_enabled', e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-gray-200 peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+              </label>
+            </div>
+
+            {form.qb_enabled && (
+              <div className="md:ml-4 p-4 border-l-2 border-green-200 space-y-4">
+                <p className="text-xs text-gray-500">
+                  当前逻辑：轮询 qBittorrent，发现源目录下种子 100% 后启动本任务；任务成功后删除该种子，默认不删除文件。
+                </p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">qBittorrent 地址 <span className="text-red-500">*</span></label>
+                    <input
+                      type="text"
+                      value={form.qb_url}
+                      onChange={(e) => handleChange('qb_url', e.target.value)}
+                      placeholder="http://127.0.0.1:8080"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">轮询间隔（秒）</label>
+                    <input
+                      type="number"
+                      min="10"
+                      value={form.qb_poll_interval}
+                      onChange={(e) => handleChange('qb_poll_interval', parseInt(e.target.value) || 60)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">用户名（可选）</label>
+                    <input
+                      type="text"
+                      value={form.qb_username}
+                      onChange={(e) => handleChange('qb_username', e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">密码（可选）</label>
+                    <input
+                      type="password"
+                      value={form.qb_password}
+                      onChange={(e) => handleChange('qb_password', e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                </div>
+                <label className="flex items-start gap-2 text-sm text-gray-600 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={form.qb_delete_files}
+                    onChange={(e) => handleChange('qb_delete_files', e.target.checked)}
+                    className="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  <span>删除种子时同时删除文件（默认关闭；如果 rclone 是 move，一般不需要开启）</span>
+                </label>
               </div>
             )}
 

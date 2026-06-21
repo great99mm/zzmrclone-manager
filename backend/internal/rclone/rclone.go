@@ -54,6 +54,8 @@ type runningTask struct {
 	canceled   bool
 }
 
+type CompletionCallback func(success bool)
+
 type Executor struct {
 	runningTasks      map[uint]*runningTask
 	resumeTimers      map[uint]chan struct{}
@@ -313,8 +315,12 @@ func transferMode(task *models.Task) string {
 }
 
 func (e *Executor) ExecuteMove(task *models.Task) error {
+	return e.ExecuteMoveWithCallback(task, nil)
+}
+
+func (e *Executor) ExecuteMoveWithCallback(task *models.Task, callback CompletionCallback) error {
 	if strings.TrimSpace(task.TaskType) == "rotation" {
-		return e.ExecuteRotation(task)
+		return e.ExecuteRotationWithCallback(task, callback)
 	}
 
 	if e.IsRunning(task.ID) {
@@ -430,7 +436,13 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 	// Wait for completion
 	go func() {
 		err := cmd.Wait()
+		success := err == nil
 		f.Close()
+		defer func() {
+			if callback != nil {
+				callback(success)
+			}
+		}()
 
 		e.clearReservedTask(task.ID, generation)
 
@@ -485,6 +497,10 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 }
 
 func (e *Executor) ExecuteRotation(task *models.Task) error {
+	return e.ExecuteRotationWithCallback(task, nil)
+}
+
+func (e *Executor) ExecuteRotationWithCallback(task *models.Task, callback CompletionCallback) error {
 	if e.IsRunning(task.ID) {
 		return fmt.Errorf("task %d is already running", task.ID)
 	}
@@ -540,11 +556,11 @@ func (e *Executor) ExecuteRotation(task *models.Task) error {
 	})
 	e.hub.Broadcast(fmt.Sprintf(`{"type":"task_started","task_id":%d}`, task.ID))
 
-	go e.runRotation(task.ID, generation)
+	go e.runRotation(task.ID, generation, callback)
 	return nil
 }
 
-func (e *Executor) runRotation(taskID uint, generation uint64) {
+func (e *Executor) runRotation(taskID uint, generation uint64, callback CompletionCallback) {
 	defer e.clearReservedTask(taskID, generation)
 
 	for {
@@ -596,6 +612,9 @@ func (e *Executor) runRotation(taskID uint, generation uint64) {
 
 		if err == nil {
 			e.finishRotationSuccess(&task)
+			if callback != nil {
+				callback(true)
+			}
 			return
 		}
 
@@ -612,6 +631,9 @@ func (e *Executor) runRotation(taskID uint, generation uint64) {
 		}
 
 		e.finishRotationWithError(&task, err.Error())
+		if callback != nil {
+			callback(false)
+		}
 		return
 	}
 }
