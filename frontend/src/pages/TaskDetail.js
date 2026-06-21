@@ -444,7 +444,7 @@ const TaskDetail = () => {
             icon={CheckCircle2}
             label="qBittorrent"
             value={task.qb_url || '-'}
-            sub={task.qb_delete_files ? '转移后删种并删除文件' : '转移后只删除种子'}
+            sub={task.qb_delete_files ? '单种子转移后删种并删除文件' : '单种子转移后只删除种子'}
           />
         )}
         {task.task_type === 'rotation' && (

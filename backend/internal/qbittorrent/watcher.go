@@ -9,6 +9,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,13 @@ type Watcher struct {
 	mu       sync.Mutex
 	stops    map[uint]chan struct{}
 	seen     map[uint]map[string]bool
+	queues   map[uint][]queuedTorrent
+}
+
+type queuedTorrent struct {
+	Hash       string
+	Name       string
+	SourcePath string
 }
 
 type torrent struct {
@@ -39,6 +47,7 @@ func NewWatcher(executor *rclone.Executor) *Watcher {
 		executor: executor,
 		stops:    make(map[uint]chan struct{}),
 		seen:     make(map[uint]map[string]bool),
+		queues:   make(map[uint][]queuedTorrent),
 	}
 }
 
@@ -61,6 +70,7 @@ func (w *Watcher) StartTaskWatch(task *models.Task) error {
 	w.mu.Lock()
 	w.stops[task.ID] = stop
 	w.seen[task.ID] = make(map[string]bool)
+	w.queues[task.ID] = nil
 	w.mu.Unlock()
 
 	copied := *task
@@ -76,6 +86,7 @@ func (w *Watcher) StopTaskWatch(taskID uint) {
 		delete(w.stops, taskID)
 	}
 	delete(w.seen, taskID)
+	delete(w.queues, taskID)
 	w.mu.Unlock()
 }
 
@@ -99,7 +110,7 @@ func (w *Watcher) loop(task *models.Task, stop <-chan struct{}) {
 }
 
 func (w *Watcher) check(task *models.Task) {
-	if w.executor == nil || w.executor.IsRunning(task.ID) {
+	if w.executor == nil {
 		return
 	}
 
@@ -115,27 +126,15 @@ func (w *Watcher) check(task *models.Task) {
 	}
 
 	for _, tor := range torrents {
-		if tor.Hash == "" || !w.belongsToTask(task, tor) || w.isSeen(task.ID, tor.Hash) {
+		sourcePath, ok := w.torrentSourcePath(task, tor)
+		if tor.Hash == "" || !ok || w.isSeen(task.ID, tor.Hash) {
 			continue
 		}
 		w.markSeen(task.ID, tor.Hash)
-		logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("qBittorrent 种子完成，开始转移: %s", tor.Name))
-		if err := w.executor.ExecuteMoveWithCallback(task, func(success bool) {
-			if !success {
-				w.unmarkSeen(task.ID, tor.Hash)
-				return
-			}
-			if err := client.deleteTorrent(tor.Hash, task.QBDeleteFiles); err != nil {
-				logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("qBittorrent 删除种子失败 [%s]: %v", tor.Name, err))
-				return
-			}
-			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("qBittorrent 已删除种子: %s", tor.Name))
-		}); err != nil {
-			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("qBittorrent 触发转移失败 [%s]: %v", tor.Name, err))
-			w.unmarkSeen(task.ID, tor.Hash)
-		}
-		return
+		w.enqueue(task.ID, queuedTorrent{Hash: tor.Hash, Name: tor.Name, SourcePath: sourcePath})
+		logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("qBittorrent 种子完成，已加入队列: %s (%s)", tor.Name, sourcePath))
 	}
+	w.runNext(task)
 }
 
 func (w *Watcher) isSeen(taskID uint, hash string) bool {
@@ -161,12 +160,70 @@ func (w *Watcher) unmarkSeen(taskID uint, hash string) {
 	}
 }
 
-func (w *Watcher) belongsToTask(task *models.Task, tor torrent) bool {
+func (w *Watcher) enqueue(taskID uint, tor queuedTorrent) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.queues[taskID] = append(w.queues[taskID], tor)
+}
+
+func (w *Watcher) popQueue(taskID uint) (queuedTorrent, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	queue := w.queues[taskID]
+	if len(queue) == 0 {
+		return queuedTorrent{}, false
+	}
+	tor := queue[0]
+	w.queues[taskID] = queue[1:]
+	return tor, true
+}
+
+func (w *Watcher) runNext(task *models.Task) {
+	if w.executor == nil || w.executor.IsRunning(task.ID) {
+		return
+	}
+	tor, ok := w.popQueue(task.ID)
+	if !ok {
+		return
+	}
+
+	triggeredTask := *task
+	triggeredTask.SourceDir = tor.SourcePath
+	logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("qBittorrent 队列开始单独转移: %s (%s)", tor.Name, tor.SourcePath))
+	if err := w.executor.ExecuteMoveWithCallback(&triggeredTask, func(success bool) {
+		if !success {
+			w.unmarkSeen(task.ID, tor.Hash)
+			w.runNext(task)
+			return
+		}
+		client, err := newClient(task)
+		if err != nil {
+			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("qBittorrent 登录失败，无法删除种子 [%s]: %v", tor.Name, err))
+			w.runNext(task)
+			return
+		}
+		if err := client.deleteTorrent(tor.Hash, task.QBDeleteFiles); err != nil {
+			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("qBittorrent 删除种子失败 [%s]: %v", tor.Name, err))
+			w.runNext(task)
+			return
+		}
+		logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("qBittorrent 已删除种子: %s", tor.Name))
+		w.runNext(task)
+	}); err != nil {
+		logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("qBittorrent 触发转移失败 [%s]: %v", tor.Name, err))
+		w.unmarkSeen(task.ID, tor.Hash)
+	}
+}
+
+func (w *Watcher) torrentSourcePath(task *models.Task, tor torrent) (string, bool) {
 	sourceAbs, err := filepath.Abs(filepath.Clean(task.SourceDir))
 	if err != nil {
-		return false
+		return "", false
 	}
-	paths := []string{tor.ContentPath, tor.SavePath}
+	paths := []string{tor.ContentPath}
+	if strings.TrimSpace(tor.ContentPath) == "" && strings.TrimSpace(tor.SavePath) != "" && strings.TrimSpace(tor.Name) != "" {
+		paths = append(paths, filepath.Join(tor.SavePath, tor.Name))
+	}
 	for _, p := range paths {
 		if strings.TrimSpace(p) == "" {
 			continue
@@ -177,17 +234,10 @@ func (w *Watcher) belongsToTask(task *models.Task, tor torrent) bool {
 		}
 		rel, err := filepath.Rel(sourceAbs, abs)
 		if err == nil && (rel == "." || rel == "" || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))) {
-			return true
-		}
-		if base := strings.TrimSpace(tor.Name); base != "" {
-			candidate := filepath.Join(abs, base)
-			rel, err = filepath.Rel(sourceAbs, candidate)
-			if err == nil && (rel == "." || rel == "" || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))) {
-				return true
-			}
+			return abs, true
 		}
 	}
-	return false
+	return "", false
 }
 
 type client struct {
@@ -236,6 +286,9 @@ func (c *client) completedTorrents() ([]torrent, error) {
 	if err := json.Unmarshal(body, &torrents); err != nil {
 		return nil, err
 	}
+	sort.SliceStable(torrents, func(i, j int) bool {
+		return strings.ToLower(torrents[i].Name) < strings.ToLower(torrents[j].Name)
+	})
 	result := make([]torrent, 0, len(torrents))
 	for _, tor := range torrents {
 		if tor.Progress >= 1 || strings.Contains(strings.ToLower(tor.State), "upload") || strings.Contains(strings.ToLower(tor.State), "stalledup") {

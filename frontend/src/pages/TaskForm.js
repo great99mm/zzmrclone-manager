@@ -922,7 +922,7 @@ const TaskForm = () => {
             <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
               <div>
                 <div className="font-medium text-gray-900">qBittorrent 完成触发</div>
-                <div className="text-sm text-gray-500">种子 100% 完成后自动转移，转移成功后删除种子</div>
+                <div className="text-sm text-gray-500">种子 100% 完成后只转移该种子的内容，成功后删除种子</div>
               </div>
               <label className="relative inline-flex items-center cursor-pointer">
                 <input
@@ -938,7 +938,7 @@ const TaskForm = () => {
             {form.qb_enabled && (
               <div className="md:ml-4 p-4 border-l-2 border-green-200 space-y-4">
                 <p className="text-xs text-gray-500">
-                  当前逻辑：轮询 qBittorrent，发现源目录下种子 100% 后启动本任务；任务成功后删除该种子，默认不删除文件。
+                  当前逻辑：轮询 qBittorrent，发现源目录下种子 100% 后只转移该种子的内容；多个完成种子会一个个排队处理；任务成功后删除该种子，默认不删除文件。
                 </p>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
