@@ -927,7 +927,7 @@ func getTaskStatus(c *gin.Context) {
 		status = "error"
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	response := gin.H{
 		"id":                     task.ID,
 		"status":                 status,
 		"running":                isRunning,
@@ -937,7 +937,11 @@ func getTaskStatus(c *gin.Context) {
 		"rotation_current_index": task.RotationCurrentIndex,
 		"rotation_current_round": task.RotationCurrentRound,
 		"rotation_paused_until":  task.RotationPausedUntil,
-	})
+	}
+	if qbWatch != nil && task.QBEnabled {
+		response["qb_status"] = qbWatch.Status(&task)
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 // System handlers

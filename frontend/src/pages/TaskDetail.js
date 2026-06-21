@@ -47,6 +47,7 @@ const TaskDetail = () => {
   const [task, setTask] = useState(null);
   const [logs, setLogs] = useState([]);
   const [status, setStatus] = useState({ status: 'idle', running: false });
+  const [qbStatus, setQbStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [autoScroll, setAutoScroll] = useState(true);
   const [fileProgresses, setFileProgresses] = useState({});
@@ -115,6 +116,7 @@ const TaskDetail = () => {
     try {
       const res = await getTaskStatus(id);
       setStatus(res.data);
+      setQbStatus(res.data.qb_status || null);
       setTask(prev => prev ? {
         ...prev,
         remote_name: res.data.remote_name ?? prev.remote_name,
@@ -471,6 +473,8 @@ const TaskDetail = () => {
         )}
       </div>
 
+      {task.qb_enabled && <QBQueuePanel status={qbStatus} />}
+
       {/* Active File Transfers */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
         <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
@@ -659,6 +663,83 @@ const InfoCard = ({ icon: Icon, label, value, sub }) => (
   </div>
 );
 
+const QBQueuePanel = ({ status }) => {
+  const waiting = status?.waiting || [];
+  const active = status?.active;
+  const lastSync = status?.last_sync ? formatDateTime(status.last_sync) : '等待轮询';
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-emerald-100 overflow-hidden">
+      <div className="px-6 py-4 border-b border-emerald-50 bg-gradient-to-r from-emerald-50 to-white flex flex-col md:flex-row md:items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <CheckCircle2 className="w-5 h-5 text-emerald-500" />
+          <div>
+            <h2 className="font-semibold text-gray-900">qBittorrent 传输队列</h2>
+            <p className="text-xs text-gray-500 mt-0.5">只传输已完成种子的实际路径，队列按顺序逐个执行</p>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2 text-xs font-medium">
+          <span className="px-2.5 py-1 rounded-full bg-white text-gray-700 border border-gray-200">qB 总数 {status?.total_torrents ?? 0}</span>
+          <span className="px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-700">完成 {status?.completed_count ?? 0}</span>
+          <span className="px-2.5 py-1 rounded-full bg-blue-100 text-blue-700">匹配源目录 {status?.matched_completed ?? 0}</span>
+        </div>
+      </div>
+
+      <div className="p-4 md:p-6 grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="rounded-lg border border-gray-100 p-4 bg-gray-50/60">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2 text-sm font-semibold text-gray-900">
+              <Upload className="w-4 h-4 text-emerald-500" />
+              正在传输
+            </div>
+            {active && <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-xs animate-pulse">运行中</span>}
+          </div>
+          {active ? (
+            <TorrentQueueItem item={active} />
+          ) : (
+            <div className="text-sm text-gray-400 py-6 text-center">当前没有正在传输的 qB 种子</div>
+          )}
+        </div>
+
+        <div className="rounded-lg border border-gray-100 p-4 bg-gray-50/60">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2 text-sm font-semibold text-gray-900">
+              <Clock className="w-4 h-4 text-blue-500" />
+              等待传输
+            </div>
+            <span className="px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 text-xs">{status?.waiting_count ?? 0} 个</span>
+          </div>
+          {waiting.length > 0 ? (
+            <div className="space-y-2 max-h-64 overflow-auto pr-1">
+              {waiting.map((item, index) => (
+                <TorrentQueueItem key={item.hash || `${item.name}-${index}`} item={item} index={index + 1} />
+              ))}
+            </div>
+          ) : (
+            <div className="text-sm text-gray-400 py-6 text-center">暂无等待中的完成种子</div>
+          )}
+        </div>
+      </div>
+
+      <div className="px-6 py-3 bg-gray-50 border-t border-gray-100 flex flex-col md:flex-row md:items-center justify-between gap-2 text-xs text-gray-500">
+        <span>上次获取 qB：{lastSync}</span>
+        {status?.last_error ? <span className="text-red-500">错误：{status.last_error}</span> : <span>轮询间隔：{status?.poll_interval || 60} 秒</span>}
+      </div>
+    </div>
+  );
+};
+
+const TorrentQueueItem = ({ item, index }) => (
+  <div className="rounded-lg bg-white border border-gray-100 p-3">
+    <div className="flex items-center gap-2 min-w-0">
+      {index && <span className="text-xs font-semibold text-blue-600 bg-blue-50 rounded-full px-2 py-0.5">#{index}</span>}
+      <File className="w-4 h-4 text-gray-400 flex-shrink-0" />
+      <span className="text-sm font-medium text-gray-800 truncate" title={item.name}>{item.name || '未命名种子'}</span>
+    </div>
+    <div className="mt-2 text-xs text-gray-500 font-mono break-all">{item.source_path || '-'}</div>
+  </div>
+);
+
 const formatBytes = (bytes) => {
   if (bytes === 0 || !bytes) return '0 B';
   const k = 1024;
@@ -670,6 +751,13 @@ const formatBytes = (bytes) => {
 const formatSpeed = (bytesPerSec) => {
   if (bytesPerSec === 0 || !bytesPerSec) return '0 B/s';
   return formatBytes(bytesPerSec) + '/s';
+};
+
+const formatDateTime = (value) => {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
 };
 
 export default TaskDetail;

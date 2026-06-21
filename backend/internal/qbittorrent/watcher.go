@@ -25,12 +25,43 @@ type Watcher struct {
 	stops    map[uint]chan struct{}
 	seen     map[uint]map[string]bool
 	queues   map[uint][]queuedTorrent
+	active   map[uint]*queuedTorrent
+	stats    map[uint]torrentStats
 }
 
 type queuedTorrent struct {
 	Hash       string
 	Name       string
 	SourcePath string
+}
+
+type QueueItem struct {
+	Hash       string `json:"hash"`
+	Name       string `json:"name"`
+	SourcePath string `json:"source_path"`
+}
+
+type Status struct {
+	Enabled          bool        `json:"enabled"`
+	Watching         bool        `json:"watching"`
+	Running          bool        `json:"running"`
+	Active           *QueueItem  `json:"active"`
+	Waiting          []QueueItem `json:"waiting"`
+	WaitingCount     int         `json:"waiting_count"`
+	TotalTorrents    int         `json:"total_torrents"`
+	CompletedCount   int         `json:"completed_count"`
+	MatchedCompleted int         `json:"matched_completed"`
+	PollInterval     int         `json:"poll_interval"`
+	LastSync         *time.Time  `json:"last_sync"`
+	LastError        string      `json:"last_error"`
+}
+
+type torrentStats struct {
+	Total            int
+	Completed        int
+	MatchedCompleted int
+	LastSync         time.Time
+	LastError        string
 }
 
 type torrent struct {
@@ -48,6 +79,8 @@ func NewWatcher(executor *rclone.Executor) *Watcher {
 		stops:    make(map[uint]chan struct{}),
 		seen:     make(map[uint]map[string]bool),
 		queues:   make(map[uint][]queuedTorrent),
+		active:   make(map[uint]*queuedTorrent),
+		stats:    make(map[uint]torrentStats),
 	}
 }
 
@@ -71,6 +104,7 @@ func (w *Watcher) StartTaskWatch(task *models.Task) error {
 	w.stops[task.ID] = stop
 	w.seen[task.ID] = make(map[string]bool)
 	w.queues[task.ID] = nil
+	delete(w.active, task.ID)
 	w.mu.Unlock()
 
 	copied := *task
@@ -87,7 +121,46 @@ func (w *Watcher) StopTaskWatch(taskID uint) {
 	}
 	delete(w.seen, taskID)
 	delete(w.queues, taskID)
+	delete(w.active, taskID)
+	delete(w.stats, taskID)
 	w.mu.Unlock()
+}
+
+func (w *Watcher) Status(task *models.Task) Status {
+	status := Status{}
+	if task == nil {
+		return status
+	}
+	status.Enabled = task.QBEnabled
+	status.PollInterval = task.QBPollInterval
+	if status.PollInterval <= 0 {
+		status.PollInterval = 60
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	_, status.Watching = w.stops[task.ID]
+	if active := w.active[task.ID]; active != nil {
+		item := active.toQueueItem()
+		status.Active = &item
+		status.Running = true
+	}
+	queue := w.queues[task.ID]
+	status.WaitingCount = len(queue)
+	status.Waiting = make([]QueueItem, 0, len(queue))
+	for _, tor := range queue {
+		status.Waiting = append(status.Waiting, tor.toQueueItem())
+	}
+	stats := w.stats[task.ID]
+	status.TotalTorrents = stats.Total
+	status.CompletedCount = stats.Completed
+	status.MatchedCompleted = stats.MatchedCompleted
+	status.LastError = stats.LastError
+	if !stats.LastSync.IsZero() {
+		lastSync := stats.LastSync
+		status.LastSync = &lastSync
+	}
+	return status
 }
 
 func (w *Watcher) loop(task *models.Task, stop <-chan struct{}) {
@@ -116,24 +189,33 @@ func (w *Watcher) check(task *models.Task) {
 
 	client, err := newClient(task)
 	if err != nil {
+		w.updateStatsError(task.ID, err)
 		logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("qBittorrent 登录失败: %v", err))
 		return
 	}
-	torrents, err := client.completedTorrents()
+	torrents, err := client.torrents()
 	if err != nil {
+		w.updateStatsError(task.ID, err)
 		logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("qBittorrent 获取种子失败: %v", err))
 		return
 	}
+	completed := completedTorrents(torrents)
+	matchedCompleted := 0
 
-	for _, tor := range torrents {
+	for _, tor := range completed {
 		sourcePath, ok := w.torrentSourcePath(task, tor)
-		if tor.Hash == "" || !ok || w.isSeen(task.ID, tor.Hash) {
+		if !ok {
+			continue
+		}
+		matchedCompleted++
+		if tor.Hash == "" || w.isSeen(task.ID, tor.Hash) {
 			continue
 		}
 		w.markSeen(task.ID, tor.Hash)
 		w.enqueue(task.ID, queuedTorrent{Hash: tor.Hash, Name: tor.Name, SourcePath: sourcePath})
 		logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("qBittorrent 种子完成，已加入队列: %s (%s)", tor.Name, sourcePath))
 	}
+	w.updateStats(task.ID, len(torrents), len(completed), matchedCompleted)
 	w.runNext(task)
 }
 
@@ -160,6 +242,28 @@ func (w *Watcher) unmarkSeen(taskID uint, hash string) {
 	}
 }
 
+func (w *Watcher) updateStats(taskID uint, total, completed, matchedCompleted int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.stats[taskID] = torrentStats{
+		Total:            total,
+		Completed:        completed,
+		MatchedCompleted: matchedCompleted,
+		LastSync:         time.Now(),
+	}
+}
+
+func (w *Watcher) updateStatsError(taskID uint, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	stats := w.stats[taskID]
+	if err != nil {
+		stats.LastError = err.Error()
+	}
+	stats.LastSync = time.Now()
+	w.stats[taskID] = stats
+}
+
 func (w *Watcher) enqueue(taskID uint, tor queuedTorrent) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -178,6 +282,23 @@ func (w *Watcher) popQueue(taskID uint) (queuedTorrent, bool) {
 	return tor, true
 }
 
+func (w *Watcher) setActive(taskID uint, tor queuedTorrent) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	copy := tor
+	w.active[taskID] = &copy
+}
+
+func (w *Watcher) clearActive(taskID uint) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	delete(w.active, taskID)
+}
+
+func (tor queuedTorrent) toQueueItem() QueueItem {
+	return QueueItem{Hash: tor.Hash, Name: tor.Name, SourcePath: tor.SourcePath}
+}
+
 func (w *Watcher) runNext(task *models.Task) {
 	if w.executor == nil || w.executor.IsRunning(task.ID) {
 		return
@@ -189,27 +310,29 @@ func (w *Watcher) runNext(task *models.Task) {
 
 	triggeredTask := *task
 	triggeredTask.SourceDir = tor.SourcePath
+	w.setActive(task.ID, tor)
 	logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("qBittorrent 队列开始单独转移: %s (%s)", tor.Name, tor.SourcePath))
 	if err := w.executor.ExecuteMoveWithCallback(&triggeredTask, func(success bool) {
+		defer func() {
+			w.clearActive(task.ID)
+			w.runNext(task)
+		}()
 		if !success {
 			w.unmarkSeen(task.ID, tor.Hash)
-			w.runNext(task)
 			return
 		}
 		client, err := newClient(task)
 		if err != nil {
 			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("qBittorrent 登录失败，无法删除种子 [%s]: %v", tor.Name, err))
-			w.runNext(task)
 			return
 		}
 		if err := client.deleteTorrent(tor.Hash, task.QBDeleteFiles); err != nil {
 			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("qBittorrent 删除种子失败 [%s]: %v", tor.Name, err))
-			w.runNext(task)
 			return
 		}
 		logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("qBittorrent 已删除种子: %s", tor.Name))
-		w.runNext(task)
 	}); err != nil {
+		w.clearActive(task.ID)
 		logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("qBittorrent 触发转移失败 [%s]: %v", tor.Name, err))
 		w.unmarkSeen(task.ID, tor.Hash)
 	}
@@ -269,8 +392,8 @@ func newClient(task *models.Task) (*client, error) {
 	return c, nil
 }
 
-func (c *client) completedTorrents() ([]torrent, error) {
-	resp, err := c.http.Get(c.base + "/api/v2/torrents/info?filter=completed")
+func (c *client) torrents() ([]torrent, error) {
+	resp, err := c.http.Get(c.base + "/api/v2/torrents/info")
 	if err != nil {
 		return nil, err
 	}
@@ -289,13 +412,17 @@ func (c *client) completedTorrents() ([]torrent, error) {
 	sort.SliceStable(torrents, func(i, j int) bool {
 		return strings.ToLower(torrents[i].Name) < strings.ToLower(torrents[j].Name)
 	})
+	return torrents, nil
+}
+
+func completedTorrents(torrents []torrent) []torrent {
 	result := make([]torrent, 0, len(torrents))
 	for _, tor := range torrents {
 		if tor.Progress >= 1 || strings.Contains(strings.ToLower(tor.State), "upload") || strings.Contains(strings.ToLower(tor.State), "stalledup") {
 			result = append(result, tor)
 		}
 	}
-	return result, nil
+	return result
 }
 
 func (c *client) deleteTorrent(hash string, deleteFiles bool) error {
