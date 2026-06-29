@@ -39,6 +39,23 @@ const joinRemotePath = (base, name) => {
   return `${cleanBase || ''}/${name}`.replace(/\/+/g, '/');
 };
 
+const joinLocalPath = (base, name) => {
+  const cleanBase = (base || '').trim().replace(/\/+$/, '');
+  return `${cleanBase || '/'}/${name}`.replace(/\/+/g, '/');
+};
+
+const appendSelectedRootToDest = (dest, destType, item) => {
+  if (!item?.is_dir) return dest;
+  if (destType !== 'remote') {
+    return joinLocalPath(dest, item.name);
+  }
+  const separator = dest.indexOf(':');
+  if (separator < 0) return dest;
+  const remote = dest.slice(0, separator);
+  const remotePath = dest.slice(separator + 1) || '/';
+  return `${remote}:${joinRemotePath(remotePath, item.name)}`;
+};
+
 const buildPathCrumbs = (path, rootName) => {
   const cleanPath = normalizeRemotePath(path);
   const crumbs = [{ name: rootName, path: '/' }];
@@ -417,12 +434,13 @@ const FileBrowser = () => {
         const source = currentRootMeta.type === 'local'
           ? item.path
           : `${currentRootMeta.name}:${item.path}`;
+        const itemDestPath = appendSelectedRootToDest(finalDestPath, destType, item);
 
         const res = await createQuickTask({
           name: `${actionMode === 'copy' ? '复制' : '移动'} ${item.name}`,
           source,
           source_type: currentRootMeta.type === 'local' ? 'local' : 'remote',
-          dest: finalDestPath,
+          dest: itemDestPath,
           dest_type: destType,
           transfer_mode: actionMode,
           openlist_enabled: openlistEnabled,
