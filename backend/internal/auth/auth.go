@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
 )
 
 var jwtSecret = []byte("rclone-manager-secret-change-me")
+var sessions sync.Map
 
 type Claims struct {
 	Username string `json:"username"`
@@ -30,6 +32,19 @@ func GenerateToken(username string, isAdmin bool) string {
 	h := sha256.New()
 	h.Write([]byte(fmt.Sprintf("%s:%v:%d", username, isAdmin, time.Now().UnixNano())))
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// IssueToken records an application session so protected endpoints can
+// distinguish a login session from an arbitrary Bearer header.
+func IssueToken(username string, isAdmin bool) string {
+	token := GenerateToken(username, isAdmin)
+	sessions.Store(token, Claims{Username: username, IsAdmin: isAdmin})
+	return token
+}
+
+func VerifyToken(token string) bool {
+	_, ok := sessions.Load(strings.TrimSpace(token))
+	return ok
 }
 
 func AuthMiddleware() gin.HandlerFunc {

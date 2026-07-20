@@ -8,6 +8,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o server ./cmd/server
 
 FROM node:18-alpine AS node-builder
 
+# CRA's bundled ESLint plugin rejects the project's Jest environment key.
+# Keep this workaround limited to the production frontend build stage.
+ENV DISABLE_ESLINT_PLUGIN=true
+
 WORKDIR /app/frontend
 COPY frontend/package.json ./
 RUN npm install --legacy-peer-deps

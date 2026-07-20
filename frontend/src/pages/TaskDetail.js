@@ -15,9 +15,12 @@ import {
   CheckCircle2,
   ExternalLink,
   Upload,
-  File
+  File,
+  ShieldCheck,
+  ListChecks,
+  Database
 } from 'lucide-react';
-import { getTask, getTaskStatus, getTaskLogs, startTask, stopTask, pauseTask, cancelTask, dedupeTask, deleteTask } from '../services/api';
+import { getTask, getTaskStatus, getProactiveStatus, resolveProactiveBatch, getTaskLogs, startTask, stopTask, pauseTask, cancelTask, dedupeTask, deleteTask } from '../services/api';
 import { createWebSocket } from '../services/api';
 import toast from 'react-hot-toast';
 
@@ -48,6 +51,10 @@ const TaskDetail = () => {
   const [logs, setLogs] = useState([]);
   const [status, setStatus] = useState({ status: 'idle', running: false });
   const [qbStatus, setQbStatus] = useState(null);
+  const [proactiveStatus, setProactiveStatus] = useState(null);
+  const [proactiveStatusLoading, setProactiveStatusLoading] = useState(false);
+  const [proactiveStatusError, setProactiveStatusError] = useState('');
+  const [resolutionState, setResolutionState] = useState({ batchId: null, action: '', loading: false, error: '', success: '' });
   const [loading, setLoading] = useState(true);
   const [autoScroll, setAutoScroll] = useState(true);
   const [fileProgresses, setFileProgresses] = useState({});
@@ -129,6 +136,47 @@ const TaskDetail = () => {
     }
   }, [id]);
 
+  const loadProactiveStatus = useCallback(async () => {
+    setProactiveStatusLoading(true);
+    setProactiveStatusError('');
+    try {
+      const res = await getProactiveStatus(id);
+      setProactiveStatus(res.data);
+      return true;
+    } catch (err) {
+      setProactiveStatusError(err.response?.data?.error || '主动额度状态暂时无法获取');
+      return false;
+    } finally {
+      setProactiveStatusLoading(false);
+    }
+  }, [id]);
+
+  const handleResolveBatch = useCallback(async (batchId, action, resolution) => {
+    const actionText = action === 'accept_moved' ? '确认本地文件已由 rclone 移动完成' : '恢复本地文件并释放额度';
+    if (!window.confirm(`${actionText}？此操作会改变批次状态。`)) return;
+    setResolutionState({ batchId, fileId: resolution.fileId, action, loading: true, error: '', success: '' });
+    try {
+      await resolveProactiveBatch(id, {
+        batch_id: batchId,
+        file_id: resolution.fileId,
+        action,
+        expected_state: resolution.expectedState,
+        expected_updated_at: resolution.expectedUpdatedAt,
+      });
+      setResolutionState({ batchId, fileId: resolution.fileId, action, loading: false, error: '', success: '处理已提交，状态正在刷新。' });
+      await loadProactiveStatus();
+      await loadStatus();
+    } catch (err) {
+      if (err.response?.status === 409) {
+        await loadProactiveStatus();
+        await loadStatus();
+        setResolutionState({ batchId, fileId: resolution.fileId, action, loading: false, error: '批次状态已变化，已刷新最新状态。请重新查看该批次后再处理。', success: '' });
+      } else {
+        setResolutionState({ batchId, fileId: resolution.fileId, action, loading: false, error: err.response?.data?.error || '处理失败，请稍后重试。', success: '' });
+      }
+    }
+  }, [id, loadProactiveStatus, loadStatus]);
+
   useEffect(() => {
     loadTask();
     loadStatus();
@@ -196,6 +244,21 @@ const TaskDetail = () => {
       if (progressTimerRef.current) clearInterval(progressTimerRef.current);
     };
   }, [id, cleanupStaleProgresses, parseLogProgress, loadTask, loadStatus]);
+
+  useEffect(() => {
+    if (!task || task.task_type !== 'rotation' || task.rotation_strategy !== 'proactive_quota') return undefined;
+    let active = true;
+    let timer;
+    const poll = async () => {
+      const succeeded = await loadProactiveStatus();
+      if (active) timer = setTimeout(poll, succeeded ? 2000 : 10000);
+    };
+    poll();
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [task?.task_type, task?.rotation_strategy, loadProactiveStatus]);
 
   useEffect(() => {
     if (autoScroll && logContainerRef.current) {
@@ -303,6 +366,7 @@ const TaskDetail = () => {
   }
 
   const isQuickTask = !!task.is_quick_task;
+  const isProactiveQuotaTask = task.task_type === 'rotation' && task.rotation_strategy === 'proactive_quota';
   const canContinueQuickTask = isQuickTask && (status.status === 'paused' || status.status === 'error');
   const rotationRemotes = parseRotationRemotes(task.rotation_remotes);
   const rotationCurrentRemote = rotationRemotes[task.rotation_current_index || 0] || rotationRemotes[0] || '-';
@@ -438,10 +502,10 @@ const TaskDetail = () => {
         <InfoCard
           icon={CheckCircle2}
           label="自动化"
-          value={task.qb_enabled ? 'qB完成触发' : (task.watch_enabled ? '监控' : '手动')}
-          sub={task.qb_enabled ? `轮询 ${task.qb_poll_interval || 60}秒` : (task.schedule_enabled ? `定时 ${task.schedule_interval}分` : '无定时')}
+          value={task.qb_enabled && !isProactiveQuotaTask ? 'qB完成触发' : (task.watch_enabled ? '监控' : '手动')}
+          sub={task.qb_enabled && !isProactiveQuotaTask ? `轮询 ${task.qb_poll_interval || 60}秒` : (task.schedule_enabled ? `定时 ${task.schedule_interval}分` : '无定时')}
         />
-        {task.qb_enabled && (
+        {task.qb_enabled && !isProactiveQuotaTask && (
           <InfoCard
             icon={CheckCircle2}
             label="qBittorrent"
@@ -473,7 +537,18 @@ const TaskDetail = () => {
         )}
       </div>
 
-      {task.qb_enabled && <QBQueuePanel status={qbStatus} />}
+      {task.qb_enabled && !isProactiveQuotaTask && <QBQueuePanel status={qbStatus} />}
+
+      {task.task_type === 'rotation' && task.rotation_strategy === 'proactive_quota' && (
+        <ProactiveQuotaPanel
+          status={proactiveStatus}
+          loading={proactiveStatusLoading}
+          error={proactiveStatusError}
+          onRetry={loadProactiveStatus}
+          resolutionState={resolutionState}
+          onResolve={handleResolveBatch}
+        />
+      )}
 
       {/* Active File Transfers */}
       <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
@@ -727,6 +802,320 @@ const QBQueuePanel = ({ status }) => {
       </div>
     </div>
   );
+};
+
+const PROACTIVE_STATUS_LABELS = {
+  idle: '待机',
+  running: '执行中',
+  paused: '暂停',
+  canceled: '已停止',
+  error: '异常',
+};
+
+const BATCH_STATE_LABELS = {
+  planned: '已计划',
+  reserved: '已预留',
+  running: '运行中',
+  unknown: '待确认',
+  reconciling: '对账中',
+  succeeded: '已完成',
+  failed: '失败',
+  canceled: '已取消',
+  expired: '已过期',
+};
+
+const TRANSFER_MODE_LABELS = {
+  copy: '复制',
+  move: '移动',
+};
+
+const COMPLETION_EVIDENCE_LABELS = {
+  remote_verified: '远端已核验',
+  local_move: '本地 / rclone 已完成',
+};
+
+const getCompletionEvidenceLabel = (evidence, mode, state) => {
+  if (COMPLETION_EVIDENCE_LABELS[evidence]) return COMPLETION_EVIDENCE_LABELS[evidence];
+  if (state === 'succeeded' && mode === 'copy') return '远端已核验';
+  if (state === 'succeeded' && mode === 'move') return '本地 / rclone 已完成';
+  if (state === 'unknown' && mode === 'move') return '待人工处理';
+  return '处理中';
+};
+
+const getResolutionItems = (batch, task) => {
+  if (Array.isArray(batch.resolution_items)) {
+    return batch.resolution_items.map(item => {
+      const batchId = item.batch_id ?? batch.id;
+      const sourceActions = item.actions;
+      const actions = Array.isArray(sourceActions)
+        ? sourceActions.filter(action => action === 'accept_moved' || action === 'restore_and_release')
+        : [];
+      if (String(batchId) !== String(batch.id) || item.eligible === false || item.available === false || !actions.length || item.file_id == null || !item.expected_state || !item.expected_updated_at) {
+        return null;
+      }
+      return {
+        batchId,
+        actions,
+        fileId: item.file_id,
+        expectedState: item.expected_state,
+        expectedUpdatedAt: item.expected_updated_at,
+      };
+    }).filter(Boolean);
+  }
+
+  const source = batch.resolution_availability || batch.resolution || {};
+  const explicit = source.actions || batch.resolution_actions || batch.available_resolution_actions;
+  const actions = Array.isArray(explicit)
+    ? explicit.filter(action => action === 'accept_moved' || action === 'restore_and_release')
+    : (source.available === true || batch.resolution_available === true || (task?.resolution_available === true && batch.state === 'unknown')
+      ? ['accept_moved', 'restore_and_release']
+      : []);
+  const fileId = source.file_id ?? batch.resolution_file_id;
+  const expectedState = source.expected_state ?? batch.resolution_expected_state;
+  const expectedUpdatedAt = source.expected_updated_at ?? batch.resolution_expected_updated_at;
+  if (!actions.length || fileId == null || !expectedState || !expectedUpdatedAt) return [];
+  return [{ batchId: batch.id, actions, fileId, expectedState, expectedUpdatedAt }];
+};
+
+const ProactiveQuotaPanel = ({ status, loading, error, onRetry, resolutionState, onResolve }) => {
+  if (loading && !status) {
+    return (
+      <section className="bg-white rounded-xl shadow-sm border border-emerald-200 p-6" aria-live="polite" aria-busy="true">
+        <div className="flex items-center gap-3 text-sm text-gray-600">
+          <div className="h-4 w-4 rounded-full border-2 border-emerald-600 border-t-transparent animate-spin" />
+          正在获取主动额度账号池状态...
+        </div>
+      </section>
+    );
+  }
+
+  if (error && !status) {
+    return (
+      <section className="bg-white rounded-xl shadow-sm border border-red-200 p-6" role="alert">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h2 className="font-semibold text-gray-900">主动额度账号池状态不可用</h2>
+            <p className="text-sm text-red-700 mt-1">{error}</p>
+          </div>
+          <button type="button" onClick={onRetry} className="inline-flex items-center justify-center px-3 py-2 min-h-10 bg-red-50 text-red-700 rounded-lg hover:bg-red-100 focus:outline-none focus:ring-2 focus:ring-red-500 font-medium text-sm">
+            重试
+          </button>
+        </div>
+      </section>
+    );
+  }
+
+  if (!status) return null;
+
+  const accounts = status.accounts || [];
+  const batches = status.batches || [];
+  const queue = status.queue || {};
+  const taskStatus = status.task?.status || 'idle';
+  const queueCount = (queue.pending?.count || 0) + (queue.planned?.count || 0) + (queue.executing?.count || 0);
+  const resolvedAccounts = accounts.filter(account => account.budget_bytes != null && account.remaining_bytes != null);
+  const reservedBytes = resolvedAccounts.reduce((total, account) => total + (account.active_reserved_bytes || 0), 0);
+  const activeBatch = batches.find(batch => batch.state === 'running' && batch.process?.active === true) || null;
+  const transferMode = status.task?.transfer_mode || activeBatch?.transfer_mode || 'copy';
+  const unknownMoveBatches = batches.filter(batch => batch.state === 'unknown' && batch.transfer_mode === 'move');
+  const resolutionRows = unknownMoveBatches.flatMap(batch => {
+    const items = getResolutionItems(batch, status.task);
+    return (items.length ? items : [null]).map((availability, index) => ({ batch, availability, index }));
+  });
+  const batchSummary = Object.keys(BATCH_STATE_LABELS).map(state => ({
+    state,
+    count: batches.filter(batch => batch.state === state).length,
+  })).filter(item => item.count > 0);
+
+  return (
+    <section className="bg-white rounded-xl shadow-sm border border-emerald-200 overflow-hidden" aria-labelledby="proactive-quota-heading">
+      <div className="px-6 py-4 border-b border-emerald-100 bg-emerald-50/60 flex flex-col md:flex-row md:items-center justify-between gap-3">
+        <div className="flex items-start gap-2">
+          <ShieldCheck className="w-5 h-5 text-emerald-600 mt-0.5" />
+          <div>
+            <h2 id="proactive-quota-heading" className="font-semibold text-gray-900">主动额度账号池</h2>
+            <p className="text-xs text-gray-600 mt-0.5">{TRANSFER_MODE_LABELS[transferMode] || transferMode}模式 · {transferMode === 'move' ? '完成以本地 / rclone 证据为准' : '完成后远端已核验'}</p>
+          </div>
+        </div>
+        <span className="text-xs font-medium text-emerald-800 bg-white border border-emerald-200 rounded-full px-2.5 py-1">
+          {PROACTIVE_STATUS_LABELS[taskStatus] || taskStatus}
+        </span>
+      </div>
+
+      {(error || loading) && (
+        <div className={`px-6 py-2 text-xs flex flex-wrap items-center justify-between gap-2 ${error ? 'bg-red-50 text-red-700' : 'bg-gray-50 text-gray-600'}`} aria-live="polite">
+          <span>{error ? `状态刷新失败：${error}，当前显示最近一次成功数据。` : '正在刷新状态...'}</span>
+          {error && <button type="button" onClick={onRetry} className="font-medium underline focus:outline-none focus:ring-2 focus:ring-red-500 rounded">重试</button>}
+        </div>
+      )}
+
+      <div className="p-4 md:p-6 space-y-4">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <RuntimeMetric label="队列" value={queueCount} sub="待处理文件" icon={ListChecks} />
+          <RuntimeMetric label="当前运行" value={activeBatch ? 1 : 0} sub="执行中的批次" icon={Upload} />
+          <RuntimeMetric label="账号" value={`${resolvedAccounts.length}/${accounts.length}`} sub="已初始化 / 绑定" icon={Database} />
+          <RuntimeMetric label="今日预留" value={formatBytes(reservedBytes)} sub="当前活跃预留" icon={ShieldCheck} />
+        </div>
+
+        {batchSummary.length > 0 && (
+          <div className="flex flex-wrap gap-2" aria-label="批次状态汇总">
+            {batchSummary.map(item => (
+              <span key={item.state} className="text-xs font-medium text-gray-700 bg-gray-100 rounded-full px-2.5 py-1">
+                {BATCH_STATE_LABELS[item.state]} {item.count}
+              </span>
+            ))}
+          </div>
+        )}
+
+        {(activeBatch || accounts.length > 0 || batches.length > 0) && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {activeBatch && (
+              <div className="border border-gray-200 rounded-lg p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-semibold text-gray-900">当前批次</h3>
+                  <span className="text-xs text-blue-700 bg-blue-50 rounded-full px-2 py-0.5">{BATCH_STATE_LABELS[activeBatch.state] || activeBatch.state}</span>
+                </div>
+                <dl className="grid grid-cols-2 gap-3 text-xs">
+                  <div><dt className="text-gray-500">账号</dt><dd className="font-medium text-gray-800 mt-0.5">{activeBatch.account || activeBatch.remote_name || activeBatch.destination_remote || '-'}</dd></div>
+                  <div><dt className="text-gray-500">批次 ID</dt><dd className="font-mono text-gray-800 mt-0.5">{activeBatch.id || '-'}</dd></div>
+                  <div><dt className="text-gray-500">文件数</dt><dd className="font-medium text-gray-800 mt-0.5">{Object.values(activeBatch.file_counts || {}).reduce((total, item) => total + (item.count || 0), 0) || '-'}</dd></div>
+                  <div><dt className="text-gray-500">预留额度</dt><dd className="font-medium text-gray-800 mt-0.5">{formatBytes(activeBatch.reserved_bytes || 0)}</dd></div>
+                  <div><dt className="text-gray-500">模式</dt><dd className="font-medium text-gray-800 mt-0.5">{TRANSFER_MODE_LABELS[activeBatch.transfer_mode || transferMode] || activeBatch.transfer_mode || transferMode}</dd></div>
+                  <div><dt className="text-gray-500">完成证据</dt><dd className="font-medium text-gray-800 mt-0.5">{getCompletionEvidenceLabel(activeBatch.completion_evidence, activeBatch.transfer_mode || transferMode, activeBatch.state)}</dd></div>
+                </dl>
+              </div>
+            )}
+
+            {batches.length > 0 && (
+              <div className="border border-gray-200 rounded-lg p-4">
+                <h3 className="text-sm font-semibold text-gray-900 mb-3">最近批次</h3>
+                <div className="space-y-2 max-h-48 overflow-auto">
+                  {batches.slice(0, 6).map(batch => (
+                    <div key={batch.id} className="flex items-start justify-between gap-3 text-xs">
+                      <div className="min-w-0">
+                        <div className="font-medium text-gray-800">#{batch.id} · {BATCH_STATE_LABELS[batch.state] || batch.state}</div>
+                        <div className="text-gray-500 truncate">{batch.remote || batch.account || '未绑定账号'}</div>
+                        <div className="text-gray-500">{TRANSFER_MODE_LABELS[batch.transfer_mode] || batch.transfer_mode || TRANSFER_MODE_LABELS[transferMode]} · {getCompletionEvidenceLabel(batch.completion_evidence, batch.transfer_mode || transferMode, batch.state)}</div>
+                        {batch.error && <div className="text-red-700 break-words mt-0.5">{batch.error.slice(0, 200)}</div>}
+                      </div>
+                      <span className="text-gray-500 whitespace-nowrap">{formatBytes(batch.reserved_bytes || 0)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {resolutionRows.length > 0 && (
+              <div className="lg:col-span-2 border border-amber-300 bg-amber-50 rounded-lg p-4" role="region" aria-labelledby="move-resolution-heading">
+                <div className="flex items-start gap-3">
+                  <div className="min-w-0 flex-1">
+                    <h3 id="move-resolution-heading" className="text-sm font-semibold text-amber-950">移动批次需要处理</h3>
+                    <p className="text-xs text-amber-900 mt-1">这些批次的本地结果无法自动确认。仅使用后端提供的安全处理动作，不显示文件路径或令牌。</p>
+                  </div>
+                </div>
+                <div className="mt-3 space-y-3">
+                  {resolutionRows.map(({ batch, availability, index }) => (
+                    <MoveResolutionRow
+                      key={`${batch.id}-${availability?.fileId ?? `pending-${index}`}`}
+                      batch={batch}
+                      availability={availability}
+                      itemIndex={index}
+                      resolutionState={resolutionState}
+                      onResolve={onResolve}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {accounts.length > 0 && (
+              <div className="border border-gray-200 rounded-lg p-4">
+                <h3 className="text-sm font-semibold text-gray-900 mb-3">账号额度</h3>
+                <div className="space-y-2 max-h-48 overflow-auto">
+                  {accounts.map((account, index) => (
+                    <div key={account.remote_name || index} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs min-w-0">
+                      <div className="min-w-0">
+                        <span className="font-medium text-gray-800 break-words">{account.remote_name || `账号 ${index + 1}`}</span>
+                        {account.budget_bytes == null || account.remaining_bytes == null ? (
+                          <span className="block text-amber-700 mt-0.5">未初始化 quota account</span>
+                        ) : account.enabled === false ? (
+                          <span className="block text-gray-500 mt-0.5">已禁用</span>
+                        ) : isFutureTimestamp(account.provider_blocked_until) ? (
+                          <span className="block text-red-700 mt-0.5">Provider 暂时阻断</span>
+                        ) : null}
+                      </div>
+                      {account.budget_bytes != null && account.remaining_bytes != null && (
+                        <div className="text-gray-600 sm:text-right whitespace-normal sm:whitespace-nowrap">
+                          已用 {formatBytes(account.used_bytes || 0)} · 预留 {formatBytes(account.active_reserved_bytes || 0)} · 剩余 {formatBytes(account.remaining_bytes || 0)} / {formatBytes(account.budget_bytes)}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+};
+
+const RuntimeMetric = ({ label, value, sub, icon: Icon }) => (
+  <div className="border border-gray-200 rounded-lg p-3">
+    <div className="flex items-center gap-2 text-xs text-gray-500"><Icon className="w-4 h-4 text-emerald-600" />{label}</div>
+    <div className="text-lg font-semibold text-gray-900 mt-1">{value}</div>
+    <div className="text-xs text-gray-500 mt-0.5">{sub}</div>
+  </div>
+);
+
+const MoveResolutionRow = ({ batch, availability, itemIndex, resolutionState, onResolve }) => {
+  const actions = availability?.actions || [];
+  const resolutionKey = availability ? `${batch.id}:${availability.fileId}` : '';
+  const isCurrent = resolutionState.batchId != null && `${resolutionState.batchId}:${resolutionState.fileId}` === resolutionKey;
+  const isLoading = isCurrent && resolutionState.loading;
+  const error = isCurrent ? resolutionState.error : '';
+  const success = isCurrent ? resolutionState.success : '';
+  return (
+    <div className="bg-white border border-amber-200 rounded-md p-3">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm font-medium text-gray-900">批次 #{batch.id} · 项目 {itemIndex + 1}</div>
+          <div className="text-xs text-gray-600 mt-0.5">移动结果未知 · 需要明确处理</div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {actions.includes('accept_moved') && (
+            <button
+              type="button"
+              disabled={isLoading}
+              onClick={() => onResolve(batch.id, 'accept_moved', availability)}
+              className="min-h-10 px-3 py-2 text-xs font-medium rounded-lg bg-amber-700 text-white hover:bg-amber-800 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-amber-600"
+            >
+              {isLoading && resolutionState.action === 'accept_moved' ? '处理中...' : '确认已移动'}
+            </button>
+          )}
+          {actions.includes('restore_and_release') && (
+            <button
+              type="button"
+              disabled={isLoading}
+              onClick={() => onResolve(batch.id, 'restore_and_release', availability)}
+              className="min-h-10 px-3 py-2 text-xs font-medium rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              {isLoading && resolutionState.action === 'restore_and_release' ? '处理中...' : '恢复并释放额度'}
+            </button>
+          )}
+        </div>
+      </div>
+      {actions.length === 0 && <p className="text-xs text-gray-600 mt-2">等待后端提供可用的安全处理动作。</p>}
+      {error && <p className="text-xs text-red-700 mt-2" role="alert">{error}</p>}
+      {success && <p className="text-xs text-emerald-700 mt-2" role="status">{success}</p>}
+    </div>
+  );
+};
+
+const isFutureTimestamp = (value) => {
+  if (!value) return false;
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) && timestamp > Date.now();
 };
 
 const TorrentQueueItem = ({ item, index }) => (

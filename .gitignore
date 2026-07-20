@@ -23,3 +23,6 @@ logs/
 .DS_Store
 Thumbs.db
 AGENTS.md
+
+# Local deepwork state
+.slim/deepwork/

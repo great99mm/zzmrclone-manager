@@ -320,6 +320,13 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 
 func (e *Executor) ExecuteMoveWithCallback(task *models.Task, callback CompletionCallback) error {
 	if strings.TrimSpace(task.TaskType) == "rotation" {
+		strategy := strings.TrimSpace(task.RotationStrategy)
+		if strategy == "" {
+			strategy = "legacy_error"
+		}
+		if strategy != "legacy_error" {
+			return fmt.Errorf("rotation strategy %q is unsupported or not yet enabled", strategy)
+		}
 		return e.ExecuteRotationWithCallback(task, callback)
 	}
 
@@ -512,6 +519,13 @@ func (e *Executor) ExecuteRotationWithCallback(task *models.Task, callback Compl
 		return err
 	}
 	task = &current
+	strategy := strings.TrimSpace(task.RotationStrategy)
+	if strategy == "" {
+		strategy = "legacy_error"
+	}
+	if strategy != "legacy_error" {
+		return fmt.Errorf("rotation strategy %q is unsupported or not yet enabled", strategy)
+	}
 	if task.DestType == "local" {
 		return fmt.Errorf("rotation task only supports remote destination")
 	}
@@ -804,19 +818,36 @@ func (e *Executor) ScheduleRotationResume(taskID uint, resumeAt time.Time) {
 		if err := e.db.First(&task, taskID).Error; err != nil {
 			return
 		}
+		strategy := strings.TrimSpace(task.RotationStrategy)
+		if strategy == "" {
+			strategy = "legacy_error"
+		}
+		if strategy != "legacy_error" {
+			e.mu.Lock()
+			if current, ok := e.resumeTimers[taskID]; ok && current == done {
+				delete(e.resumeTimers, taskID)
+			}
+			e.mu.Unlock()
+			return
+		}
 		if task.TaskType != "rotation" || !task.Enabled || task.Status != "paused" {
 			return
 		}
 		if task.RotationPausedUntil != nil && task.RotationPausedUntil.After(time.Now()) {
 			return
 		}
-		e.db.Model(&task).Updates(map[string]interface{}{
+		result := e.db.Model(&models.Task{}).
+			Where("id = ? AND task_type = ? AND status = ? AND (rotation_strategy = '' OR rotation_strategy = ?)", task.ID, "rotation", "paused", "legacy_error").
+			Updates(map[string]interface{}{
 			"status":                 "idle",
 			"last_error":             "",
 			"rotation_current_index": 0,
 			"rotation_current_round": 0,
 			"rotation_paused_until":  nil,
 		})
+		if result.Error != nil || result.RowsAffected != 1 {
+			return
+		}
 		task.Status = "idle"
 		task.LastError = ""
 		task.RotationCurrentIndex = 0
@@ -1203,7 +1234,7 @@ func getRcloneConfig(task *models.Task) string {
 	if task.RcloneConfig != "" {
 		return task.RcloneConfig
 	}
-	return "/root/.config/rclone/rclone.conf"
+	return models.DefaultRcloneConfigPath
 }
 
 // RC API helpers

@@ -3,30 +3,36 @@ package api
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/glebarez/sqlite"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 	"rclone-manager/internal/models"
+	"rclone-manager/internal/quota"
 )
 
-var db *gorm.DB
+var (
+	db              *gorm.DB
+	maintenanceStop chan struct{}
+)
 
 func InitDB(dataDir string) error {
 	os.MkdirAll(dataDir, 0755)
 
 	dbPath := filepath.Join(dataDir, "rclone-manager.db")
 
-	// WAL mode + busy timeout + normal sync for better concurrency.
+	// WAL mode + busy timeout + full sync for durable quota reservations.
 	// _pragma=journal_mode(WAL)    : write-ahead logging allows readers to proceed while a write is in progress.
 	// _pragma=busy_timeout(5000)   : wait up to 5s before returning "database is locked".
-	// _pragma=synchronous(NORMAL)  : sufficient durability with WAL, much faster than FULL.
-	dsn := dbPath + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)"
+	// _pragma=synchronous(FULL)    : flushes quota reservation commits durably before returning.
+	dsn := dbPath + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(FULL)"
 
 	var err error
 	db, err = gorm.Open(sqlite.Open(dsn), &gorm.Config{})
@@ -56,12 +62,23 @@ func InitDB(dataDir string) error {
 		&models.OutputLog{},
 		&models.OpenlistConfig{},
 		&models.MountConfig{},
+		&models.QuotaAccount{},
+		&models.RotationQuotaOversize{},
+		&models.RotationQuotaBatch{},
+		&models.RotationQuotaBatchFile{},
+		&models.QuotaReservation{},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to migrate database: %v", err)
 	}
+	if err := validateQuotaLedgerMigration(db); err != nil {
+		return fmt.Errorf("quota ledger migration audit failed: %v", err)
+	}
 	if err := ensureMountConfigColumns(db); err != nil {
 		return fmt.Errorf("failed to migrate mount config columns: %v", err)
+	}
+	if err := ensureProactiveMoveSetting(db); err != nil {
+		return fmt.Errorf("failed to initialize proactive move setting: %v", err)
 	}
 
 	// Create default admin if no users exist
@@ -95,10 +112,20 @@ func InitDB(dataDir string) error {
 	// truncates the WAL and keeps the DB file size predictable.
 	// OutputLog records older than 30 days are also pruned — this is the
 	// *structured DB table*, NOT the task_N.log files which are untouched.
+	if maintenanceStop != nil {
+		close(maintenanceStop)
+	}
+	maintenanceStop = make(chan struct{})
+	stopMaintenance := maintenanceStop
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
-		for range ticker.C {
+		for {
+			select {
+			case <-stopMaintenance:
+				return
+			case <-ticker.C:
+			}
 			// WAL checkpoint: move WAL pages back into the main DB file
 			if sqlDB != nil {
 				sqlDB.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -109,6 +136,178 @@ func InitDB(dataDir string) error {
 		}
 	}()
 
+	return nil
+}
+
+func validateQuotaLedgerMigration(database *gorm.DB) error {
+	var batches []models.RotationQuotaBatch
+	if err := database.Find(&batches).Error; err != nil {
+		return err
+	}
+	for _, batch := range batches {
+		if !models.IsKnownBatchState(batch.State) {
+			return fmt.Errorf("batch %d has illegal state %q", batch.ID, batch.State)
+		}
+		if !models.IsTerminalBatchState(batch.State) {
+			if !models.IsValidOwnerToken(batch.OwnerToken) {
+				return fmt.Errorf("non-terminal batch %d has invalid owner token; manual reconciliation required", batch.ID)
+			}
+			if batch.LeaseToken != "" && !models.IsValidLeaseToken(batch.LeaseToken) {
+				return fmt.Errorf("non-terminal batch %d has invalid lease token; manual reconciliation required", batch.ID)
+			}
+			if batch.TransferMode == models.TransferModeMove {
+				if moveContractRequired(batch) {
+					if err := validateMoveBatchContract(database, batch); err != nil {
+						return err
+					}
+				} else if moveContractPresent(batch) {
+					return fmt.Errorf("move batch %d has a partial handoff contract before handoff; manual reconciliation required", batch.ID)
+				}
+			} else if batch.TransferMode != "" && batch.TransferMode != models.TransferModeCopy {
+				return fmt.Errorf("non-terminal batch %d lacks copy-only transfer/scope contract; manual reconciliation required", batch.ID)
+			}
+			if batch.DestinationScopeVersion != 1 {
+				return fmt.Errorf("non-terminal batch %d lacks copy-only transfer/scope contract; manual reconciliation required", batch.ID)
+			}
+			if strings.TrimSpace(batch.RequestKey) == "" || strings.TrimSpace(batch.RequestFingerprint) == "" || batch.SourceRootDevice <= 0 || batch.SourceRootInode <= 0 {
+				return fmt.Errorf("non-terminal batch %d lacks request identity; manual reconciliation required", batch.ID)
+			}
+			if err := validatePinnedConfigStructure(batch.RcloneConfigPath); err != nil {
+				return fmt.Errorf("non-terminal batch %d has invalid pinned config: %w; manual reconciliation required", batch.ID, err)
+			}
+			if batch.DestinationScope != models.DestinationScope(batch.RcloneConfigPath, batch.DestinationPath) {
+				return fmt.Errorf("non-terminal batch %d has an invalid destination scope; manual reconciliation required", batch.ID)
+			}
+			var files []models.RotationQuotaBatchFile
+			if err := database.Where("batch_id = ?", batch.ID).Find(&files).Error; err != nil {
+				return err
+			}
+			for _, file := range files {
+				if err := quota.ValidateRelativePath(file.RelativePath); err != nil {
+					return fmt.Errorf("non-terminal batch %d has invalid relative path: %w; manual reconciliation required", batch.ID, err)
+				}
+				if !models.IsKnownBatchFileState(file.State) || file.State == "" {
+					return fmt.Errorf("non-terminal batch %d has illegal batch-file state %q; manual reconciliation required", batch.ID, file.State)
+				}
+			}
+		}
+	}
+	for _, batch := range batches {
+		if batch.TransferMode != "" && batch.TransferMode != models.TransferModeCopy && batch.TransferMode != models.TransferModeMove {
+			return fmt.Errorf("batch %d has illegal transfer mode %q", batch.ID, batch.TransferMode)
+		}
+		if batch.CompletionEvidence != "" && batch.CompletionEvidence != models.CompletionEvidenceRemote && batch.CompletionEvidence != models.CompletionEvidenceLocal {
+			return fmt.Errorf("batch %d has illegal completion evidence %q", batch.ID, batch.CompletionEvidence)
+		}
+		if batch.TransferMode == models.TransferModeMove {
+			if moveContractRequired(batch) {
+				if err := validateMoveBatchContract(database, batch); err != nil {
+					return err
+				}
+			} else if moveContractPresent(batch) {
+				return fmt.Errorf("move batch %d has a partial handoff contract before handoff; manual reconciliation required", batch.ID)
+			}
+		}
+	}
+
+	var reservations []models.QuotaReservation
+	if err := database.Find(&reservations).Error; err != nil {
+		return err
+	}
+	for _, reservation := range reservations {
+		if !isKnownReservationState(reservation.State) {
+			return fmt.Errorf("reservation %d has illegal state %q", reservation.ID, reservation.State)
+		}
+		if reservation.Bytes < 0 {
+			return fmt.Errorf("reservation %d has negative bytes", reservation.ID)
+		}
+	}
+	return nil
+}
+
+func validateMoveBatchContract(database *gorm.DB, batch models.RotationQuotaBatch) error {
+	if batch.MoveHandoffContractVersion != models.MoveHandoffVersion || batch.MoveQuarantineDevice <= 0 || batch.MoveQuarantineInode <= 0 {
+		return fmt.Errorf("move batch %d lacks a valid handoff contract; manual reconciliation required", batch.ID)
+	}
+	if !filepath.IsAbs(batch.SourceRoot) || filepath.Clean(batch.SourceRoot) != batch.SourceRoot || !filepath.IsAbs(batch.MoveQuarantinePath) || filepath.Clean(batch.MoveQuarantinePath) != batch.MoveQuarantinePath {
+		return fmt.Errorf("move batch %d has an invalid quarantine path; manual reconciliation required", batch.ID)
+	}
+	expected := filepath.Join(batch.SourceRoot, ".rclone-manager-move", fmt.Sprintf("%d-%s", batch.ID, batch.OwnerToken))
+	if batch.MoveQuarantinePath != expected {
+		return fmt.Errorf("move batch %d has an unexpected quarantine path; manual reconciliation required", batch.ID)
+	}
+	if !models.IsTerminalBatchState(batch.State) && batch.StartedAt != nil && batch.State != models.BatchStateUnknown && batch.ProcessID <= 0 {
+		return fmt.Errorf("move batch %d lacks durable process identity; manual reconciliation required", batch.ID)
+	}
+	var files []models.RotationQuotaBatchFile
+	if err := database.Where("batch_id = ?", batch.ID).Find(&files).Error; err != nil {
+		return err
+	}
+	for _, file := range files {
+		switch file.MoveHandoffState {
+		case models.MoveHandoffReady:
+		case models.MoveHandoffQuarantined, models.MoveHandoffRestored, models.MoveHandoffMoved, models.MoveHandoffUnknown:
+			if file.MoveHandoffDevice <= 0 || file.MoveHandoffInode <= 0 {
+				return fmt.Errorf("move batch %d file %d lacks handoff identity; manual reconciliation required", batch.ID, file.ID)
+			}
+		default:
+			return fmt.Errorf("move batch %d file %d has invalid handoff state %q; manual reconciliation required", batch.ID, file.ID, file.MoveHandoffState)
+		}
+		if file.MoveHandoffSize != file.SizeBytes || file.MoveHandoffMtimeNS != file.MtimeNS {
+			return fmt.Errorf("move batch %d file %d has invalid handoff metadata; manual reconciliation required", batch.ID, file.ID)
+		}
+	}
+	return nil
+}
+
+func moveContractPresent(batch models.RotationQuotaBatch) bool {
+	return batch.MoveHandoffContractVersion != 0 || batch.MoveQuarantinePath != "" || batch.MoveQuarantineDevice != 0 || batch.MoveQuarantineInode != 0
+}
+
+func moveContractRequired(batch models.RotationQuotaBatch) bool {
+	if batch.StartedAt != nil || batch.State == models.BatchStateRunning || batch.State == models.BatchStateReconciling || batch.State == models.BatchStateUnknown {
+		return true
+	}
+	return moveContractPresent(batch)
+}
+
+func ensureProactiveMoveSetting(database *gorm.DB) error {
+	var setting models.SystemSetting
+	result := database.Where("`key` = ?", models.ProactiveMoveSettingKey).First(&setting)
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		setting = models.SystemSetting{Key: models.ProactiveMoveSettingKey, Value: "true"}
+		if err := database.Create(&setting).Error; err != nil {
+			return err
+		}
+	} else if result.Error != nil {
+		return result.Error
+	}
+	var initialized models.SystemSetting
+	marker := database.Where("`key` = ?", models.ProactiveMoveSettingMigrationKey).First(&initialized)
+	if errors.Is(marker.Error, gorm.ErrRecordNotFound) {
+		if setting.Value == "false" {
+			if err := database.Model(&setting).Update("value", "true").Error; err != nil {
+				return err
+			}
+		}
+		return database.Create(&models.SystemSetting{Key: models.ProactiveMoveSettingMigrationKey, Value: "true"}).Error
+	}
+	return marker.Error
+}
+
+func isKnownReservationState(state string) bool {
+	switch state {
+	case models.ReservationStateHeld, models.ReservationStateActive, models.ReservationStateCommitted, models.ReservationStateUnknown, models.ReservationStateReleased, models.ReservationStateExpired:
+		return true
+	default:
+		return false
+	}
+}
+
+func validatePinnedConfigStructure(raw string) error {
+	if strings.TrimSpace(raw) == "" || !filepath.IsAbs(raw) || filepath.Clean(raw) != raw {
+		return fmt.Errorf("path must be absolute and clean")
+	}
 	return nil
 }
 

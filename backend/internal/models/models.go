@@ -1,12 +1,109 @@
 package models
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"path"
 	"strings"
 	"time"
 
 	"gorm.io/gorm"
 )
+
+func IsValidOwnerToken(value string) bool {
+	if len(value) != 48 {
+		return false
+	}
+	for _, char := range value {
+		if !(char >= '0' && char <= '9') && !(char >= 'a' && char <= 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func IsValidLeaseToken(value string) bool { return IsValidOwnerToken(value) }
+
+const (
+	DefaultRotationQuotaLimitBytes int64 = 700 * 1024 * 1024 * 1024
+	DefaultRcloneConfigPath              = "/root/.config/rclone/rclone.conf"
+
+	BatchStatePlanned                = "planned"
+	BatchStateReserved               = "reserved"
+	BatchStateRunning                = "running"
+	BatchStateUnknown                = "unknown"
+	BatchStateReconciling            = "reconciling"
+	BatchStateSucceeded              = "succeeded"
+	BatchStateFailed                 = "failed"
+	BatchStateCanceled               = "canceled"
+	BatchStateExpired                = "expired"
+	ReservationStateHeld             = "held"
+	ReservationStateActive           = "active"
+	ReservationStateCommitted        = "committed"
+	ReservationStateUnknown          = "unknown"
+	ReservationStateReleased         = "released"
+	ReservationStateExpired          = "expired"
+	BatchFileStateHeld               = "held"
+	BatchFileStateActive             = "active"
+	BatchFileStateVerified           = "verified"
+	BatchFileStateUnknown            = "unknown"
+	BatchFileStateFailed             = "failed"
+	BatchFileStateCommitted          = "committed"
+	TransferModeCopy                 = "copy"
+	TransferModeMove                 = "move"
+	CompletionEvidenceRemote         = "remote_verified"
+	CompletionEvidenceLocal          = "local_move"
+	ProactiveMoveSettingKey          = "proactive_move_enabled"
+	ProactiveMoveSettingMigrationKey = "proactive_move_enabled_phase3_initialized"
+	MoveHandoffVersion               = 1
+	MoveHandoffReady                 = "ready"
+	MoveHandoffQuarantined           = "quarantined"
+	MoveHandoffRestored              = "restored"
+	MoveHandoffMoved                 = "moved"
+	MoveHandoffUnknown               = "unknown"
+	MoveCompletionEvidenceVersion    = 1
+	MoveResolutionResolving          = "resolving"
+	MoveResolutionFrozen             = "frozen"
+)
+
+func IsKnownBatchState(state string) bool {
+	switch state {
+	case BatchStatePlanned, BatchStateReserved, BatchStateRunning, BatchStateUnknown, BatchStateReconciling,
+		BatchStateSucceeded, BatchStateFailed, BatchStateCanceled, BatchStateExpired:
+		return true
+	default:
+		return false
+	}
+}
+
+func IsActiveBatchState(state string) bool {
+	switch state {
+	case BatchStatePlanned, BatchStateReserved, BatchStateRunning, BatchStateUnknown, BatchStateReconciling:
+		return true
+	default:
+		return false
+	}
+}
+
+func IsTerminalBatchState(state string) bool {
+	switch state {
+	case BatchStateSucceeded, BatchStateFailed, BatchStateCanceled, BatchStateExpired:
+		return true
+	default:
+		return false
+	}
+}
+
+func IsKnownBatchFileState(state string) bool {
+	switch state {
+	case "", BatchFileStateHeld, BatchFileStateActive, BatchFileStateVerified, BatchFileStateUnknown, BatchFileStateFailed, BatchFileStateCommitted:
+		return true
+	default:
+		return false
+	}
+}
 
 type Task struct {
 	ID   uint   `json:"id" gorm:"primaryKey"`
@@ -77,13 +174,26 @@ type Task struct {
 	//   "normal"   -> existing single-remote behavior
 	//   "rotation" -> sequentially rotates destination remotes on 403/429/quota errors
 	TaskType string `json:"task_type" gorm:"default:normal"`
+	// RotationStrategy isolates legacy error-driven rotation from future proactive quota rotation.
+	RotationStrategy        string `json:"rotation_strategy" gorm:"default:legacy_error"`
+	RotationQuotaLimitBytes int64  `json:"rotation_quota_limit_bytes"`
+	RotationQuotaKeys       string `json:"rotation_quota_keys" gorm:"type:text"`
 	// RotationRemotes stores a JSON string array of rclone remote names, e.g. ["a","b","c"].
-	RotationRemotes      string     `json:"rotation_remotes" gorm:"type:text"`
-	RotationMaxRounds    int        `json:"rotation_max_rounds" gorm:"default:3"`
-	RotationResumeTime   string     `json:"rotation_resume_time" gorm:"default:'01:00'"`
-	RotationCurrentIndex int        `json:"rotation_current_index" gorm:"default:0"`
-	RotationCurrentRound int        `json:"rotation_current_round" gorm:"default:0"`
-	RotationPausedUntil  *time.Time `json:"rotation_paused_until"`
+	RotationRemotes                 string     `json:"rotation_remotes" gorm:"type:text"`
+	RotationMaxRounds               int        `json:"rotation_max_rounds" gorm:"default:3"`
+	RotationResumeTime              string     `json:"rotation_resume_time" gorm:"default:'01:00'"`
+	RotationCurrentIndex            int        `json:"rotation_current_index" gorm:"default:0"`
+	RotationCurrentRound            int        `json:"rotation_current_round" gorm:"default:0"`
+	RotationPausedUntil             *time.Time `json:"rotation_paused_until"`
+	RotationRescanPending           bool       `json:"rotation_rescan_pending" gorm:"default:false"`
+	RotationRescanGeneration        uint64     `json:"rotation_rescan_generation" gorm:"default:0"`
+	RotationRescanHandledGeneration uint64     `json:"rotation_rescan_handled_generation" gorm:"default:0"`
+	RotationLastScanAt              *time.Time `json:"rotation_last_scan_at"`
+	RotationQuotaWakeAt             *time.Time `json:"rotation_quota_wake_at"`
+	RotationWakeClaimToken          string     `json:"rotation_wake_claim_token" gorm:"default:''"`
+	RotationWakeClaimUntil          *time.Time `json:"rotation_wake_claim_until"`
+	RotationStopRequested           bool       `json:"rotation_stop_requested" gorm:"default:false"`
+	RotationStopGeneration          uint64     `json:"rotation_stop_generation" gorm:"default:0"`
 
 	// Cascading: when a Task is deleted, all its OutputLogs are deleted
 	OutputLogs []OutputLog `json:"-" gorm:"constraint:OnDelete:CASCADE;"`
@@ -126,6 +236,198 @@ func EncodeRotationRemotes(remotes []string) string {
 	}
 	data, _ := json.Marshal(cleaned)
 	return string(data)
+}
+
+// ParseRotationQuotaKeys decodes the remote-to-quota-key mapping without
+// coercing malformed input into a usable configuration.
+func ParseRotationQuotaKeys(raw string) (map[string]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return map[string]string{}, nil
+	}
+
+	var parsed map[string]string
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return nil, fmt.Errorf("rotation quota keys must be a JSON object: %w", err)
+	}
+	if parsed == nil {
+		return nil, fmt.Errorf("rotation quota keys must be a JSON object")
+	}
+
+	cleaned := make(map[string]string, len(parsed))
+	for remote, quotaKey := range parsed {
+		remote = strings.TrimSpace(remote)
+		quotaKey = strings.TrimSpace(quotaKey)
+		if remote == "" {
+			return nil, fmt.Errorf("rotation quota keys contains a blank remote")
+		}
+		if quotaKey == "" {
+			return nil, fmt.Errorf("rotation quota key for remote %q is blank", remote)
+		}
+		if _, exists := cleaned[remote]; exists {
+			return nil, fmt.Errorf("rotation quota keys contains duplicate remote %q after trimming", remote)
+		}
+		cleaned[remote] = quotaKey
+	}
+	return cleaned, nil
+}
+
+func EncodeRotationQuotaKeys(keys map[string]string) string {
+	if len(keys) == 0 {
+		return "{}"
+	}
+
+	cleaned := make(map[string]string, len(keys))
+	for remote, quotaKey := range keys {
+		cleaned[strings.TrimSpace(remote)] = strings.TrimSpace(quotaKey)
+	}
+	data, _ := json.Marshal(cleaned)
+	return string(data)
+}
+
+func CanonicalDestinationPath(destination string) string {
+	destination = strings.TrimSpace(strings.ReplaceAll(destination, "\\", "/"))
+	if destination == "" {
+		return "/"
+	}
+	destination = path.Clean(destination)
+	if destination == "." {
+		return "/"
+	}
+	if !strings.HasPrefix(destination, "/") {
+		destination = "/" + destination
+	}
+	return path.Clean(destination)
+}
+
+func DestinationScope(resolvedConfigPath, destination string) string {
+	hash := sha256.New()
+	_, _ = hash.Write([]byte(resolvedConfigPath))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(CanonicalDestinationPath(destination)))
+	_, _ = hash.Write([]byte{0})
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+// DefaultRotationQuotaKey is the canonical identity for an implicit proactive
+// quota account. Keep this in models so dispatch and read APIs cannot drift.
+func DefaultRotationQuotaKey(configIdentity, remote string) string {
+	sum := sha256.Sum256([]byte(configIdentity + "\x00" + remote))
+	return "default-" + hex.EncodeToString(sum[:])
+}
+
+// QuotaAccount is the durable identity and budget for one provider quota key.
+type QuotaAccount struct {
+	ID                   uint       `json:"id" gorm:"primaryKey"`
+	QuotaKey             string     `json:"quota_key" gorm:"not null;uniqueIndex;check:quota_key_nonempty,quota_key <> ''"`
+	RemoteName           string     `json:"remote_name"`
+	ConfigIdentity       string     `json:"config_identity"`
+	BudgetBytes          int64      `json:"budget_bytes" gorm:"not null;default:751619276800;check:quota_account_budget_nonnegative,budget_bytes >= 0"`
+	WindowSeconds        int        `json:"window_seconds" gorm:"default:86400"`
+	ProviderBlockedUntil *time.Time `json:"provider_blocked_until"`
+	Enabled              bool       `json:"enabled" gorm:"not null;default:true"`
+	CreatedAt            time.Time  `json:"created_at"`
+	UpdatedAt            time.Time  `json:"updated_at"`
+}
+
+type RotationQuotaOversize struct {
+	ID           uint      `json:"id" gorm:"primaryKey"`
+	TaskID       uint      `json:"task_id" gorm:"uniqueIndex:uq_rotation_quota_oversize_task_path"`
+	RelativePath string    `json:"relative_path" gorm:"uniqueIndex:uq_rotation_quota_oversize_task_path"`
+	SnapshotKey  string    `json:"snapshot_key"`
+	SizeBytes    int64     `json:"size_bytes"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// RotationQuotaBatch is an immutable attempt. A retry creates a new batch;
+// existing attempts must not be mutated.
+type RotationQuotaBatch struct {
+	ID                         uint       `json:"id" gorm:"primaryKey"`
+	TaskID                     uint       `json:"task_id" gorm:"index:idx_rotation_quota_batches_task_state;uniqueIndex:uq_rotation_quota_batches_request_identity"`
+	QuotaAccountID             uint       `json:"quota_account_id" gorm:"index:idx_rotation_quota_batches_account_state_lease"`
+	DestinationScope           string     `json:"destination_scope" gorm:"index:idx_rotation_quota_batches_destination_state"`
+	SourceRoot                 string     `json:"source_root"`
+	SourceRootDevice           int64      `json:"source_root_device" gorm:"not null;default:0"`
+	SourceRootInode            int64      `json:"source_root_inode" gorm:"not null;default:0"`
+	DestinationRemote          string     `json:"destination_remote" gorm:"uniqueIndex:uq_rotation_quota_batches_request_identity"`
+	TransferMode               string     `json:"transfer_mode" gorm:"default:''"`
+	DestinationScopeVersion    int        `json:"destination_scope_version" gorm:"default:0"`
+	RcloneConfigPath           string     `json:"rclone_config_path" gorm:"not null;default:''"`
+	RequestKey                 string     `json:"request_key" gorm:"not null;uniqueIndex:uq_rotation_quota_batches_request_identity"`
+	RequestFingerprint         string     `json:"request_fingerprint" gorm:"not null;default:''"`
+	DestinationPath            string     `json:"destination_path"`
+	ManifestPath               string     `json:"manifest_path"`
+	ManifestHash               string     `json:"manifest_hash"`
+	State                      string     `json:"state" gorm:"not null;check:rotation_quota_batch_state_valid,state IN ('planned','reserved','running','unknown','reconciling','succeeded','failed','canceled','expired');index:idx_rotation_quota_batches_task_state;index:idx_rotation_quota_batches_account_state_lease;index:idx_rotation_quota_batches_destination_state"`
+	OwnerToken                 string     `json:"owner_token" gorm:"uniqueIndex"`
+	LeaseToken                 string     `json:"lease_token"`
+	ProcessStartToken          string     `json:"process_start_token"`
+	ProcessID                  int        `json:"process_id"`
+	StartedAt                  *time.Time `json:"started_at"`
+	LeaseUntil                 *time.Time `json:"lease_until" gorm:"index:idx_rotation_quota_batches_account_state_lease"`
+	FinishedAt                 *time.Time `json:"finished_at"`
+	ExitCode                   *int       `json:"exit_code"`
+	LimitMarker                string     `json:"limit_marker"`
+	MarkerDetectedAt           *time.Time `json:"marker_detected_at"`
+	LastError                  string     `json:"last_error"`
+	ReservedBytes              int64      `json:"reserved_bytes" gorm:"check:rotation_quota_batch_reserved_nonnegative,reserved_bytes >= 0"`
+	CompletionEvidence         string     `json:"completion_evidence" gorm:"default:''"`
+	CompletionEvidenceVersion  int        `json:"completion_evidence_version" gorm:"default:0"`
+	MoveHandoffContractVersion int        `json:"move_handoff_contract_version" gorm:"default:0"`
+	MoveQuarantinePath         string     `json:"move_quarantine_path"`
+	MoveQuarantineDevice       int64      `json:"move_quarantine_device"`
+	MoveQuarantineInode        int64      `json:"move_quarantine_inode"`
+	MoveHandoffStartedAt       *time.Time `json:"move_handoff_started_at"`
+	CreatedAt                  time.Time  `json:"created_at"`
+	UpdatedAt                  time.Time  `json:"updated_at"`
+}
+
+// RotationQuotaBatchFile is an immutable file snapshot belonging to one attempt.
+type RotationQuotaBatchFile struct {
+	ID                      uint       `json:"id" gorm:"primaryKey"`
+	BatchID                 uint       `json:"batch_id" gorm:"uniqueIndex:uq_rotation_quota_batch_files_batch_path;uniqueIndex:uq_rotation_quota_batch_files_batch_snapshot;index:idx_rotation_quota_batch_files_snapshot_state"`
+	RelativePath            string     `json:"relative_path" gorm:"uniqueIndex:uq_rotation_quota_batch_files_batch_path"`
+	SnapshotKey             string     `json:"snapshot_key" gorm:"uniqueIndex:uq_rotation_quota_batch_files_batch_snapshot;index:idx_rotation_quota_batch_files_snapshot_state"`
+	SizeBytes               int64      `json:"size_bytes" gorm:"check:rotation_quota_batch_file_size_nonnegative,size_bytes >= 0"`
+	MtimeNS                 int64      `json:"mtime_ns"`
+	Device                  int64      `json:"device"`
+	Inode                   int64      `json:"inode"`
+	ContentHash             string     `json:"content_hash"`
+	State                   string     `json:"state" gorm:"check:rotation_quota_batch_file_state_valid,state IN ('','held','active','verified','unknown','failed','committed');index:idx_rotation_quota_batch_files_snapshot_state"`
+	RemotePath              string     `json:"remote_path"`
+	RemoteSize              *int64     `json:"remote_size"`
+	RemoteHash              string     `json:"remote_hash"`
+	VerifiedAt              *time.Time `json:"verified_at"`
+	LastError               string     `json:"last_error"`
+	CreatedAt               time.Time  `json:"created_at"`
+	UpdatedAt               time.Time  `json:"updated_at"`
+	MoveHandoffState        string     `json:"move_handoff_state" gorm:"default:''"`
+	MoveHandoffDevice       int64      `json:"move_handoff_device"`
+	MoveHandoffInode        int64      `json:"move_handoff_inode"`
+	MoveHandoffSize         int64      `json:"move_handoff_size"`
+	MoveHandoffMtimeNS      int64      `json:"move_handoff_mtime_ns"`
+	MoveResolutionState     string     `json:"-"`
+	MoveResolutionToken     string     `json:"-"`
+	MoveResolutionStartedAt *time.Time `json:"-"`
+}
+
+// QuotaReservation is an immutable reservation for one batch file. A retry
+// creates a new reservation; existing reservations must not be mutated.
+type QuotaReservation struct {
+	ID             uint       `json:"id" gorm:"primaryKey"`
+	QuotaAccountID uint       `json:"quota_account_id" gorm:"index:idx_quota_reservations_account_state_expiry"`
+	BatchID        uint       `json:"batch_id" gorm:"index:idx_quota_reservations_batch_state"`
+	BatchFileID    uint       `json:"batch_file_id" gorm:"not null;uniqueIndex:uq_quota_reservations_batch_file;index:idx_quota_reservations_batch_file"`
+	Bytes          int64      `json:"bytes" gorm:"check:quota_reservation_bytes_nonnegative,bytes >= 0"`
+	State          string     `json:"state" gorm:"not null;check:quota_reservation_state_valid,state IN ('held','active','committed','unknown','released','expired');index:idx_quota_reservations_account_state_expiry;index:idx_quota_reservations_batch_state"`
+	IdempotencyKey string     `json:"idempotency_key" gorm:"not null;uniqueIndex"`
+	ReservedAt     *time.Time `json:"reserved_at"`
+	StartedAt      *time.Time `json:"started_at"`
+	ReleasedAt     *time.Time `json:"released_at"`
+	ExpiresAt      *time.Time `json:"expires_at" gorm:"index:idx_quota_reservations_account_state_expiry"`
+	LastError      string     `json:"last_error"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
 type OpenlistConfig struct {

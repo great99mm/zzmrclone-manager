@@ -38,6 +38,15 @@ export const stopTask = (id) => api.post(`/tasks/${id}/stop`);
 export const dedupeTask = (id) => api.post(`/tasks/${id}/dedupe`);
 export const getTaskLogs = (id, lines = 100) => api.get(`/tasks/${id}/logs?lines=${lines}`);
 export const getTaskStatus = (id) => api.get(`/tasks/${id}/status`);
+export const getProactiveStatus = (id, limit = 100, summary = false) => {
+  const token = localStorage.getItem('apiToken') || localStorage.getItem('token') || '';
+  const summaryParam = summary ? '&summary=true' : '';
+  return api.get(`/tasks/${id}/proactive-status?limit=${limit}${summaryParam}&token=${encodeURIComponent(token)}`);
+};
+export const resolveProactiveBatch = (taskId, resolution) => {
+  const token = localStorage.getItem('apiToken') || localStorage.getItem('token') || '';
+  return api.post(`/tasks/${taskId}/proactive-resolutions?token=${encodeURIComponent(token)}`, resolution);
+};
 
 export const getSystemStats = () => api.get('/system/stats');
 export const getRcloneStats = () => api.get('/system/rclone-stats');

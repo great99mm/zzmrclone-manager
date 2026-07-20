@@ -1,27 +1,32 @@
 package scheduler
 
 import (
+	"context"
 	"log"
 	"sync"
 	"time"
 
 	"github.com/robfig/cron/v3"
 	"rclone-manager/internal/models"
-	"rclone-manager/internal/rclone"
 )
 
-type Scheduler struct {
-	cron      *cron.Cron
-	entries   map[uint]cron.EntryID
-	executor  *rclone.Executor
-	mu        sync.RWMutex
+type Runner interface {
+	Trigger(context.Context, uint, string) error
+	IsActive(uint) bool
 }
 
-func NewScheduler(executor *rclone.Executor) *Scheduler {
+type Scheduler struct {
+	cron    *cron.Cron
+	entries map[uint]cron.EntryID
+	runner  Runner
+	mu      sync.RWMutex
+}
+
+func NewScheduler(runner Runner) *Scheduler {
 	return &Scheduler{
-		cron:     cron.New(cron.WithSeconds()),
-		entries:  make(map[uint]cron.EntryID),
-		executor: executor,
+		cron:    cron.New(cron.WithSeconds()),
+		entries: make(map[uint]cron.EntryID),
+		runner:  runner,
 	}
 }
 
@@ -46,13 +51,9 @@ func (s *Scheduler) AddTask(task *models.Task) error {
 
 	interval := time.Duration(task.ScheduleInterval) * time.Minute
 
-	entryID, err := s.cron.AddFunc("@every " + interval.String(), func() {
-		if !s.executor.IsRunning(task.ID) {
-			log.Printf("Scheduled execution for task %d", task.ID)
-			s.executor.ExecuteMove(task)
-		} else {
-			log.Printf("Task %d already running, skipping scheduled execution", task.ID)
-		}
+	entryID, err := s.cron.AddFunc("@every "+interval.String(), func() {
+		log.Printf("Scheduled execution for task %d", task.ID)
+		_ = s.runner.Trigger(context.Background(), task.ID, "schedule")
 	})
 
 	if err != nil {

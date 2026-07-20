@@ -1,6 +1,7 @@
 package watcher
 
 import (
+	"context"
 	"log"
 	"os"
 	"path/filepath"
@@ -9,25 +10,29 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"rclone-manager/internal/models"
-	"rclone-manager/internal/rclone"
 )
 
-type Watcher struct {
-	watchers    map[uint]*fsnotify.Watcher
-	executors   map[uint]*rclone.Executor
-	tasks       map[uint]*models.Task
-	mu          sync.RWMutex
+type Runner interface {
+	Trigger(context.Context, uint, string) error
+	IsActive(uint) bool
 }
 
-func NewWatcher(executor *rclone.Executor) *Watcher {
+type Watcher struct {
+	watchers map[uint]*fsnotify.Watcher
+	runner   Runner
+	tasks    map[uint]*models.Task
+	mu       sync.RWMutex
+}
+
+func NewWatcher(runner Runner) *Watcher {
 	return &Watcher{
-		watchers:  make(map[uint]*fsnotify.Watcher),
-		executors: make(map[uint]*rclone.Executor),
-		tasks:     make(map[uint]*models.Task),
+		watchers: make(map[uint]*fsnotify.Watcher),
+		runner:   runner,
+		tasks:    make(map[uint]*models.Task),
 	}
 }
 
-func (w *Watcher) StartTaskWatch(task *models.Task, executor *rclone.Executor) error {
+func (w *Watcher) StartTaskWatch(task *models.Task, _ ...interface{}) error {
 	if !task.WatchEnabled {
 		return nil
 	}
@@ -58,11 +63,10 @@ func (w *Watcher) StartTaskWatch(task *models.Task, executor *rclone.Executor) e
 
 	w.mu.Lock()
 	w.watchers[task.ID] = watcher
-	w.executors[task.ID] = executor
 	w.tasks[task.ID] = task
 	w.mu.Unlock()
 
-	go w.watchLoop(task.ID, watcher, executor)
+	go w.watchLoop(task.ID, watcher)
 
 	log.Printf("Started watching task %d: %s", task.ID, task.SourceDir)
 	return nil
@@ -73,14 +77,13 @@ func (w *Watcher) StopTaskWatch(taskID uint) {
 	if watcher, exists := w.watchers[taskID]; exists {
 		watcher.Close()
 		delete(w.watchers, taskID)
-		delete(w.executors, taskID)
 		delete(w.tasks, taskID)
 	}
 	w.mu.Unlock()
 	log.Printf("Stopped watching task %d", taskID)
 }
 
-func (w *Watcher) watchLoop(taskID uint, watcher *fsnotify.Watcher, executor *rclone.Executor) {
+func (w *Watcher) watchLoop(taskID uint, watcher *fsnotify.Watcher) {
 	debounceTimer := time.NewTimer(0)
 	<-debounceTimer.C
 
@@ -103,9 +106,9 @@ func (w *Watcher) watchLoop(taskID uint, watcher *fsnotify.Watcher, executor *rc
 					task := w.tasks[taskID]
 					w.mu.RUnlock()
 
-					if task != nil && !executor.IsRunning(taskID) {
+					if task != nil {
 						log.Printf("Directory change detected for task %d, triggering move", taskID)
-						executor.ExecuteMove(task)
+						_ = w.runner.Trigger(context.Background(), taskID, "watch")
 					}
 				}()
 			}
@@ -119,7 +122,7 @@ func (w *Watcher) watchLoop(taskID uint, watcher *fsnotify.Watcher, executor *rc
 	}
 }
 
-func (w *Watcher) RestartTaskWatch(task *models.Task, executor *rclone.Executor) error {
+func (w *Watcher) RestartTaskWatch(task *models.Task, executor ...interface{}) error {
 	w.StopTaskWatch(task.ID)
-	return w.StartTaskWatch(task, executor)
+	return w.StartTaskWatch(task, executor...)
 }
