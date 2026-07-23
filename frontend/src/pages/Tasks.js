@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { getTasks, getProactiveStatus, deleteTask, startTask, stopTask } from '../services/api';
 import toast from 'react-hot-toast';
+import { QuotaAccountBar, QuotaExhaustedNotice } from '../components/QuotaAccountBar';
 
 const Tasks = () => {
   const [tasks, setTasks] = useState([]);
@@ -519,6 +520,14 @@ const PoolTaskSummary = ({ summary, loading, error }) => {
       ) : accountName ? (
         <div className="text-amber-700">quota account 未初始化</div>
       ) : null}
+      {Array.isArray(summary.accounts) && summary.accounts.length > 0 && (
+        <div className="space-y-2 pt-1">
+          {summary.accounts.map((acct, idx) => (
+            <QuotaAccountBar key={acct.remote_name || idx} account={acct} />
+          ))}
+        </div>
+      )}
+      <QuotaExhaustedNotice status={summary} />
       {error && <div className="text-red-700">状态刷新失败，显示最近一次成功数据</div>}
       {unknownMoveCount > 0 && <div className="text-amber-700">移动批次需要在详情中处理</div>}
     </div>

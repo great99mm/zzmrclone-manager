@@ -37,6 +37,14 @@ type proactiveAccountStatus struct {
 	RemainingBytes       *int64     `json:"remaining_bytes"`
 	ProviderBlockedUntil *time.Time `json:"provider_blocked_until"`
 	Enabled              *bool      `json:"enabled"`
+	// WindowStartedAt is the first moment the account's reservation usage
+	// hit zero. While non-nil, the next quota reset is WindowStartedAt +
+	// WindowSeconds. Reset to nil on refill so the cycle restarts cleanly.
+	WindowStartedAt *time.Time `json:"window_started_at"`
+	// NextResetAt is the absolute next reset timestamp derived from
+	// WindowStartedAt + WindowSeconds. Null while the account is still
+	// active (anchor not set) or after the reset has passed.
+	NextResetAt *time.Time `json:"next_reset_at"`
 }
 
 type proactiveBatchStatus struct {
@@ -272,6 +280,10 @@ func getProactiveStatus(c *gin.Context) {
 	}
 
 	bindings := make([]proactiveAccountStatus, 0, len(remotes))
+	now := time.Now()
+	allExhausted := len(remotes) > 0
+	allInitialized := true
+	var earliestReset *time.Time
 	for _, remote := range remotes {
 		key := quotaKeys[remote]
 		binding := proactiveAccountStatus{RemoteName: remote, QuotaKey: key}
@@ -282,9 +294,30 @@ func getProactiveStatus(c *gin.Context) {
 			binding.BudgetBytes, binding.WindowSeconds, binding.Enabled = &budget, &window, &enabled
 			binding.UsedBytes, binding.ActiveReservedBytes, binding.RemainingBytes = &u, &r, &remaining
 			binding.ProviderBlockedUntil = account.ProviderBlockedUntil
+			binding.WindowStartedAt = account.WindowStartedAt
+			if account.WindowStartedAt != nil && window > 0 {
+				reset := account.WindowStartedAt.Add(time.Duration(window) * time.Second)
+				binding.NextResetAt = &reset
+				if reset.After(now) && (earliestReset == nil || reset.Before(*earliestReset)) {
+					earliestReset = &reset
+				}
+			}
+			// An account is "exhausted" only when its remaining quota is
+			// zero (the user cannot reserve any more bytes today). A fresh
+			// account whose first reserve is in-flight but has not yet
+			// committed is NOT exhausted — the user just hasn't run any
+			// transfers yet, so remaining still equals the full budget.
+			exhausted := enabled && budget > 0 && remaining <= 0
+			if !exhausted {
+				allExhausted = false
+			}
+		} else {
+			allInitialized = false
+			allExhausted = false
 		}
 		bindings = append(bindings, binding)
 	}
+	_ = allInitialized
 
 	// Queue categories are mutually exclusive batch-lifecycle buckets. A
 	// reserved/held file is pending, a planned/held file is planned, and the
@@ -377,7 +410,15 @@ func getProactiveStatus(c *gin.Context) {
 		maintenance.ManualMergeAvailable = false
 		maintenance.Blocker = "legacy_maintenance_recovery"
 	}
-	c.JSON(http.StatusOK, gin.H{"task": gin.H{"id": task.ID, "status": task.Status, "enabled": task.Enabled, "transfer_mode": task.TransferMode, "resolution_required": taskResolutionRequired, "rescan_pending": task.RotationRescanPending, "generation": task.RotationRescanGeneration, "stop_requested": task.RotationStopRequested, "wake_at": task.RotationQuotaWakeAt, "current_error": taskError, "last_error": taskError}, "accounts": bindings, "batches": resultBatches, "queue": queue, "maintenance": maintenance})
+	c.JSON(http.StatusOK, gin.H{
+		"task": gin.H{"id": task.ID, "status": task.Status, "enabled": task.Enabled, "transfer_mode": task.TransferMode, "resolution_required": taskResolutionRequired, "rescan_pending": task.RotationRescanPending, "generation": task.RotationRescanGeneration, "stop_requested": task.RotationStopRequested, "wake_at": task.RotationQuotaWakeAt, "current_error": taskError, "last_error": taskError},
+		"accounts":                 bindings,
+		"batches":                  resultBatches,
+		"queue":                    queue,
+		"maintenance":              maintenance,
+		"all_accounts_exhausted":   allExhausted,
+		"next_quota_reset_at":      earliestReset,
+	})
 }
 
 func proactiveManualMergeAvailability(scope string, epoch models.DestinationScopeMaintenance, keys map[string]string, taskStatus string) (bool, string) {

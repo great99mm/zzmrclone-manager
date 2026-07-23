@@ -828,3 +828,137 @@ func TestConcurrentSharedKeyDifferentTasksAndDestinationsRespectBudget(t *testin
 		t.Fatalf("shared-key reservations exceeded budget: %d", reserved)
 	}
 }
+
+func TestReconcileAccountWindowAnchorSetsOnFirstZero(t *testing.T) {
+	db := newQuotaTestDB(t)
+	account := addAccount(t, db, "key", 100)
+	task := quotaTask([]string{"remote"}, map[string]string{"remote": "key"}, 100)
+	service := testService(db, time.Unix(100, 0))
+
+	// Reserve some bytes. After the reserve, the account has a non-zero
+	// WindowStartedAt because reconcile sees usage > 0 and does nothing.
+	if _, err := service.Reserve(PackReserveRequest{Task: task, Snapshots: []LocalSnapshot{snapshot("a", 40), snapshot("b", 60)}, SourceRoot: "/source", DestinationPath: "/dest"}); err != nil {
+		t.Fatal(err)
+	}
+	var current models.QuotaAccount
+	if err := db.First(&current, account.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if current.WindowStartedAt != nil {
+		t.Fatalf("anchor set while account still has usage: %v", current.WindowStartedAt)
+	}
+
+	// Manually release all reservations for this account. accountUsage will
+	// drop to zero and reconcile should set WindowStartedAt to now.
+	now := time.Unix(200, 0)
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.QuotaReservation{}).Where("quota_account_id = ?", account.ID).Update("state", models.ReservationStateReleased).Error; err != nil {
+			return err
+		}
+		return ReconcileAccountWindowAnchor(tx, account.ID, now)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(&current, account.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if current.WindowStartedAt == nil || !current.WindowStartedAt.Equal(now) {
+		t.Fatalf("anchor not set after zero transition: %v", current.WindowStartedAt)
+	}
+
+	// Idempotency: calling reconcile again must keep the original anchor.
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		return ReconcileAccountWindowAnchor(tx, account.ID, time.Unix(300, 0))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(&current, account.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !current.WindowStartedAt.Equal(now) {
+		t.Fatalf("anchor drifted on idempotent reconcile: %v", current.WindowStartedAt)
+	}
+}
+
+
+
+func TestReconcileAccountWindowAnchorRefillClearsAnchor(t *testing.T) {
+	db := newQuotaTestDB(t)
+	account := addAccount(t, db, "key", 100)
+	now := time.Unix(200, 0)
+
+	// Anchor the account at `now` via the simplest possible flow.
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		// No reservations yet, so the first reconcile sets the anchor.
+		return ReconcileAccountWindowAnchor(tx, account.ID, now)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var current models.QuotaAccount
+	if err := db.First(&current, account.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if current.WindowStartedAt == nil {
+		t.Fatal("expected anchor set after first reconcile")
+	}
+	// Now manually create a reservation to bring usage > 0 and trigger
+	// the clear path. Done in a single transaction so the read sees the
+	// write.
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		expires := now.Add(3600 * time.Second)
+		if err := tx.Create(&models.RotationQuotaBatch{TaskID: 999, QuotaAccountID: current.ID, DestinationScope: "scope", State: models.BatchStateReserved, RequestKey: "inline-refill", OwnerToken: "o", ReservedBytes: 30}).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(&models.QuotaReservation{QuotaAccountID: current.ID, Bytes: 30, State: models.ReservationStateHeld, IdempotencyKey: "k", ReservedAt: &now, ExpiresAt: &expires}).Error; err != nil {
+			return err
+		}
+		if err := ReconcileAccountWindowAnchor(tx, current.ID, now); err != nil {
+			return err
+		}
+		// Use raw SQL to confirm the row was actually updated.
+		var raw *time.Time
+		row := tx.Raw("SELECT window_started_at FROM quota_accounts WHERE id = ?", current.ID).Row()
+		if err := row.Scan(&raw); err != nil {
+			return err
+		}
+		t.Logf("[DEBUG raw sql] account=%d window_started_at=%v", current.ID, raw)
+		// GORM First reuses the same struct; use a fresh struct here.
+		var fresh models.QuotaAccount
+		if err := tx.Raw("SELECT * FROM quota_accounts WHERE id = ?", current.ID).Scan(&fresh).Error; err != nil {
+			return err
+		}
+		current = fresh
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if current.WindowStartedAt != nil {
+		t.Fatalf("anchor not cleared on refill: %v", current.WindowStartedAt)
+	}
+}
+
+type mutableClock struct {
+	value time.Time
+}
+
+func (c *mutableClock) now() time.Time { return c.value }
+func (c *mutableClock) advance(d time.Duration) { c.value = c.value.Add(d) }
+
+func newClockedTestService(db *gorm.DB, clock *mutableClock) *Service {
+	configFile, err := os.CreateTemp("", "clocked-rclone-*.conf")
+	if err != nil {
+		panic(err)
+	}
+	if _, err := configFile.WriteString("[test]\n"); err != nil {
+		panic(err)
+	}
+	if err := configFile.Close(); err != nil {
+		panic(err)
+	}
+	configPath := configFile.Name()
+	return &Service{
+		DB: db,
+		Now: clock.now,
+		ConfigResolver: func(string) (string, error) { return configPath, nil },
+	}
+}

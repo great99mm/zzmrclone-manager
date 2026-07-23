@@ -373,6 +373,7 @@ func (s *Service) reserveAttempt(req PackReserveRequest, requestKey, fingerprint
 		if err := proactiveCoordinatorReserve(tx, models.DestinationScope(resolvedConfig, destinationPath), req.CoordinatorLeaseToken, transactionNow); err != nil {
 			return err
 		}
+		touchedAccounts := make(map[uint]struct{})
 		for _, remote := range remotes {
 			files := selected[remote]
 			if len(files) == 0 {
@@ -390,7 +391,7 @@ func (s *Service) reserveAttempt(req PackReserveRequest, requestKey, fingerprint
 				DestinationScope:        models.DestinationScope(resolvedConfig, destinationPath),
 				SourceRoot:              req.SourceRoot,
 				SourceRootDevice:        req.Snapshots[0].RootDevice,
-				SourceRootInode:         req.Snapshots[0].RootInode,
+				SourceRootInode:         req.Snapshots[0].RootDevice,
 				DestinationRemote:       remote,
 				TransferMode:            req.Task.TransferMode,
 				DestinationScopeVersion: 1,
@@ -427,6 +428,12 @@ func (s *Service) reserveAttempt(req PackReserveRequest, requestKey, fingerprint
 				}
 			}
 			returnResult.Batches = append(returnResult.Batches, batch)
+			touchedAccounts[account.ID] = struct{}{}
+		}
+		for accountID := range touchedAccounts {
+			if err := ReconcileAccountWindowAnchor(tx, accountID, transactionNow); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -683,6 +690,9 @@ func (s *Service) releaseHeldAttempt(batchID uint) error {
 		if result.RowsAffected != 1 {
 			return fmt.Errorf("batch %d changed while releasing", batchID)
 		}
+		if err := ReconcileAccountWindowAnchor(tx, batch.QuotaAccountID, transactionNow); err != nil {
+			return err
+		}
 		return nil
 	})
 }
@@ -897,6 +907,9 @@ func cleanExpiredHeld(tx *gorm.DB, accountIDs []uint, now time.Time) error {
 		if result.RowsAffected != 1 {
 			return fmt.Errorf("batch %d changed during expiry cleanup", batchID)
 		}
+		if err := ReconcileAccountWindowAnchor(tx, batch.QuotaAccountID, now); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -995,4 +1008,47 @@ func max(a, b int) int {
 func isBusyError(err error) bool {
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "database is locked") || strings.Contains(message, "database table is locked") || strings.Contains(message, "busy")
+}
+
+// ReconcileAccountWindowAnchor keeps QuotaAccount.WindowStartedAt aligned
+// with the current reservation usage. Call this from every
+// reservation-mutating transaction so the "first exhaustion" anchor is
+// set the moment an account hits zero and cleared again on refill.
+//   - usage > 0 -> clear WindowStartedAt (a refill happened; the next 24h
+//     window restarts when the account is fully used again).
+//   - usage == 0 and WindowStartedAt == nil -> set WindowStartedAt to now
+//     (first moment the account reached zero).
+//   - usage == 0 and WindowStartedAt != nil -> keep (still awaiting reset).
+//
+// The "next reset" timestamp is computed in the dispatcher as
+// WindowStartedAt + WindowSeconds.
+func ReconcileAccountWindowAnchor(tx *gorm.DB, accountID uint, now time.Time) error {
+	var account models.QuotaAccount
+	if err := tx.First(&account, accountID).Error; err != nil {
+		return err
+	}
+	usage, err := accountUsage(tx, []uint{accountID}, now)
+	if err != nil {
+		return err
+	}
+	current := usage[accountID]
+	switch {
+	case current > 0:
+		if account.WindowStartedAt == nil {
+			return nil
+		}
+		return tx.Model(&models.QuotaAccount{}).
+			Where("id = ?", accountID).
+			Update("window_started_at", nil).Error
+	case current == 0:
+		if account.WindowStartedAt != nil {
+			return nil
+		}
+		anchor := now
+		return tx.Model(&models.QuotaAccount{}).
+			Where("id = ?", accountID).
+			Update("window_started_at", anchor).Error
+	default:
+		return nil
+	}
 }

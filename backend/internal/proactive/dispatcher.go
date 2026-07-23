@@ -1521,9 +1521,15 @@ func (d *Dispatcher) computeWake(keys map[string]string, now time.Time) (*time.T
 	}
 	var wake *time.Time
 	for _, a := range accounts {
-		if a.WindowSeconds > 0 {
-			candidate := now.Add(time.Duration(a.WindowSeconds) * time.Second)
-			if wake == nil || candidate.Before(*wake) {
+		// The next quota reset is anchored to the first moment this account
+		// hit zero. WindowStartedAt is set by quota.ReconcileAccountWindowAnchor
+		// whenever usage transitions from positive to zero, and cleared again on
+		// refill. When the anchor is unknown (account has never been fully
+		// exhausted in this window) we leave wake nil for this account — the
+		// system has fresh quota and there is no need to pause.
+		if a.WindowStartedAt != nil && a.WindowSeconds > 0 {
+			candidate := a.WindowStartedAt.Add(time.Duration(a.WindowSeconds) * time.Second)
+			if candidate.After(now) && (wake == nil || candidate.Before(*wake)) {
 				v := candidate
 				wake = &v
 			}
@@ -1538,7 +1544,7 @@ func (d *Dispatcher) computeWake(keys map[string]string, now time.Time) (*time.T
 		return nil, err
 	}
 	for _, r := range reservations {
-		if r.ExpiresAt != nil && (wake == nil || r.ExpiresAt.Before(*wake)) {
+		if r.ExpiresAt != nil && r.ExpiresAt.After(now) && (wake == nil || r.ExpiresAt.Before(*wake)) {
 			v := *r.ExpiresAt
 			wake = &v
 		}

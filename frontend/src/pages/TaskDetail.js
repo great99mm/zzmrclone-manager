@@ -23,6 +23,7 @@ import {
 import { getTask, getTaskStatus, getProactiveStatus, resolveProactiveBatch, getTaskLogs, startTask, stopTask, pauseTask, cancelTask, dedupeTask, startProactiveManualMerge, closeProactiveUnknownMaintenance, deleteTask } from '../services/api';
 import { createWebSocket } from '../services/api';
 import toast from 'react-hot-toast';
+import { QuotaAccountBar, QuotaExhaustedNotice } from '../components/QuotaAccountBar';
 
 const parseRotationRemotes = (value) => {
   try {
@@ -1170,26 +1171,27 @@ const ProactiveQuotaPanel = ({ status, loading, error, onRetry, resolutionState,
             {accounts.length > 0 && (
               <div className="border border-gray-200 rounded-lg p-4">
                 <h3 className="text-sm font-semibold text-gray-900 mb-3">账号额度</h3>
-                <div className="space-y-2 max-h-48 overflow-auto">
+                <div className="space-y-3 max-h-72 overflow-auto">
                   {accounts.map((account, index) => (
-                    <div key={account.remote_name || index} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs min-w-0">
-                      <div className="min-w-0">
-                        <span className="font-medium text-gray-800 break-words">{account.remote_name || `账号 ${index + 1}`}</span>
-                        {account.budget_bytes == null || account.remaining_bytes == null ? (
-                          <span className="block text-amber-700 mt-0.5">未初始化 quota account</span>
-                        ) : account.enabled === false ? (
-                          <span className="block text-gray-500 mt-0.5">已禁用</span>
-                        ) : isFutureTimestamp(account.provider_blocked_until) ? (
-                          <span className="block text-red-700 mt-0.5">Provider 暂时阻断</span>
-                        ) : null}
-                      </div>
-                      {account.budget_bytes != null && account.remaining_bytes != null && (
-                        <div className="text-gray-600 sm:text-right whitespace-normal sm:whitespace-nowrap">
-                          已用 {formatBytes(account.used_bytes || 0)} · 预留 {formatBytes(account.active_reserved_bytes || 0)} · 剩余 {formatBytes(account.remaining_bytes || 0)} / {formatBytes(account.budget_bytes)}
+                    <div key={account.remote_name || index} className="space-y-1.5">
+                      <div className="flex flex-col sm:flex-row sm:items-baseline justify-between gap-2 text-xs min-w-0">
+                        <div className="min-w-0">
+                          <span className="font-medium text-gray-800 break-words">{account.remote_name || `账号 ${index + 1}`}</span>
+                          {account.budget_bytes == null || account.remaining_bytes == null ? (
+                            <span className="block text-amber-700 mt-0.5">未初始化 quota account</span>
+                          ) : account.enabled === false ? (
+                            <span className="block text-gray-500 mt-0.5">已禁用</span>
+                          ) : isFutureTimestamp(account.provider_blocked_until) ? (
+                            <span className="block text-red-700 mt-0.5">Provider 暂时阻断</span>
+                          ) : null}
                         </div>
-                      )}
+                      </div>
+                      <QuotaAccountBar account={account} />
                     </div>
                   ))}
+                </div>
+                <div className="mt-3">
+                  <QuotaExhaustedNotice status={status} />
                 </div>
               </div>
             )}

@@ -396,8 +396,13 @@ type QuotaAccount struct {
 	WindowSeconds        int        `json:"window_seconds" gorm:"default:86400"`
 	ProviderBlockedUntil *time.Time `json:"provider_blocked_until"`
 	Enabled              bool       `json:"enabled" gorm:"not null;default:true"`
-	CreatedAt            time.Time  `json:"created_at"`
-	UpdatedAt            time.Time  `json:"updated_at"`
+	// WindowStartedAt is anchored to the first moment the account's
+	// reservation usage reached zero. While non-nil, the next quota reset
+	// is WindowStartedAt + WindowSeconds. Cleared on refill so a fresh
+	// 24h cycle restarts on the next zero transition.
+	WindowStartedAt *time.Time `json:"window_started_at"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 type RotationQuotaOversize struct {

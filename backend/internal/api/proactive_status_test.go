@@ -576,3 +576,52 @@ func TestProactiveStatusDoesNotRequireCredentials(t *testing.T) {
 }
 
 func ptrTime(value time.Time) *time.Time { return &value }
+
+
+func TestProactiveStatusExposesWindowAnchorAndExhaustionFlag(t *testing.T) {
+	database := proactiveStatusTestDB(t)
+	configPath := filepath.Join(t.TempDir(), "anchor-rclone.conf")
+	if err := os.WriteFile(configPath, []byte("[remote]\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	task := models.Task{ID: 1, Enabled: true, TaskType: "rotation", RotationStrategy: "proactive_quota", RcloneConfig: configPath, RemoteDir: "/dest", RotationRemotes: `["remote"]`, RotationQuotaKeys: `{"remote":"anchor-key"}`}
+	if err := database.Create(&task).Error; err != nil {
+		t.Fatal(err)
+	}
+	exhausted := time.Now().Add(-30 * time.Minute)
+	account := models.QuotaAccount{QuotaKey: "anchor-key", RemoteName: "remote", ConfigIdentity: configPath, BudgetBytes: 100, WindowSeconds: 86400, Enabled: true, WindowStartedAt: &exhausted}
+	if err := database.Create(&account).Error; err != nil {
+		t.Fatal(err)
+	}
+	// Drain the budget to zero so "all_accounts_exhausted" reflects the
+	// user's intent (no more quota available today).
+	expires := time.Now().Add(time.Hour)
+	committedAt := time.Now().Add(-time.Minute)
+	if err := database.Create(&models.RotationQuotaBatch{TaskID: 1, QuotaAccountID: account.ID, DestinationScope: "scope", State: models.BatchStateSucceeded, RequestKey: "drain", OwnerToken: "o", ReservedBytes: 100, StartedAt: &committedAt, FinishedAt: &committedAt}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Create(&models.QuotaReservation{QuotaAccountID: account.ID, Bytes: 100, State: models.ReservationStateCommitted, ExpiresAt: &expires, ReservedAt: &committedAt, IdempotencyKey: "drain"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	code, body := callProactiveStatus(t, database, 1)
+	if code != http.StatusOK {
+		t.Fatalf("status failed: %d %#v", code, body)
+	}
+	if body["all_accounts_exhausted"] != true {
+		t.Fatalf("expected all_accounts_exhausted=true after full use, got %v", body["all_accounts_exhausted"])
+	}
+	if body["next_quota_reset_at"] == nil {
+		t.Fatalf("expected next_quota_reset_at, got nil")
+	}
+	accounts := body["accounts"].([]interface{})
+	if len(accounts) != 1 {
+		t.Fatalf("expected 1 account, got %d", len(accounts))
+	}
+	first := accounts[0].(map[string]interface{})
+	if first["window_started_at"] == nil {
+		t.Fatalf("expected window_started_at, got nil")
+	}
+	if first["next_reset_at"] == nil {
+		t.Fatalf("expected next_reset_at, got nil")
+	}
+}

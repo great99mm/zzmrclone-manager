@@ -849,3 +849,52 @@ func TestRecoveryInspectorFailureMarksStartedBatchUnknownWithoutReconcile(t *tes
 		t.Fatalf("recovery re-copied: %v", fake.calls)
 	}
 }
+
+func TestComputeWakeAnchoredToFirstExhaustion(t *testing.T) {
+	db := dispatcherDB(t)
+	if err := db.AutoMigrate(&models.QuotaAccount{}); err != nil {
+		t.Fatal(err)
+	}
+	exhaustedAt := time.Unix(500, 0)
+	anchor := models.QuotaAccount{QuotaKey: "drive", RemoteName: "drive", BudgetBytes: 100, WindowSeconds: 86400, Enabled: true, WindowStartedAt: &exhaustedAt}
+	if err := db.Create(&anchor).Error; err != nil {
+		t.Fatal(err)
+	}
+	other := models.QuotaAccount{QuotaKey: "team-1", RemoteName: "team-1", BudgetBytes: 100, WindowSeconds: 86400, Enabled: true}
+	if err := db.Create(&other).Error; err != nil {
+		t.Fatal(err)
+	}
+	d := &Dispatcher{DB: db, Now: func() time.Time { return time.Unix(1000, 0) }}
+	wake, err := d.computeWake(map[string]string{"drive": "drive", "team-1": "team-1"}, time.Unix(1000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wake == nil {
+		t.Fatal("expected wake anchored to first exhaustion")
+	}
+	expected := exhaustedAt.Add(24 * time.Hour)
+	if !wake.Equal(expected) {
+		t.Fatalf("wake = %v, want %v", wake.UTC(), expected.UTC())
+	}
+}
+
+func TestComputeWakeReturnsNilWhenNoAnchor(t *testing.T) {
+	db := dispatcherDB(t)
+	if err := db.AutoMigrate(&models.QuotaAccount{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.QuotaAccount{QuotaKey: "drive", RemoteName: "drive", BudgetBytes: 100, WindowSeconds: 86400, Enabled: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.QuotaAccount{QuotaKey: "team-1", RemoteName: "team-1", BudgetBytes: 100, WindowSeconds: 86400, Enabled: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+	d := &Dispatcher{DB: db, Now: func() time.Time { return time.Unix(1000, 0) }}
+	wake, err := d.computeWake(map[string]string{"drive": "drive", "team-1": "team-1"}, time.Unix(1000, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wake != nil {
+		t.Fatalf("expected nil wake when no anchor is set, got %v", wake)
+	}
+}
