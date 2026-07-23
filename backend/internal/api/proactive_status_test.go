@@ -2,9 +2,12 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +18,7 @@ import (
 	"rclone-manager/internal/auth"
 	"rclone-manager/internal/config"
 	"rclone-manager/internal/models"
+	"rclone-manager/internal/proactive"
 )
 
 func proactiveStatusTestDB(t *testing.T) *gorm.DB {
@@ -109,6 +113,85 @@ func TestProactiveStatusReturnsAccountsBatchesAndReservations(t *testing.T) {
 	if batches[0].(map[string]interface{})["completion_evidence"] != models.CompletionEvidenceRemote {
 		t.Fatalf("completion evidence missing from status: %#v", batches[0])
 	}
+}
+
+func TestProactiveStatusExposesLegacyRecoveryAndCloseWakesScope(t *testing.T) {
+	database := proactiveStatusTestDB(t)
+	if err := database.AutoMigrate(&models.DestinationScopeMaintenance{}, &models.DestinationScopeCoordinator{}); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "rclone.conf")
+	task := models.Task{ID: 1, TaskType: "rotation", RotationStrategy: "proactive_quota", RcloneConfig: configPath, RemoteDir: "/dest", RotationRemotes: `["remote"]`, Enabled: true}
+	if err := database.Create(&task).Error; err != nil {
+		t.Fatal(err)
+	}
+	legacyToken := "0123456789abcdef0123456789abcdef0123456789abcdef"
+	legacyError := fmt.Sprintf("pid=77 config=%s token=%s legacy-secret", configPath, legacyToken)
+	epoch := models.DestinationScopeMaintenance{DestinationScope: models.DestinationScope(configPath, "/dest"), Epoch: 4, OwnerTaskID: task.ID, FirstRemote: "remote", RemoteDir: "/dest", ResolvedConfigPath: configPath, ResolvedConfigIdentity: configPath, State: models.MaintenanceStateExhausted, DedupeState: models.DedupeStateUnknown, Reason: models.MaintenanceReasonQuotaExhaustion, Revision: 9, ProcessID: 77, ProcessStartToken: legacyToken, LastError: legacyError}
+	if err := database.Create(&epoch).Error; err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := &proactive.Dispatcher{DB: database, Inspector: routeDeadInspector{}, ConfigResolver: func(string) (string, error) { return configPath, nil }, Now: func() time.Time { return time.Unix(100, 0) }}
+	previousDB, previousDispatcher := db, proactiveDispatcher
+	db, proactiveDispatcher = database, dispatcher
+	defer func() { db, proactiveDispatcher = previousDB, previousDispatcher }()
+
+	code, body := callProactiveStatus(t, database, task.ID)
+	if code != http.StatusOK {
+		t.Fatalf("status=%d body=%#v", code, body)
+	}
+	maintenance := body["maintenance"].(map[string]interface{})
+	if maintenance["blocker"] != "legacy_maintenance_recovery" || maintenance["manual_merge_available"] != false {
+		t.Fatalf("legacy blocker projection=%#v", maintenance)
+	}
+	recovery := maintenance["legacy_recovery"].(map[string]interface{})
+	if recovery["epoch_id"] != float64(epoch.ID) || recovery["reason"] != models.MaintenanceReasonQuotaExhaustion || recovery["revision"] != float64(9) || recovery["process_identity_available"] != true {
+		t.Fatalf("legacy recovery projection=%#v", recovery)
+	}
+	if _, exposed := recovery["process_id"]; exposed {
+		t.Fatalf("legacy recovery exposed process id: %#v", recovery)
+	}
+	encoded := string(mustJSON(t, body))
+	if strings.Contains(encoded, `"process_id":`) {
+		t.Fatalf("legacy recovery leaked process id field: %s", encoded)
+	}
+	for _, secret := range []string{legacyToken, configPath, legacyError, "legacy-secret"} {
+		if strings.Contains(encoded, secret) {
+			t.Fatalf("legacy recovery leaked %q: %s", secret, encoded)
+		}
+	}
+	closeRecorder := httptest.NewRecorder()
+	closeContext, _ := gin.CreateTestContext(closeRecorder)
+	closeContext.Request = httptest.NewRequest(http.MethodPost, "/api/proactive-maintenance/1/close-unknown", strings.NewReader(`{"reason":"quota_exhaustion","expected_state":"unknown","expected_revision":9}`))
+	closeContext.Request.Header.Set("Content-Type", "application/json")
+	closeContext.Params = gin.Params{{Key: "id", Value: strconv.FormatUint(uint64(epoch.ID), 10)}}
+	closeProactiveUnknownMaintenance(closeContext)
+	if closeRecorder.Code != http.StatusOK {
+		t.Fatalf("legacy close endpoint status=%d body=%s", closeRecorder.Code, closeRecorder.Body.String())
+	}
+	var storedEpoch models.DestinationScopeMaintenance
+	if err := database.First(&storedEpoch, epoch.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if storedEpoch.State != models.MaintenanceStateClosed || storedEpoch.DedupeState != models.DedupeStateFailed {
+		t.Fatalf("legacy close=%#v", storedEpoch)
+	}
+	var storedTask models.Task
+	if err := database.First(&storedTask, task.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !storedTask.RotationRescanPending || storedTask.RotationQuotaWakeAt == nil {
+		t.Fatalf("legacy close did not wake scope: %#v", storedTask)
+	}
+}
+
+func mustJSON(t *testing.T, value interface{}) []byte {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }
 
 func TestProactiveStatusResolvesDefaultAliasFromPersistedAccount(t *testing.T) {
@@ -295,6 +378,84 @@ func TestProactiveStatusQueueUsesBatchLifecycleOnce(t *testing.T) {
 		actual := queue[category].(map[string]interface{})["bytes"]
 		if actual != bytes {
 			t.Fatalf("queue.%s.bytes = %v, want %v", category, actual, bytes)
+		}
+	}
+}
+
+func TestProactiveManualAvailabilityMatchesAccountWideBlocker(t *testing.T) {
+	database := proactiveStatusTestDB(t)
+	if err := database.AutoMigrate(&models.QuotaAccount{}, &models.RotationQuotaBatch{}, &models.RotationQuotaBatchFile{}, &models.QuotaReservation{}, &models.DestinationScopeCoordinator{}, &models.DestinationScopeMaintenance{}); err != nil {
+		t.Fatal(err)
+	}
+	account := models.QuotaAccount{QuotaKey: "shared-status", RemoteName: "remote", BudgetBytes: 100, WindowSeconds: 60, Enabled: true}
+	if err := database.Create(&account).Error; err != nil {
+		t.Fatal(err)
+	}
+	other := models.RotationQuotaBatch{TaskID: 99, QuotaAccountID: account.ID, DestinationScope: models.DestinationScope("/config", "/other"), State: models.BatchStateUnknown, RequestKey: "status-other", OwnerToken: "status-owner"}
+	if err := database.Create(&other).Error; err != nil {
+		t.Fatal(err)
+	}
+	previous := db
+	db = database
+	defer func() { db = previous }()
+	available, blocker := proactiveManualMergeAvailability(models.DestinationScope("/config", "/dest"), models.DestinationScopeMaintenance{}, map[string]string{"remote": "shared-status"})
+	if available || blocker != "account_active_elsewhere" {
+		t.Fatalf("status blocker parity = available=%v blocker=%q", available, blocker)
+	}
+}
+
+func TestProactiveStatusProjectsBlockerAndRedactsMaintenanceError(t *testing.T) {
+	database := proactiveStatusTestDB(t)
+	if err := database.AutoMigrate(&models.DestinationScopeMaintenance{}, &models.DestinationScopeCoordinator{}); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "manual-rclone.conf")
+	if err := os.WriteFile(configPath, []byte("[remote]\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	task := models.Task{ID: 1, Enabled: true, TaskType: "rotation", RotationStrategy: "proactive_quota", RcloneConfig: configPath, RemoteDir: "/dest", RotationRemotes: `["remote"]`, RotationQuotaKeys: `{"remote":"status-shared"}`}
+	if err := database.Create(&task).Error; err != nil {
+		t.Fatal(err)
+	}
+	account := models.QuotaAccount{QuotaKey: "status-shared", RemoteName: "remote", BudgetBytes: 100, WindowSeconds: 60, Enabled: true}
+	if err := database.Create(&account).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Create(&models.RotationQuotaBatch{TaskID: 99, QuotaAccountID: account.ID, DestinationScope: models.DestinationScope(configPath, "/other"), State: models.BatchStateUnknown, RequestKey: "status-blocker", OwnerToken: "status-owner"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	code, body := callProactiveStatus(t, database, 1)
+	if code != http.StatusOK || body["maintenance"].(map[string]interface{})["blocker"] != "account_active_elsewhere" {
+		t.Fatalf("status account blocker parity: code=%d body=%#v", code, body)
+	}
+	secretToken := "0123456789abcdef0123456789abcdef0123456789abcdef"
+	if err := database.Create(&models.DestinationScopeMaintenance{DestinationScope: models.DestinationScope(configPath, "/dest"), Epoch: 1, OwnerTaskID: 1, FirstRemote: "remote", RemoteDir: "/dest", ResolvedConfigPath: configPath, ResolvedConfigIdentity: configPath, State: models.MaintenanceStateExhausted, DedupeState: models.DedupeStateUnknown, Reason: models.MaintenanceReasonManualMerge, LeaseToken: secretToken, ProcessID: 77, ProcessStartToken: secretToken, LastError: configPath + " " + secretToken}).Error; err != nil {
+		t.Fatal(err)
+	}
+	code, body = callProactiveStatus(t, database, 1)
+	if code != http.StatusOK {
+		t.Fatalf("status=%d body=%#v", code, body)
+	}
+	maintenance := body["maintenance"].(map[string]interface{})
+	if maintenance["blocker"] != "maintenance_epoch" || maintenance["manual_merge_available"] != false {
+		t.Fatalf("maintenance projection=%#v", maintenance)
+	}
+	if _, exposed := maintenance["capacity_wake"]; exposed {
+		t.Fatal("automatic capacity maintenance leaked into public status")
+	}
+	errorText := maintenance["error"].(string)
+	for _, secret := range []string{configPath, secretToken} {
+		if strings.Contains(errorText, secret) {
+			t.Fatalf("maintenance error leaked %q: %s", secret, errorText)
+		}
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{configPath, secretToken} {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatalf("status JSON leaked maintenance identity %q: %s", secret, encoded)
 		}
 	}
 }

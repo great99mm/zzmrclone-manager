@@ -66,7 +66,78 @@ const (
 	MoveCompletionEvidenceVersion    = 1
 	MoveResolutionResolving          = "resolving"
 	MoveResolutionFrozen             = "frozen"
+	ReserveClassNoFiles              = "no_files"
+	ReserveClassReserved             = "reserved"
+	ReserveClassBudgetExhausted      = "budget_exhausted"
+	ReserveClassProviderBlocked      = "provider_blocked"
+	ReserveClassDisabled             = "disabled"
+	ReserveClassTaskCeiling          = "task_ceiling"
+	ReserveClassOversize             = "oversize"
+	ReserveClassNoFit                = "no_fit"
+	ReserveClassActive               = "active"
+	ReserveClassAccountBlocked       = "account_blocked"
+	ReserveClassUnknown              = "unknown"
+	ReserveClassFailed               = "failed"
+	MaintenanceStateExhausted        = "exhausted"
+	MaintenanceStateClaimed          = "claimed"
+	MaintenanceStateRunning          = "running"
+	MaintenanceStateSucceeded        = "succeeded"
+	MaintenanceStateFailed           = "failed"
+	MaintenanceStateUnknown          = "unknown"
+	MaintenanceStateClosed           = "closed"
+	MaintenanceReasonQuotaExhaustion = "quota_exhaustion"
+	MaintenanceReasonManualMerge     = "manual_merge"
+	DedupeStatePending               = "pending"
+	DedupeStateRunning               = "running"
+	DedupeStateSucceeded             = "succeeded"
+	DedupeStateFailed                = "failed"
+	DedupeStateUnknown               = "unknown"
+	DedupeStateClaimed               = "claimed"
 )
+
+type DestinationScopeMaintenance struct {
+	ID                     uint       `json:"id" gorm:"primaryKey"`
+	DestinationScope       string     `json:"destination_scope" gorm:"uniqueIndex:uq_scope_maintenance_epoch"`
+	Epoch                  int64      `json:"epoch" gorm:"uniqueIndex:uq_scope_maintenance_epoch"`
+	OwnerTaskID            uint       `json:"owner_task_id"`
+	FirstRemote            string     `json:"first_remote"`
+	RemoteDir              string     `json:"remote_dir"`
+	Reason                 string     `json:"reason" gorm:"not null;default:'quota_exhaustion';check:maintenance_reason_valid,reason IN ('quota_exhaustion','manual_merge')"`
+	ResolvedConfigPath     string     `json:"-"`
+	ResolvedConfigIdentity string     `json:"-"`
+	CapacityWake           *time.Time `json:"-"`
+	State                  string     `json:"state"`
+	DedupeState            string     `json:"-"`
+	LeaseToken             string     `json:"-"`
+	LeaseUntil             *time.Time `json:"-"`
+	ProcessID              int        `json:"-"`
+	ProcessStartToken      string     `json:"-"`
+	StartedAt              *time.Time `json:"started_at"`
+	FinishedAt             *time.Time `json:"finished_at"`
+	ExitCode               *int       `json:"exit_code"`
+	Result                 string     `json:"result"`
+	LastError              string     `json:"last_error"`
+	CreatedAt              time.Time  `json:"created_at"`
+	UpdatedAt              time.Time  `json:"updated_at"`
+	Revision               int64      `json:"revision" gorm:"not null;default:1"`
+}
+
+// DestinationScopeCoordinator serializes scanner dispatch, manual maintenance
+// claims, and the final quota reservation decision for one destination scope.
+type DestinationScopeCoordinator struct {
+	ID                 uint       `json:"id" gorm:"primaryKey"`
+	DestinationScope   string     `json:"destination_scope" gorm:"uniqueIndex"`
+	ScannerLeaseToken  string     `json:"-"`
+	ScannerLeaseUntil  *time.Time `json:"-"`
+	MaintenanceEpochID uint       `json:"maintenance_epoch_id"`
+	Revision           int64      `json:"revision" gorm:"not null;default:1"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
+func IsKnownMaintenanceReason(reason string) bool {
+	return reason == MaintenanceReasonQuotaExhaustion || reason == MaintenanceReasonManualMerge
+}
 
 func IsKnownBatchState(state string) bool {
 	switch state {
@@ -134,7 +205,7 @@ type Task struct {
 	BindIP       string `json:"bind_ip"`
 	RcloneConfig string `json:"rclone_config"`
 	Enabled      bool   `json:"enabled" gorm:"default:true"`
-	AutoDedupe   bool   `json:"auto_dedupe" gorm:"default:true"`
+	AutoDedupe   bool   `json:"auto_dedupe" gorm:"default:false"`
 	MinAge       string `json:"min_age" gorm:"default:10s"`
 	// drive-chunk-size: 256M -> 64M.  Still fast, 4x less RAM per transfer.
 	DriveChunkSize string `json:"drive_chunk_size" gorm:"default:64M"`

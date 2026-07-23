@@ -24,12 +24,17 @@ type rootIdentity struct {
 }
 
 func (s Scanner) Scan(root string, minAge time.Duration) ([]LocalSnapshot, error) {
+	outcome, err := s.ScanWithOutcome(root, minAge)
+	return outcome.Snapshots, err
+}
+
+func (s Scanner) ScanWithOutcome(root string, minAge time.Duration) (ScanOutcome, error) {
 	if !filepath.IsAbs(root) {
-		return nil, fmt.Errorf("source root must be absolute: %q", root)
+		return ScanOutcome{}, fmt.Errorf("source root must be absolute: %q", root)
 	}
 	rootFile, identity, err := openRoot(root)
 	if err != nil {
-		return nil, err
+		return ScanOutcome{}, err
 	}
 	defer rootFile.Close()
 
@@ -47,8 +52,9 @@ func (s Scanner) Scan(root string, minAge time.Duration) ([]LocalSnapshot, error
 	}
 
 	snapshots := make([]LocalSnapshot, 0)
-	if err := s.scanDirectory(rootFile, "", minAge, now, sleep, settle, identity, &snapshots); err != nil {
-		return nil, err
+	var nextEligibleAt *time.Time
+	if err := s.scanDirectory(rootFile, "", minAge, now, sleep, settle, identity, &snapshots, &nextEligibleAt); err != nil {
+		return ScanOutcome{}, err
 	}
 	if s.BeforeFinalValidation != nil {
 		s.BeforeFinalValidation()
@@ -58,11 +64,11 @@ func (s Scanner) Scan(root string, minAge time.Duration) ([]LocalSnapshot, error
 	// pathname and validate every returned name before exposing it.
 	boundRoot, boundIdentity, err := openRoot(root)
 	if err != nil {
-		return nil, fmt.Errorf("source root identity drift during scan: %w", err)
+		return ScanOutcome{}, fmt.Errorf("source root identity drift during scan: %w", err)
 	}
 	defer boundRoot.Close()
 	if boundIdentity != identity {
-		return nil, fmt.Errorf("source root identity drift during scan")
+		return ScanOutcome{}, fmt.Errorf("source root identity drift during scan")
 	}
 	validated := snapshots[:0]
 	for _, snapshot := range snapshots {
@@ -71,7 +77,7 @@ func (s Scanner) Scan(root string, minAge time.Duration) ([]LocalSnapshot, error
 		}
 		ok, err := validateSnapshot(boundRoot, snapshot)
 		if err != nil {
-			return nil, err
+			return ScanOutcome{}, err
 		}
 		if ok {
 			validated = append(validated, snapshot)
@@ -81,14 +87,14 @@ func (s Scanner) Scan(root string, minAge time.Duration) ([]LocalSnapshot, error
 	// pointing at the old tree. Reopen the pathname once more before return.
 	finalRoot, finalIdentity, err := openRoot(root)
 	if err != nil {
-		return nil, fmt.Errorf("source root identity drift during scan: %w", err)
+		return ScanOutcome{}, fmt.Errorf("source root identity drift during scan: %w", err)
 	}
 	_ = finalRoot.Close()
 	if finalIdentity != identity {
-		return nil, fmt.Errorf("source root identity drift during scan")
+		return ScanOutcome{}, fmt.Errorf("source root identity drift during scan")
 	}
 	sort.Slice(validated, func(i, j int) bool { return validated[i].RelativePath < validated[j].RelativePath })
-	return validated, nil
+	return ScanOutcome{Snapshots: validated, NextEligibleAt: nextEligibleAt}, nil
 }
 
 func openRoot(root string) (*os.File, rootIdentity, error) {
@@ -137,7 +143,7 @@ func rootComponents(root string) []string {
 	return strings.Split(strings.TrimPrefix(clean, string(filepath.Separator)), string(filepath.Separator))
 }
 
-func (s Scanner) scanDirectory(dir *os.File, prefix string, minAge time.Duration, now func() time.Time, sleep func(time.Duration), settle time.Duration, identity rootIdentity, out *[]LocalSnapshot) error {
+func (s Scanner) scanDirectory(dir *os.File, prefix string, minAge time.Duration, now func() time.Time, sleep func(time.Duration), settle time.Duration, identity rootIdentity, out *[]LocalSnapshot, nextEligibleAt **time.Time) error {
 	for {
 		entries, readErr := dir.ReadDir(directoryBatchSize)
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
@@ -159,7 +165,7 @@ func (s Scanner) scanDirectory(dir *os.File, prefix string, minAge time.Duration
 				return err
 			}
 			if kind == directoryObject {
-				err = s.scanDirectory(childDir, relative, minAge, now, sleep, settle, identity, out)
+				err = s.scanDirectory(childDir, relative, minAge, now, sleep, settle, identity, out, nextEligibleAt)
 				_ = childDir.Close()
 				if err != nil {
 					return err
@@ -183,7 +189,14 @@ func (s Scanner) scanDirectory(dir *os.File, prefix string, minAge time.Duration
 			if err != nil {
 				return err
 			}
-			if !ok || first != second || now().Sub(time.Unix(0, second.mtimeNS)) < minAge {
+			if !ok || first != second {
+				continue
+			}
+			if now().Sub(time.Unix(0, second.mtimeNS)) < minAge {
+				candidate := time.Unix(0, second.mtimeNS).Add(minAge)
+				if *nextEligibleAt == nil || candidate.Before(**nextEligibleAt) {
+					*nextEligibleAt = &candidate
+				}
 				continue
 			}
 			*out = append(*out, LocalSnapshot{RelativePath: relative, SizeBytes: second.size, MtimeNS: second.mtimeNS, Device: second.device, Inode: second.inode, RootDevice: identity.device, RootInode: identity.inode, SnapshotKey: makeSnapshotKey(relative, second)})

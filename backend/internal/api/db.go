@@ -67,12 +67,17 @@ func InitDB(dataDir string) error {
 		&models.RotationQuotaBatch{},
 		&models.RotationQuotaBatchFile{},
 		&models.QuotaReservation{},
+		&models.DestinationScopeMaintenance{},
+		&models.DestinationScopeCoordinator{},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to migrate database: %v", err)
 	}
 	if err := validateQuotaLedgerMigration(db); err != nil {
 		return fmt.Errorf("quota ledger migration audit failed: %v", err)
+	}
+	if err := disableLegacyAutoDedupe(db); err != nil {
+		return fmt.Errorf("failed to disable legacy auto dedupe: %v", err)
 	}
 	if err := ensureMountConfigColumns(db); err != nil {
 		return fmt.Errorf("failed to migrate mount config columns: %v", err)
@@ -137,6 +142,10 @@ func InitDB(dataDir string) error {
 	}()
 
 	return nil
+}
+
+func disableLegacyAutoDedupe(database *gorm.DB) error {
+	return database.Model(&models.Task{}).Where("auto_dedupe = ?", true).Update("auto_dedupe", false).Error
 }
 
 func validateQuotaLedgerMigration(database *gorm.DB) error {
@@ -220,6 +229,57 @@ func validateQuotaLedgerMigration(database *gorm.DB) error {
 		}
 		if reservation.Bytes < 0 {
 			return fmt.Errorf("reservation %d has negative bytes", reservation.ID)
+		}
+	}
+	if err := validateMaintenanceMigration(database); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateMaintenanceMigration(database *gorm.DB) error {
+	if !database.Migrator().HasTable(&models.DestinationScopeMaintenance{}) {
+		return nil
+	}
+	// Rows created before Phase6 had no reason column. Backfill those legacy
+	// epochs before enforcing the audited enum for every persisted row.
+	if err := database.Model(&models.DestinationScopeMaintenance{}).Where("reason IS NULL OR trim(reason) = ''").Update("reason", models.MaintenanceReasonQuotaExhaustion).Error; err != nil {
+		return err
+	}
+	var rows []models.DestinationScopeMaintenance
+	if err := database.Order("destination_scope, epoch").Find(&rows).Error; err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "no such table") {
+			return nil
+		}
+		return err
+	}
+	last := map[string]int64{}
+	for _, row := range rows {
+		if row.DestinationScope == "" || row.Epoch <= 0 || row.OwnerTaskID == 0 || row.FirstRemote == "" || row.RemoteDir == "" || row.ResolvedConfigPath == "" || row.ResolvedConfigIdentity == "" {
+			return fmt.Errorf("maintenance epoch %d has incomplete immutable scope contract; manual reconciliation required", row.ID)
+		}
+		if !models.IsKnownMaintenanceReason(row.Reason) {
+			return fmt.Errorf("maintenance epoch %d has invalid reason %q; manual reconciliation required", row.ID, row.Reason)
+		}
+		if row.Revision <= 0 {
+			return fmt.Errorf("maintenance epoch %d has invalid revision; manual reconciliation required", row.ID)
+		}
+		if row.Epoch <= last[row.DestinationScope] {
+			return fmt.Errorf("maintenance scope %q has non-monotonic epoch", row.DestinationScope)
+		}
+		last[row.DestinationScope] = row.Epoch
+		switch row.State {
+		case models.MaintenanceStateExhausted, models.MaintenanceStateClosed:
+		default:
+			return fmt.Errorf("maintenance epoch %d has invalid state %q", row.ID, row.State)
+		}
+		switch row.DedupeState {
+		case "", models.DedupeStatePending, models.DedupeStateClaimed, models.DedupeStateRunning, models.DedupeStateSucceeded, models.DedupeStateFailed, models.DedupeStateUnknown:
+		default:
+			return fmt.Errorf("maintenance epoch %d has invalid dedupe state %q", row.ID, row.DedupeState)
+		}
+		if (row.DedupeState == models.DedupeStateClaimed || row.DedupeState == models.DedupeStateRunning) && row.LeaseToken == "" {
+			return fmt.Errorf("maintenance epoch %d lacks a lease", row.ID)
 		}
 	}
 	return nil

@@ -20,6 +20,9 @@ import (
 type LocalScanner interface {
 	Scan(string, time.Duration) ([]quota.LocalSnapshot, error)
 }
+type scannerOutcome interface {
+	ScanWithOutcome(string, time.Duration) (quota.ScanOutcome, error)
+}
 type ScannerFactory func(models.Task) LocalScanner
 type BatchExecutor interface {
 	RunBatch(context.Context, uint) error
@@ -42,20 +45,24 @@ type WakeScheduler interface{ ScheduleWake(uint, time.Time) }
 var ErrPendingSuperseded = errors.New("proactive rescan was superseded by a newer generation")
 
 type Dispatcher struct {
-	DB             *gorm.DB
-	Quota          *quota.Service
-	Executor       BatchExecutor
-	Scanner        ScannerFactory
-	Inspector      ProcessInspector
-	Wake           WakeScheduler
-	Now            func() time.Time
-	RetrySleep     func(time.Duration)
-	RetryDelay     time.Duration
-	RetryMax       int
-	ManagerDataDir string
-	MoveEnabled    func() bool
-	mu             sync.Mutex
-	active         map[uint]bool
+	DB                             *gorm.DB
+	Quota                          *quota.Service
+	Executor                       BatchExecutor
+	Scanner                        ScannerFactory
+	Inspector                      ProcessInspector
+	Wake                           WakeScheduler
+	Now                            func() time.Time
+	RetrySleep                     func(time.Duration)
+	RetryDelay                     time.Duration
+	RetryMax                       int
+	ManagerDataDir                 string
+	MoveEnabled                    func() bool
+	ScannerLeaseDuration           time.Duration
+	ScannerLeaseHeartbeat          time.Duration
+	ConfigResolver                 quota.ConfigResolver
+	maintenanceRecoveryBeforeClaim func(models.DestinationScopeMaintenance)
+	mu                             sync.Mutex
+	active                         map[uint]bool
 }
 
 func (d *Dispatcher) RequestScan(ctx context.Context, taskID uint) error {
@@ -90,6 +97,39 @@ func (d *Dispatcher) RequestScan(ctx context.Context, taskID uint) error {
 	if err := validateSourceOutsideManager(task.SourceDir, d.ManagerDataDir); err != nil {
 		return d.persistRequestError(taskID, err)
 	}
+	resolved := strings.TrimSpace(task.RcloneConfig)
+	if d.DB.Migrator().HasTable(&models.DestinationScopeMaintenance{}) {
+		if resolved == "" {
+			resolved = models.DefaultRcloneConfigPath
+		}
+		resolved, err = d.Quota.ResolveConfigPath(resolved)
+		if err != nil {
+			return d.persistRequestError(taskID, err)
+		}
+		paused, pauseErr := d.maintenancePaused(task, resolved, d.now())
+		if pauseErr != nil {
+			return d.persistRequestError(taskID, pauseErr)
+		}
+		if paused {
+			return nil
+		}
+	}
+	scope := destinationMaintenanceScope(task, resolved)
+	scannerLease, leaseErr := d.acquireScannerLease(scope, d.now())
+	if leaseErr != nil {
+		if errors.Is(leaseErr, ErrCoordinatorConflict) {
+			return d.persistRetryWake(taskID)
+		}
+		return d.persistRequestError(taskID, leaseErr)
+	}
+	heartbeat := d.startScannerLeaseHeartbeat(scope, scannerLease)
+	defer func() {
+		heartbeat.Stop()
+		_ = d.releaseScannerLease(scope, scannerLease)
+	}()
+	if err := heartbeat.Err(); err != nil {
+		return d.persistRequestError(taskID, err)
+	}
 	minAge, err := time.ParseDuration(strings.TrimSpace(task.MinAge))
 	if strings.TrimSpace(task.MinAge) == "" {
 		minAge = 0
@@ -98,21 +138,33 @@ func (d *Dispatcher) RequestScan(ctx context.Context, taskID uint) error {
 	if err != nil {
 		return d.persistRequestError(taskID, err)
 	}
+	if err := heartbeat.Err(); err != nil {
+		return d.persistRequestError(taskID, err)
+	}
 	scanner := LocalScanner(quota.Scanner{})
 	if d.Scanner != nil {
 		scanner = d.Scanner(task)
 	}
-	snapshots, err := scanner.Scan(task.SourceDir, minAge)
+	var snapshots []quota.LocalSnapshot
+	var nextEligibleAt *time.Time
+	if outcomeScanner, ok := scanner.(scannerOutcome); ok {
+		outcome, scanErr := outcomeScanner.ScanWithOutcome(task.SourceDir, minAge)
+		snapshots, nextEligibleAt, err = outcome.Snapshots, outcome.NextEligibleAt, scanErr
+	} else {
+		snapshots, err = scanner.Scan(task.SourceDir, minAge)
+	}
 	if err != nil {
+		return d.persistRequestError(taskID, err)
+	}
+	if err := heartbeat.Err(); err != nil {
 		return d.persistRequestError(taskID, err)
 	}
 	now := d.now()
-	resolved, err := d.Quota.ResolveConfigPath(task.RcloneConfig)
+	keys, err := completeQuotaKeys(task, resolved)
 	if err != nil {
 		return d.persistRequestError(taskID, err)
 	}
-	keys, err := completeQuotaKeys(task, resolved)
-	if err != nil {
+	if err := heartbeat.Err(); err != nil {
 		return d.persistRequestError(taskID, err)
 	}
 	if err := d.upsertAccounts(task, resolved, keys); err != nil {
@@ -125,18 +177,33 @@ func (d *Dispatcher) RequestScan(ctx context.Context, taskID uint) error {
 		return d.persistRequestError(taskID, err)
 	}
 	if len(activeKeys) > 0 {
+		if err := heartbeat.Err(); err != nil {
+			return d.persistRequestError(taskID, err)
+		}
 		for _, key := range activeKeys {
+			if err := heartbeat.Err(); err != nil {
+				return d.persistRequestError(taskID, err)
+			}
 			if err := d.executeGroup(ctx, taskID, key); err != nil {
 				wakeErr := d.persistScopeWake(resolved, task.RemoteDir, now)
 				return errors.Join(err, wakeErr, d.persistRequestError(taskID, err))
 			}
+		}
+		if err := heartbeat.Err(); err != nil {
+			return d.persistRequestError(taskID, err)
 		}
 		remaining, blocked, err := d.filterSnapshotKeys(taskID, snapshots)
 		if err != nil {
 			return d.persistRequestError(taskID, err)
 		}
 		if len(remaining) == 0 && !blocked {
+			if err := heartbeat.Err(); err != nil {
+				return d.persistRequestError(taskID, err)
+			}
 			return d.clearPendingOrWake(taskID, generation)
+		}
+		if err := heartbeat.Err(); err != nil {
+			return d.persistRequestError(taskID, err)
 		}
 		return d.persistScopeWake(resolved, task.RemoteDir, now)
 	}
@@ -145,26 +212,67 @@ func (d *Dispatcher) RequestScan(ctx context.Context, taskID uint) error {
 		return d.persistRequestError(taskID, err)
 	}
 	if len(eligible) == 0 {
+		if err := heartbeat.Err(); err != nil {
+			return d.persistRequestError(taskID, err)
+		}
+		if nextEligibleAt != nil {
+			return d.setEarliestWake(taskID, *nextEligibleAt)
+		}
 		if blocked {
 			return d.persistScopeWake(resolved, task.RemoteDir, now)
 		}
 		return d.clearPendingOrWake(taskID, generation)
 	}
 	requestKey := randomToken()
-	result, reserveErr := d.Quota.Reserve(quota.PackReserveRequest{Task: task, Snapshots: eligible, RequestIdempotencyKey: requestKey, SourceRoot: filepath.Clean(task.SourceDir), DestinationPath: task.RemoteDir})
+	if err := heartbeat.Err(); err != nil {
+		return d.persistRequestError(taskID, err)
+	}
+	result, reserveErr := d.Quota.Reserve(quota.PackReserveRequest{Task: task, Snapshots: eligible, RequestIdempotencyKey: requestKey, SourceRoot: filepath.Clean(task.SourceDir), DestinationPath: task.RemoteDir, CoordinatorLeaseToken: scannerLease})
 	if reserveErr != nil {
+		if heartbeatErr := heartbeat.Err(); heartbeatErr != nil {
+			return d.persistRequestError(taskID, heartbeatErr)
+		}
 		wakeErr := d.persistScopeWake(resolved, task.RemoteDir, now)
 		return errors.Join(reserveErr, wakeErr, d.persistRequestError(taskID, reserveErr))
+	}
+	if err := heartbeat.Err(); err != nil {
+		return d.persistRequestError(taskID, err)
+	}
+	if result.Classification == models.ReserveClassAccountBlocked {
+		if err := heartbeat.Err(); err != nil {
+			return d.persistRequestError(taskID, err)
+		}
+		blockerErr := errors.New("quota account blocked by active or unknown work in another destination scope")
+		if err := d.persistPendingState(task, keys, result.Pending, now, generation, false); err != nil {
+			return d.persistRequestError(taskID, err)
+		}
+		if err := d.setTaskError(taskID, blockerErr); err != nil {
+			return err
+		}
+		wake := now.Add(time.Minute)
+		if result.RetryAt != nil && result.RetryAt.After(now) {
+			wake = *result.RetryAt
+		}
+		return d.setRetryWake(taskID, wake)
+	}
+	if err := heartbeat.Err(); err != nil {
+		return d.persistRequestError(taskID, err)
 	}
 	if err := d.updateTaskRetry("id = ?", []interface{}{taskID}, map[string]interface{}{"rotation_last_scan_at": now, "last_run": now, "last_error": ""}); err != nil {
 		return d.persistRequestError(taskID, err)
 	}
 	if len(result.Pending) > 0 {
+		if err := heartbeat.Err(); err != nil {
+			return d.persistRequestError(taskID, err)
+		}
 		if err := d.persistPendingState(task, keys, result.Pending, now, generation, len(result.Batches) == 0); err != nil {
 			return d.persistRequestError(taskID, err)
 		}
 	}
 	if len(result.Batches) == 0 {
+		if err := heartbeat.Err(); err != nil {
+			return d.persistRequestError(taskID, err)
+		}
 		if len(result.Pending) == 0 {
 			return d.clearPendingOrWake(taskID, generation)
 		} else {
@@ -176,16 +284,25 @@ func (d *Dispatcher) RequestScan(ctx context.Context, taskID uint) error {
 		return errors.Join(err, wakeErr, d.persistRequestError(taskID, err))
 	}
 	if len(result.Pending) == 0 && d.groupTerminal(taskID, requestKey) {
+		if err := heartbeat.Err(); err != nil {
+			return d.persistRequestError(taskID, err)
+		}
 		if err := d.persistScopeWake(resolved, task.RemoteDir, now); err != nil {
 			return err
 		}
 		return d.clearPendingOrWake(taskID, generation)
 	} else {
+		if err := heartbeat.Err(); err != nil {
+			return d.persistRequestError(taskID, err)
+		}
 		return d.persistWake(taskID, keys, now)
 	}
 }
 
 func (d *Dispatcher) Recover(ctx context.Context) error {
+	if err := d.recoverMaintenanceDedupe(ctx, true); err != nil {
+		return err
+	}
 	var tasks []models.Task
 	if err := d.DB.Where("enabled = ? AND task_type = ? AND rotation_strategy = ?", true, "rotation", "proactive_quota").Find(&tasks).Error; err != nil {
 		return err
@@ -326,6 +443,220 @@ func (d *Dispatcher) Recover(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (d *Dispatcher) recoverMaintenanceDedupe(ctx context.Context, force bool) error {
+	if !d.DB.Migrator().HasTable(&models.DestinationScopeMaintenance{}) {
+		return nil
+	}
+	if force {
+		var pending []models.DestinationScopeMaintenance
+		if err := d.DB.Where("reason = ? AND state = ? AND dedupe_state IN ?", models.MaintenanceReasonQuotaExhaustion, models.MaintenanceStateExhausted, []string{"", models.DedupeStatePending}).Find(&pending).Error; err != nil {
+			return err
+		}
+		for _, row := range pending {
+			if err := d.closeRecoveredLegacyQuota(row, "legacy quota exhaustion epoch was stopped before migration"); err != nil {
+				return err
+			}
+		}
+	}
+	var rows []models.DestinationScopeMaintenance
+	query := d.DB.Where("dedupe_state IN ?", []string{models.DedupeStateClaimed, models.DedupeStateRunning})
+	if !force {
+		query = query.Where("lease_until IS NULL OR lease_until <= ?", d.now())
+	}
+	if err := query.Find(&rows).Error; err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "no such table") {
+			return nil
+		}
+		return err
+	}
+	controller, _ := d.Inspector.(ProcessController)
+	for _, row := range rows {
+		recoveryNow := d.now()
+		if !force && (row.LeaseUntil == nil || row.LeaseUntil.After(recoveryNow)) {
+			continue
+		}
+		if d.maintenanceRecoveryBeforeClaim != nil {
+			d.maintenanceRecoveryBeforeClaim(row)
+		}
+		// Inspect before taking a force-recovery lease. A future lease may still
+		// belong to a live server; the exact lease CAS below protects that owner
+		// from a concurrent heartbeat between inspection and takeover.
+		hasProcess := row.ProcessID > 0 && row.ProcessStartToken != ""
+		if hasProcess && d.Inspector != nil {
+			if _, inspectErr := d.Inspector.Inspect(row.ProcessID, row.ProcessStartToken); inspectErr != nil {
+				// The owned recovery below records this ambiguity as unknown.
+			}
+		}
+		recoveryToken := randomToken()
+		recoveryUntil := recoveryNow.Add(2 * time.Minute)
+		claim := d.DB.Model(&models.DestinationScopeMaintenance{}).Where("id = ? AND state = ? AND dedupe_state = ? AND lease_token = ?", row.ID, models.MaintenanceStateExhausted, row.DedupeState, row.LeaseToken)
+		if row.LeaseUntil == nil {
+			claim = claim.Where("lease_until IS NULL")
+		} else {
+			claim = claim.Where("lease_until = ?", *row.LeaseUntil)
+			if !force {
+				claim = claim.Where("lease_until <= ?", recoveryNow)
+			}
+		}
+		claim = claim.Updates(map[string]interface{}{"lease_token": recoveryToken, "lease_until": recoveryUntil})
+		if claim.Error != nil {
+			return claim.Error
+		}
+		if claim.RowsAffected != 1 {
+			continue
+		}
+		row.LeaseToken = recoveryToken
+		row.LeaseUntil = &recoveryUntil
+		if row.DedupeState == models.DedupeStateClaimed && !hasProcess {
+			if row.Reason == models.MaintenanceReasonManualMerge {
+				if err := d.closeRecoveredManual(row, recoveryToken, recoveryUntil, []string{models.DedupeStateClaimed}, "manual merge claim interrupted before process start"); err != nil {
+					return err
+				}
+				continue
+			}
+			if row.Reason == models.MaintenanceReasonQuotaExhaustion {
+				if err := d.closeRecoveredLegacyQuota(row, "legacy quota exhaustion claim had no process"); err != nil {
+					return err
+				}
+				continue
+			}
+			result := d.DB.Model(&models.DestinationScopeMaintenance{}).Where("id = ? AND state = ? AND dedupe_state = ? AND lease_token = ? AND lease_until = ?", row.ID, models.MaintenanceStateExhausted, row.DedupeState, recoveryToken, recoveryUntil).Updates(map[string]interface{}{"dedupe_state": models.DedupeStateFailed, "result": models.DedupeStateFailed, "last_error": "dedupe claim interrupted before process start"})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				continue
+			}
+			continue
+		}
+		if row.Reason == models.MaintenanceReasonQuotaExhaustion && hasProcess && d.Inspector != nil {
+			if !d.maintenanceRecoveryOwned(row.ID, row.DedupeState, recoveryToken, recoveryUntil) {
+				continue
+			}
+			status, inspectErr := d.Inspector.Inspect(row.ProcessID, row.ProcessStartToken)
+			if inspectErr == nil && status.Confirmed && !status.Alive {
+				if err := d.closeRecoveredLegacyQuota(row, "legacy quota exhaustion process was verified stopped"); err != nil {
+					return err
+				}
+				continue
+			}
+			if inspectErr == nil && status.Confirmed && status.Alive && controller != nil {
+				if !d.maintenanceRecoveryOwned(row.ID, row.DedupeState, recoveryToken, recoveryUntil) {
+					continue
+				}
+				if stopErr := controller.StopVerified(row.ProcessID, row.ProcessStartToken); stopErr == nil {
+					status, inspectErr = d.Inspector.Inspect(row.ProcessID, row.ProcessStartToken)
+					if inspectErr == nil && status.Confirmed && !status.Alive {
+						if err := d.closeRecoveredLegacyQuota(row, "legacy quota exhaustion process was stopped and verified dead"); err != nil {
+							return err
+						}
+						continue
+					}
+				} else {
+					inspectErr = stopErr
+				}
+			}
+			message := "legacy quota exhaustion process became ambiguous during recovery"
+			if inspectErr == nil && status.Confirmed && status.Alive {
+				message = "legacy quota exhaustion process is still alive; operator resolution required"
+			} else if inspectErr != nil {
+				message = inspectErr.Error()
+			}
+			result := d.DB.Model(&models.DestinationScopeMaintenance{}).Where("id = ? AND state = ? AND dedupe_state = ? AND lease_token = ? AND lease_until = ?", row.ID, models.MaintenanceStateExhausted, row.DedupeState, recoveryToken, recoveryUntil).Updates(map[string]interface{}{"dedupe_state": models.DedupeStateUnknown, "result": models.DedupeStateUnknown, "last_error": message})
+			if result.Error != nil {
+				return result.Error
+			}
+			continue
+		}
+		if controller == nil || !hasProcess || d.Inspector == nil {
+			result := d.DB.Model(&models.DestinationScopeMaintenance{}).Where("id = ? AND state = ? AND dedupe_state = ? AND lease_token = ? AND lease_until = ?", row.ID, models.MaintenanceStateExhausted, row.DedupeState, recoveryToken, recoveryUntil).Updates(map[string]interface{}{"dedupe_state": models.DedupeStateUnknown, "result": models.DedupeStateUnknown, "last_error": "dedupe process identity unavailable during recovery"})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				continue
+			}
+			continue
+		}
+		if !d.maintenanceRecoveryOwned(row.ID, row.DedupeState, recoveryToken, recoveryUntil) {
+			continue
+		}
+		status, err := d.Inspector.Inspect(row.ProcessID, row.ProcessStartToken)
+		knownDead := err == nil && status.Confirmed && !status.Alive
+		if err == nil && status.Confirmed && status.Alive {
+			if !d.maintenanceRecoveryOwned(row.ID, row.DedupeState, recoveryToken, recoveryUntil) {
+				continue
+			}
+			if stopErr := controller.StopVerified(row.ProcessID, row.ProcessStartToken); stopErr != nil {
+				err = stopErr
+			} else {
+				status, err = d.Inspector.Inspect(row.ProcessID, row.ProcessStartToken)
+				if err == nil && (!status.Confirmed || status.Alive) {
+					err = errors.New("dedupe process remained live after recovery stop")
+				} else if err == nil {
+					knownDead = true
+				}
+			}
+		}
+		if row.Reason == models.MaintenanceReasonManualMerge && knownDead && d.maintenanceRecoveryOwned(row.ID, row.DedupeState, recoveryToken, recoveryUntil) {
+			if err := d.closeRecoveredManual(row, recoveryToken, recoveryUntil, []string{row.DedupeState}, "manual merge process was verified dead during recovery"); err != nil {
+				return err
+			}
+			continue
+		}
+		message := "dedupe process became ambiguous during recovery"
+		if err != nil {
+			message = err.Error()
+		}
+		result := d.DB.Model(&models.DestinationScopeMaintenance{}).Where("id = ? AND state = ? AND dedupe_state = ? AND lease_token = ? AND lease_until = ?", row.ID, models.MaintenanceStateExhausted, row.DedupeState, recoveryToken, recoveryUntil).Updates(map[string]interface{}{"dedupe_state": models.DedupeStateUnknown, "result": models.DedupeStateUnknown, "last_error": message})
+		if result.Error != nil {
+			return result.Error
+		}
+	}
+	_ = ctx
+	return nil
+}
+
+func (d *Dispatcher) closeRecoveredLegacyQuota(row models.DestinationScopeMaintenance, message string) error {
+	now := d.now()
+	return d.DB.Transaction(func(tx *gorm.DB) error {
+		query := tx.Model(&models.DestinationScopeMaintenance{}).
+			Where("id = ? AND reason = ? AND state = ? AND dedupe_state IN ? AND lease_token = ?", row.ID, models.MaintenanceReasonQuotaExhaustion, models.MaintenanceStateExhausted, []string{"", models.DedupeStatePending, models.DedupeStateClaimed, models.DedupeStateRunning}, row.LeaseToken)
+		if row.LeaseUntil == nil {
+			query = query.Where("lease_until IS NULL")
+		} else {
+			query = query.Where("lease_until = ?", *row.LeaseUntil)
+		}
+		result := query.Updates(map[string]interface{}{"state": models.MaintenanceStateClosed, "dedupe_state": models.DedupeStateFailed, "result": models.DedupeStateFailed, "finished_at": now, "lease_token": "", "lease_until": nil, "revision": gorm.Expr("revision + 1"), "last_error": redactMaintenanceError(message, row)})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return nil
+		}
+		if err := d.wakeResolvedScopeTasks(tx, row.DestinationScope, now); err != nil {
+			return err
+		}
+		var coordinator models.DestinationScopeCoordinator
+		if err := tx.Where("destination_scope = ?", row.DestinationScope).First(&coordinator).Error; err == nil {
+			if err := tx.Model(&coordinator).Where("maintenance_epoch_id = ?", row.ID).Updates(map[string]interface{}{"maintenance_epoch_id": 0, "revision": gorm.Expr("revision + 1")}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (d *Dispatcher) maintenanceRecoveryOwned(id uint, state, token string, until time.Time) bool {
+	var count int64
+	if err := d.DB.Model(&models.DestinationScopeMaintenance{}).
+		Where("id = ? AND state = ? AND dedupe_state = ? AND lease_token = ? AND lease_until = ?", id, models.MaintenanceStateExhausted, state, token, until).
+		Count(&count).Error; err != nil {
+		return false
+	}
+	return count == 1
 }
 
 func (d *Dispatcher) recoverDisabledMoveBatches(ctx context.Context, enabledTasks []models.Task) error {
@@ -1027,6 +1358,14 @@ func (d *Dispatcher) setEarliestWake(id uint, candidate time.Time) error {
 	}
 	return errors.New("wake update retries exhausted")
 }
+
+func (d *Dispatcher) setRetryWake(id uint, candidate time.Time) error {
+	now := d.now()
+	if !candidate.After(now) {
+		candidate = now.Add(time.Minute)
+	}
+	return d.setEarliestWake(id, candidate)
+}
 func (d *Dispatcher) persistImmediateWake(id uint) error {
 	return d.setEarliestWake(id, d.now().Add(time.Minute))
 }
@@ -1182,6 +1521,13 @@ func (d *Dispatcher) computeWake(keys map[string]string, now time.Time) (*time.T
 	}
 	var wake *time.Time
 	for _, a := range accounts {
+		if a.WindowSeconds > 0 {
+			candidate := now.Add(time.Duration(a.WindowSeconds) * time.Second)
+			if wake == nil || candidate.Before(*wake) {
+				v := candidate
+				wake = &v
+			}
+		}
 		if a.ProviderBlockedUntil != nil && a.ProviderBlockedUntil.After(now) && (wake == nil || a.ProviderBlockedUntil.Before(*wake)) {
 			v := *a.ProviderBlockedUntil
 			wake = &v

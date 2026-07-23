@@ -88,8 +88,8 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 
 	// Construct both execution lanes behind the ID-based task adapter.
 	quotaService := &quota.Service{DB: db, MoveEnabled: proactiveMoveEnabled}
-	proactiveExecutor := &proactive.Executor{DB: db, ManifestDir: filepath.Join(cfg.DataDir, "manifests"), Runner: proactive.ExecRunner{}, Manifest: proactive.ManifestWriter{}, MoveEnabled: proactiveMoveEnabled}
-	proactiveDispatcher = &proactive.Dispatcher{DB: db, Quota: quotaService, Executor: proactiveExecutor, Inspector: proactive.LinuxProcessInspector{}, ManagerDataDir: cfg.DataDir, MoveEnabled: proactiveMoveEnabled}
+	proactiveExecutor := &proactive.Executor{DB: db, ManifestDir: filepath.Join(cfg.DataDir, "manifests"), Runner: proactive.ExecRunner{}, Manifest: proactive.ManifestWriter{}, MoveEnabled: proactiveMoveEnabled, ConfigResolver: quotaService.ResolveConfigPath}
+	proactiveDispatcher = &proactive.Dispatcher{DB: db, Quota: quotaService, Executor: proactiveExecutor, Inspector: proactive.LinuxProcessInspector{}, ManagerDataDir: cfg.DataDir, MoveEnabled: proactiveMoveEnabled, ConfigResolver: quotaService.ResolveConfigPath}
 	taskRunner = taskdispatch.New(db, executor, proactiveDispatcher)
 	if err := proactiveDispatcher.Recover(context.Background()); err != nil {
 		panic(err)
@@ -185,7 +185,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			tasks.GET("/:id/status", getTaskStatus)
 			tasks.GET("/:id/proactive-status", requireTokenOrSession, getProactiveStatus)
 			tasks.POST("/:id/proactive-resolutions", requireStrictTokenOrSession, resolveProactiveMove)
+			tasks.POST("/:id/proactive-manual-merge", requireStrictTokenOrSession, startProactiveManualMerge)
 		}
+		api.POST("/proactive-maintenance/:id/close-unknown", requireStrictTokenOrSession, closeProactiveUnknownMaintenance)
 
 		// System
 		api.GET("/system/stats", getSystemStats)
@@ -681,6 +683,9 @@ func createTask(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	// AutoDedupe is retained only for database compatibility; dedupe requires
+	// an explicit manual endpoint click.
+	task.AutoDedupe = false
 	var quotaFields struct {
 		RotationQuotaLimitBytes *int64 `json:"rotation_quota_limit_bytes"`
 	}
@@ -836,6 +841,22 @@ func getTask(c *gin.Context) {
 	c.JSON(http.StatusOK, task)
 }
 
+func proactiveMutationBlocked(tasks ...models.Task) (bool, error) {
+	if proactiveDispatcher == nil {
+		return false, nil
+	}
+	for _, task := range tasks {
+		blocked, err := proactiveDispatcher.MutationBlocked(task)
+		if err != nil {
+			return false, err
+		}
+		if blocked {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func updateTask(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
 	if err := taskRunner.WithTaskExclusive(c.Request.Context(), uint(id), func(_ *models.Task) error { updateTaskUnsafe(c); return nil }); err != nil {
@@ -854,6 +875,13 @@ func updateTaskUnsafe(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
 		return
 	}
+	if blocked, err := proactiveMutationBlocked(task); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check proactive maintenance fence"})
+		return
+	} else if blocked {
+		c.JSON(http.StatusConflict, gin.H{"error": "task destination scope is owned by an active manual merge"})
+		return
+	}
 
 	if taskRunner.IsActive(uint(id)) {
 		c.JSON(http.StatusConflict, gin.H{"error": "任务正在运行，无法更新任务配置；请先停止任务"})
@@ -864,6 +892,7 @@ func updateTaskUnsafe(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	updates.AutoDedupe = false
 	var quotaFields struct {
 		RotationQuotaLimitBytes *int64 `json:"rotation_quota_limit_bytes"`
 	}
@@ -879,6 +908,19 @@ func updateTaskUnsafe(c *gin.Context) {
 	clampRcloneParams(&updates)
 	if err := validateAndNormalizeTask(&updates); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	candidate := task
+	candidate.RcloneConfig = strings.TrimSpace(updates.RcloneConfig)
+	if candidate.RcloneConfig == "" {
+		candidate.RcloneConfig = models.DefaultRcloneConfigPath
+	}
+	candidate.RemoteDir = strings.TrimSpace(updates.RemoteDir)
+	if blocked, err := proactiveMutationBlocked(task, candidate); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check proactive maintenance fence"})
+		return
+	} else if blocked {
+		c.JSON(http.StatusConflict, gin.H{"error": "task destination scope is owned by an active manual merge"})
 		return
 	}
 
@@ -910,7 +952,7 @@ func updateTaskUnsafe(c *gin.Context) {
 		"bind_ip":                    updates.BindIP,
 		"rclone_config":              updates.RcloneConfig,
 		"enabled":                    updates.Enabled,
-		"auto_dedupe":                updates.AutoDedupe,
+		"auto_dedupe":                false,
 		"min_age":                    updates.MinAge,
 		"drive_chunk_size":           updates.DriveChunkSize,
 		"buffer_size":                updates.BufferSize,
@@ -972,6 +1014,13 @@ func deleteTask(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
 		return
 	}
+	if blocked, err := proactiveMutationBlocked(existing); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check proactive maintenance fence"})
+		return
+	} else if blocked {
+		c.JSON(http.StatusConflict, gin.H{"error": "task destination scope is owned by an active manual merge"})
+		return
+	}
 	if existing.TaskType == "rotation" && existing.RotationStrategy == "proactive_quota" {
 		if err := taskRunner.StopAndWait(c.Request.Context(), uint(id)); err != nil {
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
@@ -979,6 +1028,17 @@ func deleteTask(c *gin.Context) {
 		}
 	}
 	if err := taskRunner.WithTaskExclusive(c.Request.Context(), uint(id), func(_ *models.Task) error {
+		var current models.Task
+		if err := db.First(&current, id).Error; err != nil {
+			return err
+		}
+		blocked, err := proactiveMutationBlocked(current)
+		if err != nil {
+			return err
+		}
+		if blocked {
+			return proactive.ErrManualMergeConflict
+		}
 		watch.StopTaskWatch(uint(id))
 		sched.RemoveTask(uint(id))
 		qbWatch.StopTaskWatch(uint(id))
@@ -1100,6 +1160,10 @@ func dedupeTask(c *gin.Context) {
 	var task models.Task
 	if err := db.First(&task, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		return
+	}
+	if task.TaskType == "rotation" && task.RotationStrategy == "proactive_quota" {
+		c.JSON(http.StatusConflict, gin.H{"error": "proactive merge requires POST /tasks/:id/proactive-manual-merge"})
 		return
 	}
 

@@ -23,6 +23,16 @@ type fixedScanner struct {
 }
 type errorScanner struct{ err error }
 
+type leaseLossScanner struct{ DB *gorm.DB }
+
+func (s leaseLossScanner) Scan(string, time.Duration) ([]quota.LocalSnapshot, error) {
+	expired := time.Unix(90, 0)
+	if err := s.DB.Model(&models.DestinationScopeCoordinator{}).Where("scanner_lease_token <> ''").Update("scanner_lease_until", expired).Error; err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
 func (s errorScanner) Scan(string, time.Duration) ([]quota.LocalSnapshot, error) { return nil, s.err }
 
 func (s fixedScanner) Scan(string, time.Duration) ([]quota.LocalSnapshot, error) {
@@ -43,12 +53,44 @@ type dispatchFakeExecutor struct {
 
 type startupMoveInspector struct{ stopped bool }
 
+type alwaysLiveDedupeInspector struct{ stops int }
+
+type legacyRecoveryInspector struct {
+	statuses map[int]ProcessStatus
+	stopped  map[int]bool
+	stops    int
+}
+
 func (i *startupMoveInspector) Inspect(int, string) (ProcessStatus, error) {
 	return ProcessStatus{Confirmed: true, Alive: !i.stopped}, nil
 }
 
 func (i *startupMoveInspector) StopVerified(int, string) error {
 	i.stopped = true
+	return nil
+}
+
+func (i *alwaysLiveDedupeInspector) Inspect(int, string) (ProcessStatus, error) {
+	return ProcessStatus{Confirmed: true, Alive: true}, nil
+}
+
+func (i *alwaysLiveDedupeInspector) StopVerified(int, string) error {
+	i.stops++
+	return nil
+}
+
+func (i *legacyRecoveryInspector) Inspect(pid int, _ string) (ProcessStatus, error) {
+	status := i.statuses[pid]
+	if i.stopped[pid] {
+		status.Alive = false
+		status.Confirmed = true
+	}
+	return status, nil
+}
+
+func (i *legacyRecoveryInspector) StopVerified(pid int, _ string) error {
+	i.stops++
+	i.stopped[pid] = true
 	return nil
 }
 
@@ -124,6 +166,149 @@ func TestRecoverStopsLiveMoveBeforeLocalRecovery(t *testing.T) {
 	}
 }
 
+func TestRecoverDedupeSkipsLeaseRenewedBetweenSelectAndClaim(t *testing.T) {
+	db := dispatcherDB(t)
+	if err := db.AutoMigrate(&models.DestinationScopeMaintenance{}); err != nil {
+		t.Fatal(err)
+	}
+	expired := time.Unix(90, 0)
+	row := models.DestinationScopeMaintenance{DestinationScope: "scope", Epoch: 1, State: models.MaintenanceStateExhausted, DedupeState: models.DedupeStateRunning, Reason: models.MaintenanceReasonManualMerge, LeaseToken: "dedupe-lease", LeaseUntil: &expired, ProcessID: 123, ProcessStartToken: "123:1"}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	inspector := &startupMoveInspector{}
+	d := &Dispatcher{DB: db, Inspector: inspector, Now: func() time.Time { return time.Unix(100, 0) }}
+	d.maintenanceRecoveryBeforeClaim = func(selected models.DestinationScopeMaintenance) {
+		renewed := time.Unix(200, 0)
+		if err := db.Model(&models.DestinationScopeMaintenance{}).Where("id = ? AND lease_token = ?", selected.ID, selected.LeaseToken).Updates(map[string]interface{}{"lease_until": renewed}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := d.recoverMaintenanceDedupe(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if inspector.stopped {
+		t.Fatal("live dedupe was stopped after its lease was renewed")
+	}
+	var stored models.DestinationScopeMaintenance
+	if err := db.First(&stored, row.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.DedupeState != models.DedupeStateRunning || stored.LeaseUntil == nil || !stored.LeaseUntil.Equal(time.Unix(200, 0)) {
+		t.Fatalf("renewed dedupe row changed: %#v", stored)
+	}
+}
+
+func TestRecoverForceClaimsFutureNilAndExpiredDedupeLeases(t *testing.T) {
+	db := dispatcherDB(t)
+	if err := db.AutoMigrate(&models.DestinationScopeMaintenance{}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(100, 0)
+	expired := time.Unix(90, 0)
+	future := time.Unix(200, 0)
+	rows := []models.DestinationScopeMaintenance{
+		{DestinationScope: "future", Epoch: 1, State: models.MaintenanceStateExhausted, DedupeState: models.DedupeStateRunning, Reason: models.MaintenanceReasonManualMerge, LeaseToken: "future-token", LeaseUntil: &future, ProcessID: 1, ProcessStartToken: "1:1"},
+		{DestinationScope: "nil", Epoch: 1, State: models.MaintenanceStateExhausted, DedupeState: models.DedupeStateRunning, Reason: models.MaintenanceReasonManualMerge, LeaseToken: "nil-token", ProcessID: 2, ProcessStartToken: "2:1"},
+		{DestinationScope: "expired", Epoch: 1, State: models.MaintenanceStateExhausted, DedupeState: models.DedupeStateRunning, Reason: models.MaintenanceReasonManualMerge, LeaseToken: "expired-token", LeaseUntil: &expired, ProcessID: 3, ProcessStartToken: "3:1"},
+	}
+	for i := range rows {
+		if err := db.Create(&rows[i]).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	inspector := &alwaysLiveDedupeInspector{}
+	d := &Dispatcher{DB: db, Inspector: inspector, Now: func() time.Time { return now }}
+	if err := d.recoverMaintenanceDedupe(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	if inspector.stops != len(rows) {
+		t.Fatalf("stops = %d, want %d", inspector.stops, len(rows))
+	}
+	for _, row := range rows {
+		var stored models.DestinationScopeMaintenance
+		if err := db.First(&stored, row.ID).Error; err != nil {
+			t.Fatal(err)
+		}
+		if stored.DedupeState != models.DedupeStateUnknown {
+			t.Fatalf("scope %s state = %s, want unknown", row.DestinationScope, stored.DedupeState)
+		}
+	}
+}
+
+func TestRecoverLegacyQuotaEpochsClosesOnlyKnownStoppedRows(t *testing.T) {
+	db := dispatcherDB(t)
+	if err := db.AutoMigrate(&models.DestinationScopeMaintenance{}); err != nil {
+		t.Fatal(err)
+	}
+	rows := []models.DestinationScopeMaintenance{
+		{DestinationScope: "legacy-dead", Epoch: 1, OwnerTaskID: 1, FirstRemote: "remote", RemoteDir: "/dest", ResolvedConfigPath: "/config", ResolvedConfigIdentity: "/config", State: models.MaintenanceStateExhausted, DedupeState: models.DedupeStateRunning, Reason: models.MaintenanceReasonQuotaExhaustion, LeaseToken: "dead", ProcessID: 1, ProcessStartToken: "1:1"},
+		{DestinationScope: "legacy-live", Epoch: 1, OwnerTaskID: 1, FirstRemote: "remote", RemoteDir: "/dest", ResolvedConfigPath: "/config", ResolvedConfigIdentity: "/config", State: models.MaintenanceStateExhausted, DedupeState: models.DedupeStateRunning, Reason: models.MaintenanceReasonQuotaExhaustion, LeaseToken: "live", ProcessID: 2, ProcessStartToken: "2:1"},
+		{DestinationScope: "legacy-ambiguous", Epoch: 1, OwnerTaskID: 1, FirstRemote: "remote", RemoteDir: "/dest", ResolvedConfigPath: "/config", ResolvedConfigIdentity: "/config", State: models.MaintenanceStateExhausted, DedupeState: models.DedupeStateRunning, Reason: models.MaintenanceReasonQuotaExhaustion, LeaseToken: "ambiguous"},
+		{DestinationScope: "legacy-mismatch", Epoch: 1, OwnerTaskID: 1, FirstRemote: "remote", RemoteDir: "/dest", ResolvedConfigPath: "/config", ResolvedConfigIdentity: "/config", State: models.MaintenanceStateExhausted, DedupeState: models.DedupeStateRunning, Reason: models.MaintenanceReasonQuotaExhaustion, LeaseToken: "mismatch", ProcessID: 3, ProcessStartToken: "3:1"},
+		{DestinationScope: "legacy-pending", Epoch: 1, OwnerTaskID: 1, FirstRemote: "remote", RemoteDir: "/dest", ResolvedConfigPath: "/config", ResolvedConfigIdentity: "/config", State: models.MaintenanceStateExhausted, DedupeState: models.DedupeStatePending, Reason: models.MaintenanceReasonQuotaExhaustion},
+	}
+	for i := range rows {
+		if err := db.Create(&rows[i]).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	inspector := &legacyRecoveryInspector{statuses: map[int]ProcessStatus{1: {Confirmed: true, Alive: false}, 2: {Confirmed: true, Alive: true}, 3: {Confirmed: false, Alive: true}}, stopped: map[int]bool{}}
+	d := &Dispatcher{DB: db, Inspector: inspector, Now: func() time.Time { return time.Unix(100, 0) }}
+	if err := d.recoverMaintenanceDedupe(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	if inspector.stops != 1 {
+		t.Fatalf("legacy recovery stop count=%d, want one identity-safe stop", inspector.stops)
+	}
+	for scope, want := range map[string]string{"legacy-dead": models.MaintenanceStateClosed, "legacy-live": models.MaintenanceStateClosed, "legacy-ambiguous": models.DedupeStateUnknown, "legacy-mismatch": models.DedupeStateUnknown, "legacy-pending": models.MaintenanceStateClosed} {
+		var stored models.DestinationScopeMaintenance
+		if err := db.Where("destination_scope = ?", scope).First(&stored).Error; err != nil {
+			t.Fatal(err)
+		}
+		if (scope == "legacy-dead" || scope == "legacy-live" || scope == "legacy-pending") && stored.State != want {
+			t.Fatalf("%s state=%s, want closed", scope, stored.State)
+		}
+		if (scope == "legacy-ambiguous" || scope == "legacy-mismatch") && stored.DedupeState != want {
+			t.Fatalf("%s dedupe state=%s, want unknown", scope, stored.DedupeState)
+		}
+	}
+}
+
+func TestRecoverForceDoesNotTakeRenewedFutureDedupeLease(t *testing.T) {
+	db := dispatcherDB(t)
+	if err := db.AutoMigrate(&models.DestinationScopeMaintenance{}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(100, 0)
+	future := time.Unix(200, 0)
+	row := models.DestinationScopeMaintenance{DestinationScope: "renewed-future", Epoch: 1, State: models.MaintenanceStateExhausted, DedupeState: models.DedupeStateRunning, Reason: models.MaintenanceReasonManualMerge, LeaseToken: "live-token", LeaseUntil: &future, ProcessID: 10, ProcessStartToken: "10:1"}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
+	}
+	inspector := &alwaysLiveDedupeInspector{}
+	d := &Dispatcher{DB: db, Inspector: inspector, Now: func() time.Time { return now }}
+	d.maintenanceRecoveryBeforeClaim = func(selected models.DestinationScopeMaintenance) {
+		renewed := time.Unix(300, 0)
+		if err := db.Model(&models.DestinationScopeMaintenance{}).Where("id = ? AND lease_token = ?", selected.ID, selected.LeaseToken).Update("lease_until", renewed).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := d.recoverMaintenanceDedupe(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	if inspector.stops != 0 {
+		t.Fatal("renewed future dedupe was stopped")
+	}
+	var stored models.DestinationScopeMaintenance
+	if err := db.First(&stored, row.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.DedupeState != models.DedupeStateRunning || stored.LeaseToken != "live-token" || stored.LeaseUntil == nil || !stored.LeaseUntil.Equal(time.Unix(300, 0)) {
+		t.Fatalf("renewed future dedupe changed: %#v", stored)
+	}
+}
+
 func TestRecoverReturnsPermanentGroupFailure(t *testing.T) {
 	db := dispatcherDB(t)
 	task, _, _ := dispatcherFixture(t, db, `["r1"]`)
@@ -134,6 +319,32 @@ func TestRecoverReturnsPermanentGroupFailure(t *testing.T) {
 	d := newDispatcher(db, &dispatchFakeExecutor{DB: db, runErr: errors.New("permanent config failure")}, fixedScanner{})
 	if err := d.Recover(context.Background()); err == nil {
 		t.Fatal("permanent recovery failure was swallowed")
+	}
+}
+
+func TestRequestScanHeartbeatLossDoesNotClearNoEligiblePending(t *testing.T) {
+	db := dispatcherDB(t)
+	task, _, config := dispatcherFixture(t, db, `["r1"]`)
+	if err := db.AutoMigrate(&models.DestinationScopeMaintenance{}, &models.DestinationScopeCoordinator{}); err != nil {
+		t.Fatal(err)
+	}
+	d := &Dispatcher{DB: db, Quota: &quota.Service{DB: db, ConfigResolver: func(raw string) (string, error) { return raw, nil }}, Executor: &dispatchFakeExecutor{DB: db}, Scanner: func(models.Task) LocalScanner { return leaseLossScanner{DB: db} }, Now: func() time.Time { return time.Unix(100, 0) }}
+	if err := d.RequestScan(context.Background(), task.ID); err == nil {
+		t.Fatal("lost scanner lease was ignored")
+	}
+	var stored models.Task
+	if err := db.First(&stored, task.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !stored.RotationRescanPending || stored.RotationQuotaWakeAt == nil {
+		t.Fatalf("pending state was cleared after heartbeat loss: %#v", stored)
+	}
+	var count int64
+	if err := db.Model(&models.RotationQuotaBatch{}).Where("task_id = ?", task.ID).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 || config == "" {
+		t.Fatalf("heartbeat loss created reservation batches: count=%d config=%q", count, config)
 	}
 }
 
@@ -148,6 +359,11 @@ func dispatcherDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
 	if err := db.AutoMigrate(&models.Task{}, &models.QuotaAccount{}, &models.RotationQuotaOversize{}, &models.RotationQuotaBatch{}, &models.RotationQuotaBatchFile{}, &models.QuotaReservation{}); err != nil {
 		t.Fatal(err)
 	}
@@ -209,6 +425,44 @@ func TestDispatcherUpsertsDefaultAndExplicitQuotaKeys(t *testing.T) {
 	}
 	if len(shared) != 1 || shared[0].QuotaKey != "shared" {
 		t.Fatalf("shared=%#v", shared)
+	}
+}
+
+func TestBudgetExhaustionLeavesPendingWakeWithoutMaintenanceOrDedupe(t *testing.T) {
+	db := dispatcherDB(t)
+	if err := db.AutoMigrate(&models.DestinationScopeMaintenance{}, &models.DestinationScopeCoordinator{}); err != nil {
+		t.Fatal(err)
+	}
+	task, snapshot, config := dispatcherFixture(t, db, `["r1"]`)
+	key := defaultQuotaKey(config, "r1")
+	if err := db.Create(&models.QuotaAccount{QuotaKey: key, RemoteName: "r1", ConfigIdentity: config, BudgetBytes: 100, WindowSeconds: 3600, Enabled: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+	account := models.QuotaAccount{}
+	if err := db.Where("quota_key = ?", key).First(&account).Error; err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Unix(3700, 0)
+	if err := db.Create(&models.QuotaReservation{QuotaAccountID: account.ID, Bytes: 100, State: models.ReservationStateCommitted, ExpiresAt: &expires}).Error; err != nil {
+		t.Fatal(err)
+	}
+	d := newDispatcher(db, &dispatchFakeExecutor{DB: db}, fixedScanner{snapshots: []quota.LocalSnapshot{snapshot}})
+	if err := d.RequestScan(context.Background(), task.ID); err != nil {
+		t.Fatal(err)
+	}
+	var epochs []models.DestinationScopeMaintenance
+	if err := db.Find(&epochs).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(epochs) != 0 {
+		t.Fatalf("automatic maintenance epochs = %#v", epochs)
+	}
+	var stored models.Task
+	if err := db.First(&stored, task.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !stored.RotationRescanPending || stored.RotationQuotaWakeAt == nil || !stored.RotationQuotaWakeAt.Equal(time.Unix(3700, 0)) {
+		t.Fatalf("budget exhaustion did not preserve pending ledger wake: %#v", stored)
 	}
 }
 

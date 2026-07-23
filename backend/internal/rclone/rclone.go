@@ -493,11 +493,6 @@ func (e *Executor) ExecuteMoveWithCallback(task *models.Task, callback Completio
 			e.refreshOpenListForTask(task)
 		}
 
-		// Auto dedupe if enabled
-		if task.AutoDedupe && err == nil {
-			time.Sleep(2 * time.Second)
-			e.ExecuteDedupe(task)
-		}
 	}()
 
 	return nil
@@ -729,10 +724,6 @@ func (e *Executor) runRcloneBlocking(task *models.Task, generation uint64) (*run
 	if task.OpenlistEnabled && task.OpenlistURL != "" && err == nil {
 		e.refreshOpenListForTask(task)
 	}
-	if task.AutoDedupe && err == nil {
-		time.Sleep(2 * time.Second)
-		e.ExecuteDedupe(task)
-	}
 	return observer, err
 }
 
@@ -839,12 +830,12 @@ func (e *Executor) ScheduleRotationResume(taskID uint, resumeAt time.Time) {
 		result := e.db.Model(&models.Task{}).
 			Where("id = ? AND task_type = ? AND status = ? AND (rotation_strategy = '' OR rotation_strategy = ?)", task.ID, "rotation", "paused", "legacy_error").
 			Updates(map[string]interface{}{
-			"status":                 "idle",
-			"last_error":             "",
-			"rotation_current_index": 0,
-			"rotation_current_round": 0,
-			"rotation_paused_until":  nil,
-		})
+				"status":                 "idle",
+				"last_error":             "",
+				"rotation_current_index": 0,
+				"rotation_current_round": 0,
+				"rotation_paused_until":  nil,
+			})
 		if result.Error != nil || result.RowsAffected != 1 {
 			return
 		}

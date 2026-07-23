@@ -23,9 +23,10 @@ type fakeProcess struct {
 	result  ProcessResult
 	stopped bool
 	stopErr error
+	waitErr error
 }
 
-func (p *fakeProcess) Wait() (ProcessResult, error) { return p.result, nil }
+func (p *fakeProcess) Wait() (ProcessResult, error) { return p.result, p.waitErr }
 func (p *fakeProcess) Stop() error                  { p.stopped = true; return p.stopErr }
 func (p *fakeProcess) PID() int                     { return p.result.PID }
 func (p *fakeProcess) StartToken() string           { return p.result.ProcessStartToken }
@@ -37,6 +38,20 @@ type fakeRunner struct {
 	object     RemoteObject
 	statErr    error
 	startErr   error
+}
+
+type fakeDedupeRunner struct{ process *fakeProcess }
+
+func (r *fakeDedupeRunner) StartCopy(context.Context, CopySpec) (ProcessHandle, error) {
+	return nil, errors.New("copy runner unused")
+}
+
+func (r *fakeDedupeRunner) StatRemote(context.Context, string, string, string, string) (RemoteObject, error) {
+	return RemoteObject{}, errors.New("remote stat unused")
+}
+
+func (r *fakeDedupeRunner) StartDedupe(context.Context, DedupeSpec) (ProcessHandle, error) {
+	return r.process, nil
 }
 
 const testOwner = "0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -62,6 +77,11 @@ func executionDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
 	if err := db.AutoMigrate(&models.QuotaAccount{}, &models.RotationQuotaBatch{}, &models.RotationQuotaBatchFile{}, &models.QuotaReservation{}); err != nil {
 		t.Fatal(err)
 	}
@@ -688,6 +708,61 @@ func TestLeaseHeartbeatRenewsDuringStagePreparation(t *testing.T) {
 	}
 	if stored.LeaseUntil == nil || !stored.LeaseUntil.After(time.Unix(100+3600, 0)) {
 		t.Fatalf("lease was not renewed: %v", stored.LeaseUntil)
+	}
+}
+
+func TestManualIdentityPersistenceFailureAfterWaitErrorIsKnownFailure(t *testing.T) {
+	db := executionDB(t)
+	if err := db.AutoMigrate(&models.DestinationScopeMaintenance{}, &models.DestinationScopeCoordinator{}, &models.Task{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.Task{ID: 1, Enabled: true, TaskType: "rotation", RotationStrategy: "proactive_quota", RcloneConfig: "/config", RemoteDir: "/dest"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	leaseUntil := time.Unix(200, 0)
+	epoch := models.DestinationScopeMaintenance{DestinationScope: models.DestinationScope("/config", "/dest"), Epoch: 1, OwnerTaskID: 1, FirstRemote: "remote", RemoteDir: "/dest", ResolvedConfigPath: "/config", ResolvedConfigIdentity: "/config", State: models.MaintenanceStateExhausted, DedupeState: models.DedupeStateClaimed, Reason: models.MaintenanceReasonManualMerge, LeaseToken: "manual-owner", LeaseUntil: &leaseUntil, Revision: 1}
+	if err := db.Create(&epoch).Error; err != nil {
+		t.Fatal(err)
+	}
+	process := &fakeProcess{result: ProcessResult{PID: 77, ProcessStartToken: "77:1"}, waitErr: errors.New("wait reported reaped process")}
+	e := &Executor{DB: db, Runner: &fakeDedupeRunner{process: process}, Now: func() time.Time { return time.Unix(100, 0) }, PersistDedupeIdentityFunc: func(models.DestinationScopeMaintenance, ProcessHandle) error {
+		return errors.New("identity write failed")
+	}}
+	if err := e.RunDedupe(context.Background(), epoch); err == nil {
+		t.Fatal("identity failure was swallowed")
+	}
+	if !process.stopped {
+		t.Fatal("process was not stopped")
+	}
+	var stored models.DestinationScopeMaintenance
+	if err := db.First(&stored, epoch.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.State != models.MaintenanceStateClosed || stored.DedupeState != models.DedupeStateFailed {
+		t.Fatalf("reaped process entered unknown/fenced state: %#v", stored)
+	}
+}
+
+func TestExecutorRejectsLegacyQuotaDedupeExecution(t *testing.T) {
+	db := executionDB(t)
+	if err := db.AutoMigrate(&models.DestinationScopeMaintenance{}); err != nil {
+		t.Fatal(err)
+	}
+	leaseUntil := time.Unix(200, 0)
+	epoch := models.DestinationScopeMaintenance{DestinationScope: models.DestinationScope("/config", "/dest"), Epoch: 1, State: models.MaintenanceStateExhausted, DedupeState: models.DedupeStateClaimed, Reason: models.MaintenanceReasonQuotaExhaustion, LeaseToken: "legacy", LeaseUntil: &leaseUntil}
+	if err := db.Create(&epoch).Error; err != nil {
+		t.Fatal(err)
+	}
+	e := &Executor{DB: db, Runner: &fakeDedupeRunner{process: &fakeProcess{}}, Now: func() time.Time { return time.Unix(100, 0) }}
+	if err := e.RunDedupe(context.Background(), epoch); !errors.Is(err, ErrManualMergeConflict) {
+		t.Fatalf("legacy quota dedupe error=%v", err)
+	}
+	var stored models.DestinationScopeMaintenance
+	if err := db.First(&stored, epoch.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.DedupeState != models.DedupeStateClaimed {
+		t.Fatalf("legacy quota epoch was mutated: %#v", stored)
 	}
 }
 

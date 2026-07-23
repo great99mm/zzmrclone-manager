@@ -46,6 +46,11 @@ type Scanner struct {
 	BeforeSnapshotValidation func(relativePath string)
 }
 
+type ScanOutcome struct {
+	Snapshots      []LocalSnapshot
+	NextEligibleAt *time.Time
+}
+
 func unsupportedTraversalError() error {
 	return fmt.Errorf("secure descriptor-relative scanner is unsupported on this platform")
 }

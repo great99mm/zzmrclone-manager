@@ -20,7 +20,7 @@ import {
   ListChecks,
   Database
 } from 'lucide-react';
-import { getTask, getTaskStatus, getProactiveStatus, resolveProactiveBatch, getTaskLogs, startTask, stopTask, pauseTask, cancelTask, dedupeTask, deleteTask } from '../services/api';
+import { getTask, getTaskStatus, getProactiveStatus, resolveProactiveBatch, getTaskLogs, startTask, stopTask, pauseTask, cancelTask, dedupeTask, startProactiveManualMerge, closeProactiveUnknownMaintenance, deleteTask } from '../services/api';
 import { createWebSocket } from '../services/api';
 import toast from 'react-hot-toast';
 
@@ -55,6 +55,7 @@ const TaskDetail = () => {
   const [proactiveStatusLoading, setProactiveStatusLoading] = useState(false);
   const [proactiveStatusError, setProactiveStatusError] = useState('');
   const [resolutionState, setResolutionState] = useState({ batchId: null, action: '', loading: false, error: '', success: '' });
+  const [legacyRecoveryState, setLegacyRecoveryState] = useState({ loading: false, error: '' });
   const [loading, setLoading] = useState(true);
   const [autoScroll, setAutoScroll] = useState(true);
   const [fileProgresses, setFileProgresses] = useState({});
@@ -336,6 +337,48 @@ const TaskDetail = () => {
     }
   };
 
+  const handleProactiveManualMerge = async () => {
+    if (!window.confirm('确定开始合并吗？这会在目标位置执行去重，可能改变远端文件。')) return;
+    try {
+      await startProactiveManualMerge(id);
+      toast.success('合并已提交，状态正在刷新。');
+      await loadProactiveStatus();
+    } catch (err) {
+      if (err.response?.status === 409) {
+        await loadProactiveStatus();
+        toast.error('当前无法开始合并，已刷新最新状态。');
+      } else {
+        toast.error(err.response?.data?.error || '开始合并失败');
+      }
+    }
+  };
+
+  const handleLegacyRecovery = async (recovery) => {
+    if (!recovery?.epoch_id || recovery.dedupe_state !== 'unknown' || !recovery.process_identity_available) return;
+    if (!window.confirm('确认相关处理已经停止，并关闭这条待确认状态吗？')) return;
+    setLegacyRecoveryState({ loading: true, error: '' });
+    try {
+      await closeProactiveUnknownMaintenance(recovery.epoch_id, {
+        reason: recovery.reason,
+        expected_state: 'unknown',
+        expected_revision: recovery.revision,
+      });
+      toast.success('恢复已完成，状态正在刷新。');
+      await loadProactiveStatus();
+    } catch (err) {
+      if (err.response?.status === 409) {
+        await loadProactiveStatus();
+        toast.error('状态已变化，已刷新最新状态。');
+      } else {
+        const message = '恢复失败，请稍后重试。';
+        setLegacyRecoveryState({ loading: false, error: message });
+        toast.error(message);
+        return;
+      }
+    }
+    setLegacyRecoveryState({ loading: false, error: '' });
+  };
+
   const handleDelete = async () => {
     if (!window.confirm('确定要删除这个任务吗？此操作不可恢复。')) return;
     try {
@@ -453,13 +496,27 @@ const TaskDetail = () => {
                   <span className="hidden xs:inline">启动</span>
                 </button>
               )}
-              <button
-                onClick={handleDedupe}
-                className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-purple-50 text-purple-600 rounded-lg hover:bg-purple-100 transition-colors font-medium text-sm md:text-base"
-              >
-                <RotateCcw className="w-3.5 h-3.5 md:w-4 md:h-4" />
-                <span className="hidden xs:inline">去重</span>
-              </button>
+              {isProactiveQuotaTask ? (
+                proactiveStatus?.maintenance?.manual_merge_available && (
+                  <button
+                    onClick={handleProactiveManualMerge}
+                    aria-label="开始合并"
+                    title="开始合并"
+                    className="inline-flex items-center justify-center min-h-11 min-w-11 xs:min-h-0 xs:min-w-0 gap-1 md:gap-2 px-3 md:px-4 py-2 bg-purple-50 text-purple-600 rounded-lg hover:bg-purple-100 transition-colors font-medium text-sm md:text-base"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                    <span className="hidden xs:inline">开始合并</span>
+                  </button>
+                )
+              ) : (
+                <button
+                  onClick={handleDedupe}
+                  className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-purple-50 text-purple-600 rounded-lg hover:bg-purple-100 transition-colors font-medium text-sm md:text-base"
+                >
+                  <RotateCcw className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                  <span className="hidden xs:inline">去重</span>
+                </button>
+              )}
               <Link
                 to={`/tasks/${id}/edit`}
                 className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100 transition-colors font-medium text-sm md:text-base"
@@ -547,6 +604,8 @@ const TaskDetail = () => {
           onRetry={loadProactiveStatus}
           resolutionState={resolutionState}
           onResolve={handleResolveBatch}
+          legacyRecoveryState={legacyRecoveryState}
+          onRecover={handleLegacyRecovery}
         />
       )}
 
@@ -834,6 +893,26 @@ const COMPLETION_EVIDENCE_LABELS = {
   local_move: '本地 / rclone 已完成',
 };
 
+const MERGE_BLOCKER_LABELS = {
+  maintenance_epoch: '上一次合并仍在处理或等待确认。',
+  scanner_active: '当前有任务正在处理，请稍后再试。',
+  active_batch: '当前还有未完成的传输批次。',
+  account_active_elsewhere: '相关账号正在其他任务中使用。',
+  ledger_unavailable: '状态暂时无法确认，请稍后重试。',
+};
+
+const getManualMergeStatus = (maintenance = {}) => {
+  if (maintenance.manual_merge_available) return { key: 'available', label: '可开始' };
+  if (maintenance.dedupe_state === 'pending' || maintenance.dedupe_state === 'claimed' || maintenance.dedupe_state === 'running') return { key: 'running', label: '合并中' };
+  if (maintenance.dedupe_state === 'unknown') return { key: 'unknown', label: '状态待确认' };
+  return { key: 'unavailable', label: '暂不可用' };
+};
+
+const MANUAL_MERGE_RESULT_LABELS = {
+  succeeded: '上次合并已完成',
+  failed: '上次合并失败',
+};
+
 const getCompletionEvidenceLabel = (evidence, mode, state) => {
   if (COMPLETION_EVIDENCE_LABELS[evidence]) return COMPLETION_EVIDENCE_LABELS[evidence];
   if (state === 'succeeded' && mode === 'copy') return '远端已核验';
@@ -877,7 +956,7 @@ const getResolutionItems = (batch, task) => {
   return [{ batchId: batch.id, actions, fileId, expectedState, expectedUpdatedAt }];
 };
 
-const ProactiveQuotaPanel = ({ status, loading, error, onRetry, resolutionState, onResolve }) => {
+const ProactiveQuotaPanel = ({ status, loading, error, onRetry, resolutionState, onResolve, legacyRecoveryState, onRecover }) => {
   if (loading && !status) {
     return (
       <section className="bg-white rounded-xl shadow-sm border border-emerald-200 p-6" aria-live="polite" aria-busy="true">
@@ -910,6 +989,9 @@ const ProactiveQuotaPanel = ({ status, loading, error, onRetry, resolutionState,
   const accounts = status.accounts || [];
   const batches = status.batches || [];
   const queue = status.queue || {};
+  const maintenance = status.maintenance || {};
+  const legacyRecovery = maintenance.legacy_recovery;
+  const manualMergeStatus = getManualMergeStatus(maintenance);
   const taskStatus = status.task?.status || 'idle';
   const queueCount = (queue.pending?.count || 0) + (queue.planned?.count || 0) + (queue.executing?.count || 0);
   const resolvedAccounts = accounts.filter(account => account.budget_bytes != null && account.remaining_bytes != null);
@@ -945,6 +1027,64 @@ const ProactiveQuotaPanel = ({ status, loading, error, onRetry, resolutionState,
         <div className={`px-6 py-2 text-xs flex flex-wrap items-center justify-between gap-2 ${error ? 'bg-red-50 text-red-700' : 'bg-gray-50 text-gray-600'}`} aria-live="polite">
           <span>{error ? `状态刷新失败：${error}，当前显示最近一次成功数据。` : '正在刷新状态...'}</span>
           {error && <button type="button" onClick={onRetry} className="font-medium underline focus:outline-none focus:ring-2 focus:ring-red-500 rounded">重试</button>}
+        </div>
+      )}
+
+      <div className="px-6 py-3 border-b border-gray-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2" aria-live="polite">
+        <div className="min-w-0">
+          <div className="text-sm font-medium text-gray-900">手动合并</div>
+          <div className="text-xs text-gray-500 mt-0.5">
+            {manualMergeStatus.key === 'unavailable'
+              ? (MERGE_BLOCKER_LABELS[maintenance.blocker] || '当前暂不可开始合并。')
+              : manualMergeStatus.key === 'unknown'
+                ? '上次合并结果暂时无法确认，请先刷新状态。'
+                : manualMergeStatus.key === 'running'
+                  ? '合并正在处理，请等待状态更新。'
+                  : '仅在你明确操作时执行合并。'}
+          </div>
+          {(MANUAL_MERGE_RESULT_LABELS[maintenance.result] || maintenance.error) && (
+            <div className={`text-xs mt-1 ${maintenance.result === 'failed' || maintenance.error ? 'text-red-700' : 'text-emerald-700'}`}>
+              {MANUAL_MERGE_RESULT_LABELS[maintenance.result] || '最近一次合并状态'}
+              {maintenance.error ? `：${maintenance.error}` : ''}
+            </div>
+          )}
+        </div>
+        <span className={`self-start sm:self-auto shrink-0 text-xs font-medium rounded-full px-2.5 py-1 ${
+          manualMergeStatus.key === 'available' ? 'bg-emerald-100 text-emerald-800' :
+            manualMergeStatus.key === 'running' ? 'bg-blue-100 text-blue-800' :
+              manualMergeStatus.key === 'unknown' ? 'bg-amber-100 text-amber-800' : 'bg-gray-100 text-gray-700'
+        }`}>
+          {manualMergeStatus.label}
+        </span>
+      </div>
+
+      {maintenance.blocker === 'legacy_maintenance_recovery' && legacyRecovery && (
+        <div className="mx-4 mt-4 md:mx-6 border border-amber-200 bg-amber-50 rounded-lg p-4" role="region" aria-labelledby="legacy-recovery-heading">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="min-w-0">
+              <h3 id="legacy-recovery-heading" className="text-sm font-semibold text-amber-950">需要恢复任务状态</h3>
+              <p className="text-xs text-amber-900 mt-1">
+                {legacyRecovery.dedupe_state === 'unknown'
+                  ? legacyRecovery.process_identity_available
+                    ? '相关处理已无法自动确认。确认它已经停止后，可以释放当前阻塞。'
+                    : '当前无法安全确认相关处理是否已停止，请稍后重试。'
+                  : '当前状态已变化，请刷新后再查看。'}
+              </p>
+              {legacyRecoveryState.error && <p className="text-xs text-red-700 mt-2" role="alert">{legacyRecoveryState.error}</p>}
+            </div>
+            {legacyRecovery.dedupe_state === 'unknown' && legacyRecovery.process_identity_available && (
+              <button
+                type="button"
+                onClick={() => onRecover(legacyRecovery)}
+                disabled={legacyRecoveryState.loading}
+                aria-label="确认已停止并恢复任务状态"
+                title="确认已停止并恢复任务状态"
+                className="inline-flex items-center justify-center min-h-11 sm:min-h-10 px-3 py-2 text-xs font-medium rounded-lg bg-amber-700 text-white hover:bg-amber-800 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-amber-600"
+              >
+                {legacyRecoveryState.loading ? '处理中...' : '确认已停止并恢复'}
+              </button>
+            )}
+          </div>
         </div>
       )}
 

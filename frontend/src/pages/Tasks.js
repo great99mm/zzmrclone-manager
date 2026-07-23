@@ -298,9 +298,6 @@ const Tasks = () => {
                         {task.qb_enabled && !(task.task_type === 'rotation' && task.rotation_strategy === 'proactive_quota') && (
                           <span className="px-2 py-0.5 bg-amber-100 text-amber-700 text-xs rounded-full">qB完成</span>
                         )}
-                        {task.auto_dedupe && (
-                          <span className="px-2 py-0.5 bg-green-100 text-green-700 text-xs rounded-full">去重</span>
-                        )}
                       </div>
                     </td>
                     <td className="px-6 py-4">
@@ -421,9 +418,6 @@ const Tasks = () => {
                 )}
                 {task.qb_enabled && !(task.task_type === 'rotation' && task.rotation_strategy === 'proactive_quota') && (
                   <span className="px-2 py-0.5 bg-amber-100 text-amber-700 text-xs rounded-full">qB完成</span>
-                )}
-                {task.auto_dedupe && (
-                  <span className="px-2 py-0.5 bg-green-100 text-green-700 text-xs rounded-full">去重</span>
                 )}
               </div>
 

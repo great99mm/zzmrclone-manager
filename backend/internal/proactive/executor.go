@@ -21,16 +21,18 @@ var ErrAccountBlocked = errors.New("proactive quota account is blocked or disabl
 var ErrRetryableExecutor = errors.New("retryable proactive executor failure")
 
 type Executor struct {
-	DB                 *gorm.DB
-	ManifestDir        string
-	Runner             CommandRunner
-	Now                func() time.Time
-	Manifest           ManifestWriter
-	LeaseDuration      time.Duration
-	LeaseRenewInterval time.Duration
-	BeforeStageClone   func()
-	PersistProcessFunc func(uint, string, ProcessHandle) error
-	MoveEnabled        func() bool
+	DB                        *gorm.DB
+	ManifestDir               string
+	Runner                    CommandRunner
+	Now                       func() time.Time
+	Manifest                  ManifestWriter
+	LeaseDuration             time.Duration
+	LeaseRenewInterval        time.Duration
+	BeforeStageClone          func()
+	PersistProcessFunc        func(uint, string, ProcessHandle) error
+	MoveEnabled               func() bool
+	ConfigResolver            quota.ConfigResolver
+	PersistDedupeIdentityFunc func(models.DestinationScopeMaintenance, ProcessHandle) error
 }
 
 func (e *Executor) RunBatch(ctx context.Context, batchID uint) error {
@@ -164,6 +166,103 @@ func (e *Executor) RunBatch(ctx context.Context, batchID uint) error {
 	}
 	result, waitErr := process.Wait()
 	return e.finishProcess(ctx, batch, files, token, stage, result, waitErr, nil)
+}
+func (e *Executor) RunDedupe(ctx context.Context, epoch models.DestinationScopeMaintenance) error {
+	if epoch.Reason != models.MaintenanceReasonManualMerge || epoch.ID == 0 || epoch.LeaseToken == "" {
+		return ErrManualMergeConflict
+	}
+	manual := true
+	runner, ok := e.Runner.(DedupeRunner)
+	claimed := e.DB.Model(&models.DestinationScopeMaintenance{}).Where("id = ? AND reason = ? AND state = ? AND dedupe_state = ? AND lease_token = ?", epoch.ID, models.MaintenanceReasonManualMerge, models.MaintenanceStateExhausted, models.DedupeStateClaimed, epoch.LeaseToken).Updates(map[string]interface{}{"dedupe_state": models.DedupeStateRunning, "started_at": e.now(), "revision": gorm.Expr("revision + 1")})
+	if claimed.Error != nil {
+		return claimed.Error
+	}
+	if claimed.RowsAffected != 1 {
+		return ErrLeaseConflict
+	}
+	if !ok {
+		err := errors.New("dedupe runner is unavailable")
+		if manual {
+			if closeErr := completeManualMaintenance(e.DB, epoch, models.DedupeStateFailed, models.DedupeStateFailed, 1, err.Error(), e.now(), e.ConfigResolver); closeErr != nil {
+				return errors.Join(err, closeErr)
+			}
+		}
+		return err
+	}
+	process, err := runner.StartDedupe(ctx, DedupeSpec{ConfigPath: epoch.ResolvedConfigPath, Remote: epoch.FirstRemote, DestinationPath: epoch.RemoteDir})
+	if err != nil {
+		if manual {
+			if closeErr := completeManualMaintenance(e.DB, epoch, models.DedupeStateFailed, models.DedupeStateFailed, 1, err.Error(), e.now(), e.ConfigResolver); closeErr != nil {
+				return errors.Join(err, closeErr)
+			}
+			return err
+		}
+		_ = e.DB.Model(&models.DestinationScopeMaintenance{}).Where("id = ? AND state = ? AND dedupe_state = ? AND lease_token = ?", epoch.ID, models.MaintenanceStateExhausted, models.DedupeStateRunning, epoch.LeaseToken).Updates(map[string]interface{}{"dedupe_state": models.DedupeStateFailed, "result": models.DedupeStateFailed, "last_error": redactMaintenanceError(err.Error(), epoch), "finished_at": e.now()})
+		return err
+	}
+	var identityErr error
+	identityRows := int64(1)
+	if e.PersistDedupeIdentityFunc != nil {
+		identityErr = e.PersistDedupeIdentityFunc(epoch, process)
+	} else {
+		identity := e.DB.Model(&models.DestinationScopeMaintenance{}).Where("id = ? AND state = ? AND dedupe_state = ? AND lease_token = ?", epoch.ID, models.MaintenanceStateExhausted, models.DedupeStateRunning, epoch.LeaseToken).Updates(map[string]interface{}{"process_id": process.PID(), "process_start_token": process.StartToken()})
+		identityErr, identityRows = identity.Error, identity.RowsAffected
+	}
+	if identityErr != nil || identityRows != 1 {
+		stopErr := process.Stop()
+		stoppedResult, waitErr := process.Wait()
+		message := "dedupe process identity persistence failed"
+		if stopErr != nil {
+			message += ": stop=" + stopErr.Error()
+		}
+		if waitErr != nil {
+			message += ": wait=" + waitErr.Error()
+		}
+		failure := fmt.Errorf("dedupe process identity persistence failed: %v", identityErr)
+		if identityErr == nil && identityRows != 1 {
+			failure = errors.New("dedupe process identity persistence failed: lease ownership was lost")
+		}
+		if manual && stopErr == nil && validProcessResult(stoppedResult) {
+			if closeErr := completeManualMaintenance(e.DB, epoch, models.DedupeStateFailed, models.DedupeStateFailed, 1, message, e.now(), e.ConfigResolver); closeErr != nil {
+				return errors.Join(failure, closeErr)
+			}
+			return failure
+		}
+		if updateErr := e.DB.Model(&models.DestinationScopeMaintenance{}).Where("id = ? AND state = ? AND dedupe_state = ? AND lease_token = ?", epoch.ID, models.MaintenanceStateExhausted, models.DedupeStateRunning, epoch.LeaseToken).Updates(map[string]interface{}{"dedupe_state": models.DedupeStateUnknown, "result": models.DedupeStateUnknown, "last_error": redactMaintenanceError(message, epoch), "revision": gorm.Expr("revision + 1")}).Error; updateErr != nil {
+			return errors.Join(failure, updateErr)
+		}
+		return failure
+	}
+	heartbeatDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				_ = e.DB.Model(&models.DestinationScopeMaintenance{}).Where("id = ? AND state = ? AND dedupe_state = ? AND lease_token = ?", epoch.ID, models.MaintenanceStateExhausted, models.DedupeStateRunning, epoch.LeaseToken).Update("lease_until", e.now().Add(2*time.Minute)).Error
+			case <-heartbeatDone:
+				return
+			}
+		}
+	}()
+	output, waitErr := process.Wait()
+	close(heartbeatDone)
+	state := models.MaintenanceStateSucceeded
+	if waitErr != nil || output.ExitCode != 0 {
+		state = models.MaintenanceStateFailed
+	}
+	dedupeState := models.DedupeStateSucceeded
+	if state == models.MaintenanceStateFailed {
+		dedupeState = models.DedupeStateFailed
+	}
+	if manual {
+		return completeManualMaintenance(e.DB, epoch, dedupeState, dedupeState, output.ExitCode, output.Stderr, e.now(), e.ConfigResolver)
+	}
+	if err := e.DB.Model(&models.DestinationScopeMaintenance{}).Where("id = ? AND state = ? AND dedupe_state = ? AND lease_token = ?", epoch.ID, models.MaintenanceStateExhausted, models.DedupeStateRunning, epoch.LeaseToken).Updates(map[string]interface{}{"dedupe_state": dedupeState, "result": dedupeState, "exit_code": output.ExitCode, "finished_at": e.now(), "last_error": redactMaintenanceError(output.Stderr, epoch), "revision": gorm.Expr("revision + 1")}).Error; err != nil {
+		return err
+	}
+	return waitErr
 }
 
 // RecoverBatch is intentionally internal to the proactive lane. It never

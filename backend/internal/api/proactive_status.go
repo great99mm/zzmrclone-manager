@@ -83,6 +83,28 @@ type proactiveQueueStatus struct {
 	Failed    proactiveBytes `json:"failed"`
 }
 
+type proactiveMaintenanceStatus struct {
+	State                string                         `json:"state"`
+	Epoch                int64                          `json:"epoch"`
+	Reason               string                         `json:"reason"`
+	Revision             int64                          `json:"revision"`
+	DedupeState          string                         `json:"dedupe_state"`
+	Result               string                         `json:"result"`
+	Error                string                         `json:"error"`
+	ManualMergeAvailable bool                           `json:"manual_merge_available"`
+	Blocker              string                         `json:"blocker"`
+	LegacyRecovery       *proactiveLegacyRecoveryStatus `json:"legacy_recovery,omitempty"`
+}
+
+type proactiveLegacyRecoveryStatus struct {
+	EpochID                  uint   `json:"epoch_id"`
+	Reason                   string `json:"reason"`
+	Revision                 int64  `json:"revision"`
+	State                    string `json:"state"`
+	DedupeState              string `json:"dedupe_state"`
+	ProcessIdentityAvailable bool   `json:"process_identity_available"`
+}
+
 type proactiveFileAggregate struct {
 	BatchID uint
 	State   string
@@ -151,6 +173,20 @@ func getProactiveStatus(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid proactive quota bindings"})
 		return
+	}
+	var boundAccounts []models.QuotaAccount
+	if err := db.Where("quota_key IN ?", mapStringValues(quotaKeys)).Find(&boundAccounts).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load quota accounts"})
+		return
+	}
+	seenAccountIDs := make(map[uint]struct{}, len(accounts))
+	for _, account := range accounts {
+		seenAccountIDs[account.ID] = struct{}{}
+	}
+	for _, account := range boundAccounts {
+		if _, exists := seenAccountIDs[account.ID]; !exists {
+			accounts = append(accounts, account)
+		}
 	}
 	accountsByKey := make(map[string]models.QuotaAccount, len(accounts))
 	for _, account := range accounts {
@@ -319,7 +355,76 @@ func getProactiveStatus(c *gin.Context) {
 	}
 
 	taskError := redactProactiveError(task.LastError, task, redactionBatches...)
-	c.JSON(http.StatusOK, gin.H{"task": gin.H{"id": task.ID, "status": task.Status, "enabled": task.Enabled, "transfer_mode": task.TransferMode, "resolution_required": taskResolutionRequired, "rescan_pending": task.RotationRescanPending, "generation": task.RotationRescanGeneration, "stop_requested": task.RotationStopRequested, "wake_at": task.RotationQuotaWakeAt, "current_error": taskError, "last_error": taskError}, "accounts": bindings, "batches": resultBatches, "queue": queue})
+	maintenance := proactiveMaintenanceStatus{}
+	var epoch models.DestinationScopeMaintenance
+	var legacyRecovery models.DestinationScopeMaintenance
+	if db.Migrator().HasTable(&models.DestinationScopeMaintenance{}) {
+		if err := db.Where("destination_scope = ? AND reason = ?", models.DestinationScope(resolvedIdentity, task.RemoteDir), models.MaintenanceReasonManualMerge).Order("epoch DESC").First(&epoch).Error; err == nil {
+			maintenance = proactiveMaintenanceStatus{State: epoch.State, Epoch: epoch.Epoch, Reason: epoch.Reason, Revision: epoch.Revision, DedupeState: epoch.DedupeState, Result: epoch.Result, Error: redactProactiveError(epoch.LastError, task)}
+		}
+		_ = db.Where("destination_scope = ? AND reason = ? AND (state <> ? OR dedupe_state IN ?)", models.DestinationScope(resolvedIdentity, task.RemoteDir), models.MaintenanceReasonQuotaExhaustion, models.MaintenanceStateClosed, []string{models.DedupeStateClaimed, models.DedupeStateRunning, models.DedupeStateUnknown}).Order("epoch DESC").First(&legacyRecovery).Error
+	}
+	maintenance.ManualMergeAvailable, maintenance.Blocker = proactiveManualMergeAvailability(models.DestinationScope(resolvedIdentity, task.RemoteDir), epoch, quotaKeys)
+	if legacyRecovery.ID != 0 {
+		maintenance.LegacyRecovery = &proactiveLegacyRecoveryStatus{
+			EpochID:                  legacyRecovery.ID,
+			Reason:                   legacyRecovery.Reason,
+			Revision:                 legacyRecovery.Revision,
+			State:                    legacyRecovery.State,
+			DedupeState:              legacyRecovery.DedupeState,
+			ProcessIdentityAvailable: legacyRecovery.ProcessID > 0 && legacyRecovery.ProcessStartToken != "",
+		}
+		maintenance.ManualMergeAvailable = false
+		maintenance.Blocker = "legacy_maintenance_recovery"
+	}
+	c.JSON(http.StatusOK, gin.H{"task": gin.H{"id": task.ID, "status": task.Status, "enabled": task.Enabled, "transfer_mode": task.TransferMode, "resolution_required": taskResolutionRequired, "rescan_pending": task.RotationRescanPending, "generation": task.RotationRescanGeneration, "stop_requested": task.RotationStopRequested, "wake_at": task.RotationQuotaWakeAt, "current_error": taskError, "last_error": taskError}, "accounts": bindings, "batches": resultBatches, "queue": queue, "maintenance": maintenance})
+}
+
+func proactiveManualMergeAvailability(scope string, epoch models.DestinationScopeMaintenance, keys map[string]string) (bool, string) {
+	if epoch.ID != 0 && (epoch.State != models.MaintenanceStateClosed || epoch.DedupeState == models.DedupeStateClaimed || epoch.DedupeState == models.DedupeStateRunning || epoch.DedupeState == models.DedupeStateUnknown) {
+		return false, "maintenance_epoch"
+	}
+	if db.Migrator().HasTable(&models.DestinationScopeCoordinator{}) {
+		var coordinator models.DestinationScopeCoordinator
+		if err := db.Where("destination_scope = ?", scope).First(&coordinator).Error; err == nil && coordinator.ScannerLeaseUntil != nil && coordinator.ScannerLeaseUntil.After(time.Now()) {
+			return false, "scanner_active"
+		}
+	}
+	var active int64
+	if err := db.Model(&models.RotationQuotaBatch{}).Where("destination_scope = ? AND state IN ?", scope, []string{models.BatchStatePlanned, models.BatchStateReserved, models.BatchStateRunning, models.BatchStateReconciling, models.BatchStateUnknown}).Count(&active).Error; err != nil {
+		return false, "ledger_unavailable"
+	}
+	if active > 0 {
+		return false, "active_batch"
+	}
+	var accounts []models.QuotaAccount
+	if err := db.Where("quota_key IN ?", mapStringValues(keys)).Find(&accounts).Error; err != nil {
+		return false, "ledger_unavailable"
+	}
+	blocked, _, err := quota.AccountWideBlocker(db, accountIDsForStatus(accounts), scope, time.Now())
+	if err != nil {
+		return false, "ledger_unavailable"
+	}
+	if blocked {
+		return false, "account_active_elsewhere"
+	}
+	return true, ""
+}
+
+func mapStringValues(values map[string]string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		result = append(result, value)
+	}
+	return result
+}
+
+func accountIDsForStatus(accounts []models.QuotaAccount) []uint {
+	result := make([]uint, len(accounts))
+	for i, account := range accounts {
+		result[i] = account.ID
+	}
+	return result
 }
 
 func addProactiveBytes(left, right proactiveBytes) proactiveBytes {
@@ -350,7 +455,7 @@ func addProactiveQueueForBatch(queue *proactiveQueueStatus, batch models.Rotatio
 }
 
 func redactProactiveError(value string, task models.Task, batches ...models.RotationQuotaBatch) string {
-	secrets := []string{task.RcloneConfig, task.SourceDir}
+	secrets := []string{task.RcloneConfig, task.SourceDir, task.RemoteDir}
 	for _, batch := range batches {
 		secrets = append(secrets, batch.RcloneConfigPath, batch.SourceRoot, batch.DestinationPath, batch.ManifestPath, batch.OwnerToken, batch.LeaseToken, batch.ProcessStartToken, batch.RequestKey, batch.RequestFingerprint)
 	}

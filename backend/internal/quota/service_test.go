@@ -27,6 +27,7 @@ func newQuotaTestDB(t *testing.T) *gorm.DB {
 	if sqlDB, err := db.DB(); err == nil {
 		sqlDB.SetMaxOpenConns(4)
 		sqlDB.SetMaxIdleConns(2)
+		t.Cleanup(func() { _ = sqlDB.Close() })
 	} else {
 		t.Fatal(err)
 	}
@@ -60,6 +61,147 @@ func TestReserveZeroTaskQuotaRetainsZeroCapacity(t *testing.T) {
 	}
 	if len(result.Batches) != 0 || len(result.Pending) != 1 {
 		t.Fatalf("zero quota scheduled capacity: batches=%d pending=%d", len(result.Batches), len(result.Pending))
+	}
+}
+
+func TestReserveClassifiesOtherScopeAccountBlockerBeforeBudgetExhaustion(t *testing.T) {
+	db := newQuotaTestDB(t)
+	account := addAccount(t, db, "key", 1)
+	service := testService(db, time.Unix(100, 0))
+	otherScope := models.DestinationScope("config-identity", "/other")
+	lease := time.Unix(130, 0)
+	if err := db.Create(&models.RotationQuotaBatch{TaskID: 99, QuotaAccountID: account.ID, DestinationScope: otherScope, State: models.BatchStateRunning, RequestKey: "other-scope", LeaseUntil: &lease}).Error; err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Reserve(PackReserveRequest{Task: quotaTask([]string{"remote"}, map[string]string{"remote": "key"}, 1), Snapshots: []LocalSnapshot{snapshot("file", 1)}, SourceRoot: "/source", DestinationPath: "/dest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Classification != models.ReserveClassAccountBlocked || len(result.Batches) != 0 || len(result.Pending) != 1 {
+		t.Fatalf("result = %#v", result)
+	}
+	if result.RetryAt == nil || !result.RetryAt.After(time.Unix(100, 0)) || !result.RetryAt.Equal(lease) {
+		t.Fatalf("blocker retry wake = %v, want %v", result.RetryAt, lease)
+	}
+	var count int64
+	if err := db.Model(&models.RotationQuotaBatch{}).Where("task_id = ?", 7).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("blocked reservation created %d batches", count)
+	}
+}
+
+func TestReserveClassifiesAllCrossScopeActiveLedgerStatesAsBlockers(t *testing.T) {
+	db := newQuotaTestDB(t)
+	account := addAccount(t, db, "key", 100)
+	service := testService(db, time.Unix(100, 0))
+	otherScope := models.DestinationScope("config-identity", "/other")
+	lease := time.Unix(150, 0)
+	for i, state := range []string{models.BatchStatePlanned, models.BatchStateReserved, models.BatchStateRunning, models.BatchStateReconciling, models.BatchStateUnknown} {
+		if err := db.Create(&models.RotationQuotaBatch{TaskID: uint(100 + i), QuotaAccountID: account.ID, DestinationScope: otherScope, State: state, RequestKey: fmt.Sprintf("batch-%d", i), OwnerToken: fmt.Sprintf("owner-%d", i), LeaseUntil: &lease}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, state := range []string{models.ReservationStateHeld, models.ReservationStateActive, models.ReservationStateUnknown} {
+		expires := time.Unix(140+int64(i), 0)
+		if err := db.Create(&models.QuotaReservation{QuotaAccountID: account.ID, BatchID: uint(i + 1), BatchFileID: uint(i + 1), Bytes: 1, State: state, IdempotencyKey: fmt.Sprintf("reservation-%d", i), ExpiresAt: &expires}).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := service.Reserve(PackReserveRequest{Task: quotaTask([]string{"remote"}, map[string]string{"remote": "key"}, 100), Snapshots: []LocalSnapshot{snapshot("file", 1)}, SourceRoot: "/source", DestinationPath: "/dest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Classification != models.ReserveClassAccountBlocked || result.RetryAt == nil || !result.RetryAt.After(time.Unix(100, 0)) {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestReserveCrossScopeBlockerWithoutLeaseOrExpiryGetsFutureWake(t *testing.T) {
+	db := newQuotaTestDB(t)
+	account := addAccount(t, db, "key", 100)
+	service := testService(db, time.Unix(100, 0))
+	otherScope := models.DestinationScope("config-identity", "/other")
+	batch := models.RotationQuotaBatch{TaskID: 500, QuotaAccountID: account.ID, DestinationScope: otherScope, State: models.BatchStateReconciling, RequestKey: "nil-lease", OwnerToken: "nil-owner"}
+	if err := db.Create(&batch).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.QuotaReservation{QuotaAccountID: account.ID, BatchID: batch.ID, Bytes: 1, State: models.ReservationStateUnknown, IdempotencyKey: "nil-expiry"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Reserve(PackReserveRequest{Task: quotaTask([]string{"remote"}, map[string]string{"remote": "key"}, 100), Snapshots: []LocalSnapshot{snapshot("file", 1)}, SourceRoot: "/source", DestinationPath: "/dest"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := time.Unix(160, 0)
+	if result.Classification != models.ReserveClassAccountBlocked || result.RetryAt == nil || !result.RetryAt.After(time.Unix(100, 0)) || !result.RetryAt.Equal(want) {
+		t.Fatalf("result = %#v, want future fallback wake %v", result, want)
+	}
+}
+
+func TestReserveRejectsLostScannerCoordinatorOwnership(t *testing.T) {
+	db := newQuotaTestDB(t)
+	if err := db.AutoMigrate(&models.DestinationScopeCoordinator{}); err != nil {
+		t.Fatal(err)
+	}
+	account := addAccount(t, db, "key", 100)
+	service := testService(db, time.Unix(100, 0))
+	task := quotaTask([]string{"remote"}, map[string]string{"remote": "key"}, 100)
+	resolved, err := service.ResolveConfigPath(task.RcloneConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := models.DestinationScope(resolved, "/dest")
+	lease := time.Unix(200, 0)
+	if err := db.Create(&models.DestinationScopeCoordinator{DestinationScope: scope, ScannerLeaseToken: "other-scanner", ScannerLeaseUntil: &lease}).Error; err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Reserve(PackReserveRequest{Task: task, Snapshots: []LocalSnapshot{snapshot("file", 1)}, RequestIdempotencyKey: "lost-scanner", SourceRoot: "/source", DestinationPath: "/dest", CoordinatorLeaseToken: "stale-scanner"})
+	if !errors.Is(err, ErrCoordinatorConflict) {
+		t.Fatalf("lost scanner ownership error = %v", err)
+	}
+	var count int64
+	if err := db.Model(&models.RotationQuotaBatch{}).Where("quota_account_id = ?", account.ID).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("lost scanner created %d batches", count)
+	}
+}
+
+func TestReserveFinalCoordinatorCheckRejectsLeaseLostAfterInitialCheck(t *testing.T) {
+	db := newQuotaTestDB(t)
+	if err := db.AutoMigrate(&models.DestinationScopeCoordinator{}); err != nil {
+		t.Fatal(err)
+	}
+	account := addAccount(t, db, "key", 100)
+	service := testService(db, time.Unix(100, 0))
+	task := quotaTask([]string{"remote"}, map[string]string{"remote": "key"}, 100)
+	resolved, err := service.ResolveConfigPath(task.RcloneConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := models.DestinationScope(resolved, "/dest")
+	lease := time.Unix(200, 0)
+	coordinator := models.DestinationScopeCoordinator{DestinationScope: scope, ScannerLeaseToken: "scanner", ScannerLeaseUntil: &lease}
+	if err := db.Create(&coordinator).Error; err != nil {
+		t.Fatal(err)
+	}
+	service.BeforeFinalReservationCheck = func(tx *gorm.DB) {
+		expired := time.Unix(90, 0)
+		_ = tx.Model(&models.DestinationScopeCoordinator{}).Where("destination_scope = ? AND scanner_lease_token = ?", scope, "scanner").Updates(map[string]interface{}{"scanner_lease_token": "replacement", "scanner_lease_until": expired}).Error
+	}
+	_, err = service.Reserve(PackReserveRequest{Task: task, Snapshots: []LocalSnapshot{snapshot("file", 1)}, RequestIdempotencyKey: "final-loss", SourceRoot: "/source", DestinationPath: "/dest", CoordinatorLeaseToken: "scanner"})
+	if !errors.Is(err, ErrCoordinatorConflict) {
+		t.Fatalf("final ownership loss error = %v", err)
+	}
+	var count int64
+	if err := db.Model(&models.RotationQuotaBatch{}).Where("quota_account_id = ?", account.ID).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("final ownership loss created %d batches", count)
 	}
 }
 
@@ -192,6 +334,12 @@ func TestRequestIdentityFingerprintAndMissingKey(t *testing.T) {
 	if _, err := service.Reserve(moveRequest); err == nil {
 		t.Fatal("move transfer mode was accepted")
 	}
+	if err := db.Model(&models.RotationQuotaBatch{}).Where("task_id = ?", req.Task.ID).Update("state", models.BatchStateSucceeded).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&models.QuotaReservation{}).Where("batch_id IN (SELECT id FROM rotation_quota_batches WHERE task_id = ?)", req.Task.ID).Update("state", models.ReservationStateReleased).Error; err != nil {
+		t.Fatal(err)
+	}
 
 	missing := req
 	missing.RequestIdempotencyKey = ""
@@ -287,6 +435,12 @@ func TestConfigPinningAndSymlinkRetarget(t *testing.T) {
 	directTask.RcloneConfig = target1
 	if _, err := service.Reserve(PackReserveRequest{Task: directTask, Snapshots: []LocalSnapshot{snapshot("two", 1)}, RequestIdempotencyKey: "pin-two", SourceRoot: t.TempDir(), DestinationPath: "/same"}); !errors.Is(err, ErrActiveBatch) {
 		t.Fatalf("alias/direct scope collision error = %v", err)
+	}
+	if err := db.Model(&models.RotationQuotaBatch{}).Where("id = ?", stored.ID).Update("state", models.BatchStateSucceeded).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&models.QuotaReservation{}).Where("batch_id = ?", stored.ID).Update("state", models.ReservationStateReleased).Error; err != nil {
+		t.Fatal(err)
 	}
 	if err := os.Remove(link); err != nil {
 		t.Fatal(err)

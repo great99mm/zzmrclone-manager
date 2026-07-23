@@ -36,6 +36,8 @@ export const pauseTask = (id) => api.post(`/tasks/${id}/pause`);
 export const cancelTask = (id) => api.post(`/tasks/${id}/cancel`);
 export const stopTask = (id) => api.post(`/tasks/${id}/stop`);
 export const dedupeTask = (id) => api.post(`/tasks/${id}/dedupe`);
+export const startProactiveManualMerge = (id) => api.post(`/tasks/${id}/proactive-manual-merge`);
+export const closeProactiveUnknownMaintenance = (epochId, data) => api.post(`/proactive-maintenance/${epochId}/close-unknown`, data);
 export const getTaskLogs = (id, lines = 100) => api.get(`/tasks/${id}/logs?lines=${lines}`);
 export const getTaskStatus = (id) => api.get(`/tasks/${id}/status`);
 export const getProactiveStatus = (id, limit = 100, summary = false) => {

@@ -19,22 +19,25 @@ import (
 )
 
 var (
-	ErrActiveBatch         = errors.New("an active quota batch already exists for the task or destination scope")
-	ErrIdempotencyConflict = errors.New("request idempotency key was reused with a different fingerprint")
+	ErrActiveBatch            = errors.New("an active quota batch already exists for the task or destination scope")
+	ErrIdempotencyConflict    = errors.New("request idempotency key was reused with a different fingerprint")
+	ErrDestinationScopePaused = errors.New("destination scope is paused for maintenance")
+	ErrCoordinatorConflict    = errors.New("destination scope coordinator is owned")
 )
 
 type ConfigResolver func(raw string) (string, error)
 
 type Service struct {
-	DB             *gorm.DB
-	Now            func() time.Time
-	SettleInterval time.Duration
-	RetrySleep     func(time.Duration)
-	TokenGenerator func() string
-	ConfigResolver ConfigResolver
-	MaxRetries     int
-	RetryDelay     time.Duration
-	MoveEnabled    func() bool
+	DB                          *gorm.DB
+	Now                         func() time.Time
+	SettleInterval              time.Duration
+	RetrySleep                  func(time.Duration)
+	TokenGenerator              func() string
+	ConfigResolver              ConfigResolver
+	MaxRetries                  int
+	RetryDelay                  time.Duration
+	MoveEnabled                 func() bool
+	BeforeFinalReservationCheck func(*gorm.DB)
 }
 
 func (s *Service) ResolveConfigPath(raw string) (string, error) { return s.resolveConfigPath(raw) }
@@ -45,17 +48,23 @@ type PackReserveRequest struct {
 	RequestIdempotencyKey string
 	SourceRoot            string
 	DestinationPath       string
+	CoordinatorLeaseToken string
 }
 
 type PackReserveResult struct {
-	Batches  []models.RotationQuotaBatch
-	Pending  []LocalSnapshot
-	Existing bool
+	Batches        []models.RotationQuotaBatch
+	Pending        []LocalSnapshot
+	Existing       bool
+	Classification string
+	RetryAt        *time.Time
 }
 
 func (s *Service) Reserve(req PackReserveRequest) (PackReserveResult, error) {
 	if s == nil || s.DB == nil {
 		return PackReserveResult{}, errors.New("quota service database is required")
+	}
+	if len(req.Snapshots) == 0 {
+		return PackReserveResult{Classification: models.ReserveClassNoFiles}, nil
 	}
 	normalizedTask, err := s.normalizeQuotaTask(req.Task)
 	if err != nil {
@@ -282,6 +291,12 @@ func (s *Service) reserveAttempt(req PackReserveRequest, requestKey, fingerprint
 	}
 	returnResult := PackReserveResult{}
 	err := s.DB.Transaction(func(tx *gorm.DB) error {
+		if err := proactiveCoordinatorReserve(tx, models.DestinationScope(resolvedConfig, destinationPath), req.CoordinatorLeaseToken, now()); err != nil {
+			return err
+		}
+		if err := checkMaintenanceFence(tx, models.DestinationScope(resolvedConfig, destinationPath), now()); err != nil {
+			return err
+		}
 		accounts, err := loadAccounts(tx, quotaKeys)
 		if err != nil {
 			return err
@@ -325,10 +340,21 @@ func (s *Service) reserveAttempt(req PackReserveRequest, requestKey, fingerprint
 			returnResult.Batches = existing
 			returnResult.Pending = pending
 			returnResult.Existing = true
+			returnResult.Classification = models.ReserveClassReserved
 			return nil
 		}
 		if err := rejectActiveBatches(tx, req.Task, resolvedConfig, destinationPath); err != nil {
 			return err
+		}
+		blocked, blockerWake, err := accountWideBlocker(tx, accountIDs(accounts), models.DestinationScope(resolvedConfig, destinationPath), transactionNow)
+		if err != nil {
+			return err
+		}
+		if blocked {
+			returnResult.Pending = append([]LocalSnapshot(nil), req.Snapshots...)
+			returnResult.Classification = models.ReserveClassAccountBlocked
+			returnResult.RetryAt = &blockerWake
+			return nil
 		}
 
 		usage, err := accountUsage(tx, accountIDs(accounts), transactionNow)
@@ -340,6 +366,13 @@ func (s *Service) reserveAttempt(req PackReserveRequest, requestKey, fingerprint
 			return err
 		}
 		returnResult.Pending = pending
+		returnResult.Classification = classifyReserveOutcome(pending, selected, accounts, usage, req.Task.RotationQuotaLimitBytes, transactionNow)
+		if s.BeforeFinalReservationCheck != nil {
+			s.BeforeFinalReservationCheck(tx)
+		}
+		if err := proactiveCoordinatorReserve(tx, models.DestinationScope(resolvedConfig, destinationPath), req.CoordinatorLeaseToken, transactionNow); err != nil {
+			return err
+		}
 		for _, remote := range remotes {
 			files := selected[remote]
 			if len(files) == 0 {
@@ -397,7 +430,144 @@ func (s *Service) reserveAttempt(req PackReserveRequest, requestKey, fingerprint
 		}
 		return nil
 	})
+	if err != nil && errors.Is(err, ErrActiveBatch) {
+		return PackReserveResult{Classification: models.ReserveClassActive}, err
+	}
 	return returnResult, err
+}
+
+func checkMaintenanceFence(tx *gorm.DB, scope string, _ time.Time) error {
+	var epoch models.DestinationScopeMaintenance
+	result := tx.Where("destination_scope = ? AND ((reason = ? AND state = ?) OR (reason = ? AND dedupe_state IN ?))", scope, models.MaintenanceReasonManualMerge, models.MaintenanceStateExhausted, models.MaintenanceReasonQuotaExhaustion, []string{models.DedupeStateClaimed, models.DedupeStateRunning, models.DedupeStateUnknown}).Order("epoch DESC").First(&epoch)
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		return nil
+	}
+	if result.Error != nil {
+		if strings.Contains(strings.ToLower(result.Error.Error()), "no such table") {
+			return nil
+		}
+		return result.Error
+	}
+	return ErrDestinationScopePaused
+}
+
+func proactiveCoordinatorReserve(tx *gorm.DB, scope, scannerToken string, now time.Time) error {
+	if !tx.Migrator().HasTable(&models.DestinationScopeCoordinator{}) {
+		return nil
+	}
+	var coordinator models.DestinationScopeCoordinator
+	result := tx.Where("destination_scope = ?", scope).First(&coordinator)
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		return nil
+	}
+	if result.Error != nil && strings.Contains(strings.ToLower(result.Error.Error()), "no such table") {
+		return nil
+	}
+	if result.Error != nil {
+		return result.Error
+	}
+	if err := tx.Model(&coordinator).UpdateColumn("updated_at", gorm.Expr("updated_at")).Error; err != nil {
+		return err
+	}
+	if scannerToken != "" {
+		if coordinator.ScannerLeaseToken != scannerToken || coordinator.ScannerLeaseUntil == nil || !coordinator.ScannerLeaseUntil.After(now) {
+			return ErrCoordinatorConflict
+		}
+	} else if coordinator.ScannerLeaseToken != "" && coordinator.ScannerLeaseUntil != nil && coordinator.ScannerLeaseUntil.After(now) {
+		return ErrCoordinatorConflict
+	}
+	return nil
+}
+
+func classifyReserveOutcome(pending []LocalSnapshot, selected map[string][]LocalSnapshot, accounts []models.QuotaAccount, usage map[uint]int64, taskLimit int64, now time.Time) string {
+	if len(pending) == 0 {
+		return models.ReserveClassReserved
+	}
+	if len(selected) == 0 {
+		enabled := 0
+		blocked := 0
+		allBudgetExhausted := true
+		for _, account := range accounts {
+			if !account.Enabled {
+				continue
+			}
+			enabled++
+			if account.ProviderBlockedUntil != nil && account.ProviderBlockedUntil.After(now) {
+				blocked++
+				continue
+			}
+			if usage[account.ID] < account.BudgetBytes {
+				allBudgetExhausted = false
+			}
+		}
+		if enabled == 0 {
+			if blocked > 0 {
+				return models.ReserveClassProviderBlocked
+			}
+			return models.ReserveClassDisabled
+		}
+		if blocked == enabled {
+			return models.ReserveClassProviderBlocked
+		}
+		if blocked == 0 && allBudgetExhausted {
+			return models.ReserveClassBudgetExhausted
+		}
+		for _, snapshot := range pending {
+			fits := false
+			for _, account := range accounts {
+				if account.Enabled && (account.ProviderBlockedUntil == nil || !account.ProviderBlockedUntil.After(now)) && snapshot.SizeBytes <= account.BudgetBytes && snapshot.SizeBytes <= taskLimit {
+					fits = true
+				}
+			}
+			if !fits {
+				return models.ReserveClassOversize
+			}
+		}
+		return models.ReserveClassNoFit
+	}
+	if taskLimit >= 0 {
+		return models.ReserveClassTaskCeiling
+	}
+	return models.ReserveClassNoFit
+}
+
+func accountWideBlocker(tx *gorm.DB, accountIDs []uint, scope string, now time.Time) (bool, time.Time, error) {
+	var wake time.Time
+	blocked := false
+	addWake := func(candidate *time.Time) {
+		if candidate != nil && candidate.After(now) && (wake.IsZero() || candidate.Before(wake)) {
+			wake = *candidate
+		}
+	}
+	var batches []models.RotationQuotaBatch
+	if err := tx.Where("quota_account_id IN ? AND destination_scope <> ? AND state IN ?", accountIDs, scope, []string{models.BatchStatePlanned, models.BatchStateReserved, models.BatchStateRunning, models.BatchStateReconciling, models.BatchStateUnknown}).Find(&batches).Error; err != nil {
+		return false, time.Time{}, err
+	}
+	for _, batch := range batches {
+		blocked = true
+		addWake(batch.LeaseUntil)
+	}
+	var reservations []models.QuotaReservation
+	if err := tx.Model(&models.QuotaReservation{}).
+		Joins("JOIN rotation_quota_batches ON rotation_quota_batches.id = quota_reservations.batch_id").
+		Where("quota_reservations.quota_account_id IN ? AND rotation_quota_batches.destination_scope <> ? AND quota_reservations.state IN ?", accountIDs, scope, []string{models.ReservationStateHeld, models.ReservationStateActive, models.ReservationStateUnknown}).
+		Find(&reservations).Error; err != nil {
+		return false, time.Time{}, err
+	}
+	for _, reservation := range reservations {
+		blocked = true
+		addWake(reservation.ExpiresAt)
+	}
+	if wake.IsZero() {
+		wake = now.Add(time.Minute)
+	}
+	return blocked, wake, nil
+}
+
+// AccountWideBlocker is the shared conflict rule used by reservation and
+// manual maintenance claims. It deliberately includes unknown ledger state.
+func AccountWideBlocker(tx *gorm.DB, accountIDs []uint, scope string, now time.Time) (bool, time.Time, error) {
+	return accountWideBlocker(tx, accountIDs, scope, now)
 }
 
 func pendingForExistingBatches(tx *gorm.DB, snapshots []LocalSnapshot, batches []models.RotationQuotaBatch) ([]LocalSnapshot, error) {

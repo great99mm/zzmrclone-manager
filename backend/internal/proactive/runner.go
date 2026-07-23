@@ -30,6 +30,12 @@ type MoveSpec struct {
 	DestinationPath   string
 }
 
+type DedupeSpec struct {
+	ConfigPath      string
+	Remote          string
+	DestinationPath string
+}
+
 type RemoteObject struct {
 	Path  string
 	Size  int64
@@ -57,6 +63,10 @@ type CommandRunner interface {
 
 type MoveRunner interface {
 	StartMove(context.Context, MoveSpec) (ProcessHandle, error)
+}
+
+type DedupeRunner interface {
+	StartDedupe(context.Context, DedupeSpec) (ProcessHandle, error)
 }
 
 type ExecRunner struct {
@@ -145,6 +155,44 @@ func (r ExecRunner) StartMove(ctx context.Context, spec MoveSpec) (ProcessHandle
 			result.ExitCode = cmd.ProcessState.ExitCode()
 		}
 		return nil, &StartedProcessIdentityError{PID: cmd.Process.Pid, Cause: errors.New("unable to read rclone process identity"), Result: result, WaitErr: waitErr}
+	}
+	return &execProcess{cmd: cmd, stdout: &stdout, stderr: &stderr, token: token}, nil
+}
+
+func (r ExecRunner) StartDedupe(ctx context.Context, spec DedupeSpec) (ProcessHandle, error) {
+	if runtime.GOOS != "linux" {
+		return nil, errors.New("proactive dedupe runner requires Linux")
+	}
+	if spec.ConfigPath == "" || spec.Remote == "" {
+		return nil, errors.New("invalid dedupe specification")
+	}
+	if info, err := os.Stat(spec.ConfigPath); err != nil || !info.Mode().IsRegular() {
+		return nil, errors.New("dedupe config preflight failed")
+	}
+	binary := r.Binary
+	if binary == "" {
+		binary = "rclone"
+	}
+	target := spec.Remote + ":" + canonicalRemotePath(spec.DestinationPath)
+	cmd := exec.CommandContext(ctx, binary, "--config", spec.ConfigPath, "dedupe", target, "--dedupe-mode", "newest", "-v")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	readToken := r.ProcessStartToken
+	if readToken == nil {
+		readToken = processStartToken
+	}
+	token := readToken(cmd.Process.Pid)
+	if cmd.Process.Pid <= 0 || token == "" {
+		_ = cmd.Process.Kill()
+		waitErr := cmd.Wait()
+		result := ProcessResult{PID: cmd.Process.Pid, ProcessStartToken: token, Stdout: stdout.String(), Stderr: stderr.String()}
+		if cmd.ProcessState != nil {
+			result.ExitCode = cmd.ProcessState.ExitCode()
+		}
+		return nil, &StartedProcessIdentityError{PID: cmd.Process.Pid, Cause: errors.New("unable to read dedupe process identity"), Result: result, WaitErr: waitErr}
 	}
 	return &execProcess{cmd: cmd, stdout: &stdout, stderr: &stderr, token: token}, nil
 }
