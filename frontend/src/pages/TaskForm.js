@@ -36,8 +36,6 @@ const TaskForm = () => {
     rotation_strategy: 'proactive_quota',
     rotation_quota_limit_bytes: 700 * 1024 * 1024 * 1024,
     rotation_quota_keys: '{}',
-    rotation_max_rounds: 3,
-    rotation_resume_time: '01:00',
     rotation_current_index: 0,
     rotation_current_round: 0,
     rotation_paused_until: null,
@@ -93,17 +91,13 @@ const TaskForm = () => {
 
   const selectedRotationRemotes = useMemo(() => parseRotationRemotes(), [parseRotationRemotes]);
 
-  const isValidResumeTime = useCallback((value) => /^([01]\d|2[0-3]):([0-5]\d)$/.test(value), []);
-
   const rotationLogicText = useMemo(() => {
     if (!isRotationTask) return null;
     const remotesText = selectedRotationRemotes.length > 0 ? selectedRotationRemotes.join(' → ') : 'A → B → C';
     const sourceText = form.source_dir || '/x';
     const destPath = form.remote_dir || '/目标目录';
-    const rounds = form.rotation_max_rounds || 3;
-    const resumeTime = form.rotation_resume_time || '01:00';
-    return `当前逻辑：监控 ${sourceText} 后按 ${remotesText} 顺序上传到同一目标目录 ${destPath}；某个账号返回 403/429/限额后自动切到下一个；连续轮转 ${rounds} 轮后暂停，到 ${resumeTime} 自动从 ${selectedRotationRemotes[0] || 'A'} 重新开始。`;
-  }, [isRotationTask, selectedRotationRemotes, form.source_dir, form.remote_dir, form.rotation_max_rounds, form.rotation_resume_time]);
+    return `按 ${remotesText} 顺序上传到 ${destPath}，遇到额度限制自动切换下一账号。`;
+  }, [isRotationTask, selectedRotationRemotes, form.source_dir, form.remote_dir]);
 
   const loadRemotes = useCallback(async () => {
     try {
@@ -126,9 +120,6 @@ const TaskForm = () => {
           ? 700 * 1024 * 1024 * 1024
           : res.data.rotation_quota_limit_bytes,
         rotation_quota_keys: res.data.rotation_quota_keys || '{}',
-        rotation_max_rounds: res.data.rotation_max_rounds || 3,
-        rotation_resume_time: res.data.rotation_resume_time || '01:00',
-
       });
     } catch (err) {
       toast.error('加载任务失败');
@@ -280,11 +271,6 @@ const TaskForm = () => {
       const normalizedRemotes = parseRotationRemotes(submitForm.rotation_remotes);
       if (normalizedRemotes.length === 0) {
         toast.error('调度轮转任务至少选择一个网盘');
-        return;
-      }
-
-      if (!isValidResumeTime(submitForm.rotation_resume_time)) {
-        toast.error('恢复时间格式应为 HH:MM');
         return;
       }
 
@@ -708,26 +694,8 @@ const TaskForm = () => {
                         </div>
                       </div>
                       {isRotationTask && (
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 p-3 bg-blue-50 border border-blue-100 rounded-lg">
-                          <div>
-                            <label className="block text-xs text-gray-500 mb-1">最大轮数</label>
-                            <input
-                              type="number"
-                              min="1"
-                              value={form.rotation_max_rounds}
-                              onChange={(e) => handleChange('rotation_max_rounds', parseInt(e.target.value) || 1)}
-                              className="w-full h-10 px-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-xs text-gray-500 mb-1">恢复时间</label>
-                            <input
-                              type="time"
-                              value={form.rotation_resume_time}
-                              onChange={(e) => handleChange('rotation_resume_time', e.target.value)}
-                              className="w-full h-10 px-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                            />
-                          </div>
+                        <div className="grid grid-cols-1 gap-4">
+
                         </div>
                       )}
                       {remotes.length === 0 && (

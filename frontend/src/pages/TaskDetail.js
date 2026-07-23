@@ -588,7 +588,6 @@ const TaskDetail = () => {
             <InfoCard
               icon={Clock}
               label="恢复信息"
-              value={task.rotation_resume_time || '01:00'}
               sub={`暂停至: ${task.rotation_paused_until || '未暂停'}`}
             />
           </>
