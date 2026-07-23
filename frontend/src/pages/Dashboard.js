@@ -306,7 +306,7 @@ const Dashboard = () => {
                     <span>检查: {task.checkers}</span>
                     {task.watch_enabled && <span className="text-blue-500">监控</span>}
                     {task.schedule_enabled && <span className="text-purple-500">定时</span>}
-                    {task.qb_enabled && !(task.task_type === 'rotation' && task.rotation_strategy === 'proactive_quota') && <span className="text-amber-500">qB完成</span>}
+                    {task.qb_enabled && <span className="text-amber-500">qB完成</span>}
                   </div>
                 </div>
 

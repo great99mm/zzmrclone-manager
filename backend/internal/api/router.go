@@ -483,10 +483,8 @@ func validateAndNormalizeTask(task *models.Task) error {
 	if task.TaskType == "rotation" && task.RotationStrategy != "legacy_error" && task.RotationStrategy != "proactive_quota" {
 		return fmt.Errorf("轮转策略无效")
 	}
-	if task.TaskType == "rotation" && task.RotationStrategy == "proactive_quota" {
-		clearProactiveQBConfig(task)
-	} else if task.TaskType == "rotation" && task.QBEnabled {
-		return fmt.Errorf("轮转任务不支持 qBittorrent 触发，请关闭 qBittorrent 后再保存")
+	if task.TaskType == "rotation" && task.RotationStrategy == "legacy_error" && task.QBEnabled {
+		return fmt.Errorf("异常触发轮转不支持 qBittorrent 触发，请关闭 qBittorrent 后再保存")
 	}
 
 	if task.OpenlistURL != "" {
@@ -571,15 +569,6 @@ func validateAndNormalizeTask(task *models.Task) error {
 		return validateQBTask(task)
 	}
 	return nil
-}
-
-func clearProactiveQBConfig(task *models.Task) {
-	task.QBEnabled = false
-	task.QBURL = ""
-	task.QBUsername = ""
-	task.QBPassword = ""
-	task.QBPollInterval = 0
-	task.QBDeleteFiles = false
 }
 
 func proactiveMoveEnabled() bool {

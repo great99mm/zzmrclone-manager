@@ -296,7 +296,7 @@ const Tasks = () => {
                         {task.schedule_enabled && (
                           <span className="px-2 py-0.5 bg-purple-100 text-purple-700 text-xs rounded-full">定时</span>
                         )}
-                        {task.qb_enabled && !(task.task_type === 'rotation' && task.rotation_strategy === 'proactive_quota') && (
+                        {task.qb_enabled && (
                           <span className="px-2 py-0.5 bg-amber-100 text-amber-700 text-xs rounded-full">qB完成</span>
                         )}
                       </div>
@@ -417,7 +417,7 @@ const Tasks = () => {
                 {task.schedule_enabled && (
                   <span className="px-2 py-0.5 bg-purple-100 text-purple-700 text-xs rounded-full">定时</span>
                 )}
-                {task.qb_enabled && !(task.task_type === 'rotation' && task.rotation_strategy === 'proactive_quota') && (
+                {task.qb_enabled && (
                   <span className="px-2 py-0.5 bg-amber-100 text-amber-700 text-xs rounded-full">qB完成</span>
                 )}
               </div>

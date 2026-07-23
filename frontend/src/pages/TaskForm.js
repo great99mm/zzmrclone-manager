@@ -246,7 +246,7 @@ const TaskForm = () => {
 
 
 
-    if (form.qb_enabled && !(isRotationTask && form.rotation_strategy === 'proactive_quota')) {
+    if (form.qb_enabled) {
       if (form.source_type !== 'local') {
         toast.error('qBittorrent 完成触发只支持本地源目录');
         return;
@@ -772,7 +772,11 @@ const TaskForm = () => {
                       </p>
                     </div>
 
-                    <div>
+                     <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+                       <strong>重要：</strong>所有轮转网盘（team-1、team-2 等）必须挂载到<b>同一块共享存储</b>。文件按顺序上传到各账号，但所有账号共享同一媒体库目录。
+                     </div>
+
+                     <div>
                       <label htmlFor="rotation-quota-limit" className="block text-xs font-medium text-gray-700 mb-1">每账号每日额度</label>
                       <div className="flex flex-col sm:flex-row sm:items-center gap-2 min-w-0">
                         <input
@@ -958,22 +962,21 @@ const TaskForm = () => {
               </div>
             )}
 
-            {!isProactiveQuota && <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+            <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
               <div>
                 <div className="font-medium text-gray-900">qBittorrent 完成触发</div>
-                <div className="text-sm text-gray-500">种子 100% 完成后只转移该种子的内容，成功后删除种子</div>
+                <div className="text-sm text-gray-500">种子完成后自动触发转移</div>
               </div>
-              <label className={`relative inline-flex items-center cursor-pointer ${isRotationTask && form.rotation_strategy === 'proactive_quota' ? 'opacity-50 cursor-not-allowed' : ''}`}>
+              <label className="relative inline-flex items-center cursor-pointer">
                 <input
                   type="checkbox"
-                  checked={isProactiveQuota ? false : form.qb_enabled}
+                  checked={form.qb_enabled}
                   onChange={(e) => handleChange('qb_enabled', e.target.checked)}
-                  disabled={isRotationTask && form.rotation_strategy === 'proactive_quota'}
                   className="sr-only peer"
                 />
-                <div className="w-11 h-6 bg-gray-200 peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer peer-disabled:cursor-not-allowed peer-disabled:opacity-60 after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                <div className="w-11 h-6 bg-gray-200 peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
               </label>
-            </div>}
+            </div>
 
             {!isProactiveQuota && form.qb_enabled && (
               <div className="md:ml-4 p-4 border-l-2 border-green-200 space-y-4">
