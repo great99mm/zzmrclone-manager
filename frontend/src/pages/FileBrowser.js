@@ -19,7 +19,6 @@ import {
   createQuickTask,
   getQuickTasks,
   deleteTask,
-  getOpenlistConfigs,
   createRemoteDir,
   createWebSocket,
 } from '../services/api';
@@ -70,11 +69,7 @@ const FileBrowser = () => {
   const [destRemoteLoading, setDestRemoteLoading] = useState(false);
   const [destNewFolderName, setDestNewFolderName] = useState('');
   const [destCreatingDir, setDestCreatingDir] = useState(false);
-  const [openlistEnabled, setOpenlistEnabled] = useState(false);
-  const [openlistConfigs, setOpenlistConfigs] = useState([]);
-  const [openlistConfigId, setOpenlistConfigId] = useState('');
-  const [openlistRefreshDir, setOpenlistRefreshDir] = useState('');
-  const [openlistMapping, setOpenlistMapping] = useState('');
+
   const [quickTasks, setQuickTasks] = useState([]);
   const [quickTaskProgress, setQuickTaskProgress] = useState({});
   const [deletingQuickTaskId, setDeletingQuickTaskId] = useState(null);
@@ -94,12 +89,6 @@ const FileBrowser = () => {
       .catch(() => {
         setRoots([{ key: 'local', type: 'local', name: '本地目录', path: LOCAL_ROOT_PATH, startPath: LOCAL_DEFAULT_PATH }]);
       });
-  }, []);
-
-  useEffect(() => {
-    getOpenlistConfigs()
-      .then((res) => setOpenlistConfigs(res.data || []))
-      .catch(() => setOpenlistConfigs([]));
   }, []);
 
   const loadQuickTasks = useCallback(async () => {
@@ -382,25 +371,6 @@ const FileBrowser = () => {
       toast.error(destType === 'remote' ? '请选择目标云盘' : '请输入目标路径');
       return;
     }
-    if (openlistEnabled && (!openlistConfigId || !openlistRefreshDir)) {
-      toast.error('启用 OpenList 刷新时，请选择配置并填写刷新路径');
-      return;
-    }
-    if (openlistEnabled && openlistMapping.trim()) {
-      try {
-        const parsed = JSON.parse(openlistMapping);
-        if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
-          throw new Error('invalid mapping');
-        }
-      } catch {
-        toast.error('路径映射必须是 JSON 对象，例如 {"op:s1":"/s2"}');
-        return;
-      }
-    }
-    if (openlistEnabled && openlistConfigs.length === 0) {
-      toast.error('请先添加 OpenList 配置');
-      return;
-    }
     if (!currentRootMeta) return;
 
     if (actionMode === 'move' && !confirmedMove) {
@@ -425,10 +395,8 @@ const FileBrowser = () => {
           dest: finalDestPath,
           dest_type: destType,
           transfer_mode: actionMode,
-          openlist_enabled: openlistEnabled,
-          openlist_config_id: openlistEnabled ? Number(openlistConfigId) : 0,
-          openlist_refresh_dir: openlistEnabled ? openlistRefreshDir : '',
-          openlist_mapping: openlistEnabled ? openlistMapping.trim() : '',
+          openlist_enabled: false,
+          openlist_config_id: 0,
         });
         if (res?.data) {
           createdTasks.push({ ...res.data, status: 'running', last_error: '' });
@@ -877,65 +845,6 @@ const FileBrowser = () => {
                   )}
                 </div>
               )}
-
-              <div className="border-t pt-4">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={openlistEnabled}
-                    onChange={(e) => setOpenlistEnabled(e.target.checked)}
-                    className="w-4 h-4 rounded border-gray-300 text-blue-600"
-                  />
-                  <span className="text-sm font-medium text-gray-700">传输后刷新 OpenList</span>
-                </label>
-
-                {openlistEnabled && (
-                  <div className="mt-3 space-y-3">
-                    <div>
-                      <label className="block text-xs text-gray-500 mb-1">OpenList 配置</label>
-                      <select
-                        value={openlistConfigId}
-                        onChange={(e) => setOpenlistConfigId(e.target.value)}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
-                      >
-                        <option value="">选择已有配置</option>
-                        {openlistConfigs.map((cfg) => (
-                          <option key={cfg.id} value={cfg.id}>{cfg.name}</option>
-                        ))}
-                      </select>
-                      {openlistConfigs.length === 0 && (
-                        <button
-                          type="button"
-                          onClick={() => navigate('/openlist-configs')}
-                          className="text-xs text-blue-600 hover:text-blue-700 mt-1"
-                        >
-                          暂无配置，前往添加
-                        </button>
-                      )}
-                    </div>
-                    <div>
-                      <label className="block text-xs text-gray-500 mb-1">刷新路径</label>
-                      <input
-                        type="text"
-                        value={openlistRefreshDir}
-                        onChange={(e) => setOpenlistRefreshDir(e.target.value)}
-                        placeholder="/backup"
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs text-gray-500 mb-1">路径映射（可选）</label>
-                      <textarea
-                        value={openlistMapping}
-                        onChange={(e) => setOpenlistMapping(e.target.value)}
-                        placeholder='例如：{"op:s1":"/s2"}'
-                        rows={3}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm font-mono"
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
 
               <button
                 onClick={() => handleAction()}

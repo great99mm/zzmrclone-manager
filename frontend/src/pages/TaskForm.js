@@ -7,21 +7,16 @@ import {
   Cloud, 
   Settings2,
   Clock,
-  RefreshCw,
-  Plus,
   X,
-  Pencil,
   Trash2,
-  Link2,
   Folder,
   ChevronRight,
   Home,
   HardDrive,
   ShieldCheck,
-  KeyRound,
   ListChecks
 } from 'lucide-react';
-import { createTask, updateTask, getTask, getRemotes, listRemoteDir, getOpenlistConfigs } from '../services/api';
+import { createTask, updateTask, getTask, getRemotes, listRemoteDir } from '../services/api';
 import toast from 'react-hot-toast';
 
 const TaskForm = () => {
@@ -65,23 +60,15 @@ const TaskForm = () => {
     qb_password: '',
     qb_poll_interval: 60,
     qb_delete_files: false,
-    openlist_enabled: false,
-    openlist_url: '',
-    openlist_mapping: '',
-    openlist_token: '',
-    openlist_config_id: 0,
   });
 
   const [remotes, setRemotes] = useState([]);
-  const [openlistConfigs, setOpenlistConfigs] = useState([]);
+
   const [loading, setLoading] = useState(isEdit);
   const [saving, setSaving] = useState(false);
   const [legacyRotationValues, setLegacyRotationValues] = useState(null);
 
-  const [mapModalOpen, setMapModalOpen] = useState(false);
-  const [mapEditIndex, setMapEditIndex] = useState(null);
-  const [mapRclonePath, setMapRclonePath] = useState('');
-  const [mapOpenlistPath, setMapOpenlistPath] = useState('');
+
 
   // Directory browser state
   const [browserOpen, setBrowserOpen] = useState(false);
@@ -127,16 +114,6 @@ const TaskForm = () => {
     }
   }, []);
 
-  const loadOpenlistConfigs = useCallback(async () => {
-    try {
-      const res = await getOpenlistConfigs();
-      setOpenlistConfigs(res.data || []);
-    } catch (err) {
-      console.error('Failed to load OpenList configs');
-      setOpenlistConfigs([]);
-    }
-  }, []);
-
   const loadTask = useCallback(async () => {
     try {
       const res = await getTask(id);
@@ -151,7 +128,7 @@ const TaskForm = () => {
         rotation_quota_keys: res.data.rotation_quota_keys || '{}',
         rotation_max_rounds: res.data.rotation_max_rounds || 3,
         rotation_resume_time: res.data.rotation_resume_time || '01:00',
-        openlist_config_id: res.data.openlist_config_id || 0,
+
       });
     } catch (err) {
       toast.error('加载任务失败');
@@ -163,11 +140,10 @@ const TaskForm = () => {
 
   useEffect(() => {
     loadRemotes();
-    loadOpenlistConfigs();
     if (isEdit) {
       loadTask();
     }
-  }, [isEdit, loadRemotes, loadOpenlistConfigs, loadTask]);
+  }, [isEdit, loadRemotes, loadTask]);
 
   // Directory browser functions
   const parseRemotePath = (input) => {
@@ -268,10 +244,7 @@ const TaskForm = () => {
   const handleSubmit = async (e) => {
     e.preventDefault();
 
-    if (form.openlist_enabled && !form.openlist_config_id) {
-      toast.error('启用 OpenList 刷新时，请选择一个 OpenList 配置');
-      return;
-    }
+
 
     if (form.qb_enabled && !(isRotationTask && form.rotation_strategy === 'proactive_quota')) {
       if (form.source_type !== 'local') {
@@ -440,70 +413,7 @@ const TaskForm = () => {
     });
   };
 
-  const parseMappings = useMemo(() => {
-    try {
-      const obj = JSON.parse(form.openlist_mapping || '{}');
-      return Object.entries(obj).map(([rclone, openlist]) => ({
-        rclone,
-        openlist,
-      }));
-    } catch {
-      return [];
-    }
-  }, [form.openlist_mapping]);
 
-  const syncMappingsToForm = (entries) => {
-    const obj = {};
-    entries.forEach(({ rclone, openlist }) => {
-      if (rclone.trim() && openlist.trim()) {
-        obj[rclone.trim()] = openlist.trim();
-      }
-    });
-    handleChange('openlist_mapping', Object.keys(obj).length > 0 ? JSON.stringify(obj) : '');
-  };
-
-  const openAddMapping = () => {
-    setMapEditIndex(null);
-    setMapRclonePath('');
-    setMapOpenlistPath('');
-    setMapModalOpen(true);
-  };
-
-  const openEditMapping = (index) => {
-    setMapEditIndex(index);
-    setMapRclonePath(parseMappings[index].rclone);
-    setMapOpenlistPath(parseMappings[index].openlist);
-    setMapModalOpen(true);
-  };
-
-  const saveMapping = () => {
-    if (!mapRclonePath.trim()) {
-      toast.error('请输入 rclone 传输路径');
-      return;
-    }
-    if (!mapOpenlistPath.trim()) {
-      toast.error('请输入 OpenList 路径');
-      return;
-    }
-    const entries = [...parseMappings];
-    if (mapEditIndex !== null) {
-      entries[mapEditIndex] = { rclone: mapRclonePath.trim(), openlist: mapOpenlistPath.trim() };
-    } else {
-      const exists = entries.findIndex(e => e.rclone === mapRclonePath.trim());
-      if (exists >= 0 && exists !== mapEditIndex) {
-        toast.error('该 rclone 传输路径已存在');
-        return;
-      }
-      entries.push({ rclone: mapRclonePath.trim(), openlist: mapOpenlistPath.trim() });
-    }
-    syncMappingsToForm(entries);
-    setMapModalOpen(false);
-  };
-
-  const deleteMapping = (index) => {
-    const entries = parseMappings.filter((_, i) => i !== index);
-    syncMappingsToForm(entries);
-  };
 
   if (loading) {
     return (
@@ -1140,108 +1050,7 @@ const TaskForm = () => {
           </div>
         </div>
 
-        {/* OpenList Refresh */}
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
-          <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-            <RefreshCw className="w-5 h-5 text-orange-500" />
-            OpenList 刷新设置
-          </h2>
 
-          <div className="space-y-4">
-            <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-              <div>
-                <div className="font-medium text-gray-900">启用 OpenList 刷新</div>
-                <div className="text-sm text-gray-500">转移成功后自动刷新 OpenList 目录缓存</div>
-              </div>
-              <label className="relative inline-flex items-center cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={form.openlist_enabled}
-                  onChange={(e) => handleChange('openlist_enabled', e.target.checked)}
-                  className="sr-only peer"
-                />
-                <div className="w-11 h-6 bg-gray-200 peer-focus:ring-4 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
-              </label>
-            </div>
-
-            {form.openlist_enabled && (
-              <div className="md:ml-4 p-4 border-l-2 border-orange-200 space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    OpenList 配置 <span className="text-red-500">*</span>
-                  </label>
-                  <select
-                    required={form.openlist_enabled}
-                    value={form.openlist_config_id || ''}
-                    onChange={(e) => handleChange('openlist_config_id', e.target.value ? Number(e.target.value) : 0)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                  >
-                    <option value="">选择已有 OpenList 配置</option>
-                    {openlistConfigs.map((cfg) => (
-                      <option key={cfg.id} value={cfg.id}>{cfg.name}</option>
-                    ))}
-                  </select>
-                  {openlistConfigs.length === 0 && (
-                    <button
-                      type="button"
-                      onClick={() => navigate('/openlist-configs')}
-                      className="text-xs text-blue-600 hover:text-blue-700 mt-1"
-                    >
-                      暂无配置，前往添加
-                    </button>
-                  )}
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    路径映射（可选）
-                  </label>
-                  <p className="text-xs text-gray-500 mb-2">
-                    当 OpenList 挂载路径与 rclone 目标路径不一致时，通过映射刷新正确的目录
-                  </p>
-
-                  {parseMappings.length > 0 && (
-                    <div className="mb-2 space-y-1.5">
-                      {parseMappings.map((m, i) => (
-                        <div key={i} className="flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-lg px-3 py-2">
-                          <Link2 className="w-3.5 h-3.5 text-gray-400 shrink-0" />
-                          <code className="text-xs font-mono text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded">{m.rclone}</code>
-                          <span className="text-xs text-gray-400">→</span>
-                          <code className="text-xs font-mono text-green-700 bg-green-50 px-1.5 py-0.5 rounded">{m.openlist}</code>
-                          <div className="flex-1" />
-                          <button
-                            type="button"
-                            onClick={() => openEditMapping(i)}
-                            className="p-1 text-gray-400 hover:text-blue-500 hover:bg-gray-100 rounded transition-colors"
-                          >
-                            <Pencil className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => deleteMapping(i)}
-                            className="p-1 text-gray-400 hover:text-red-500 hover:bg-gray-100 rounded transition-colors"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  <button
-                    type="button"
-                    onClick={openAddMapping}
-                    className="inline-flex items-center gap-1.5 px-3 py-2 text-sm border border-dashed border-gray-300 rounded-lg text-gray-600 hover:border-blue-400 hover:text-blue-600 hover:bg-blue-50 transition-colors"
-                  >
-                    <Plus className="w-4 h-4" />
-                    {parseMappings.length === 0 ? '添加路径映射' : '添加更多映射'}
-                  </button>
-                </div>
-
-              </div>
-            )}
-          </div>
-        </div>
 
         {/* Actions */}
         <div className="flex items-center justify-end gap-3">
@@ -1263,74 +1072,7 @@ const TaskForm = () => {
         </div>
       </form>
 
-      {/* Path Mapping Modal */}
-      {mapModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/50" onClick={() => setMapModalOpen(false)} />
-          <div className="relative bg-white rounded-xl shadow-xl border border-gray-200 w-full max-w-md mx-4 p-6">
-            <div className="flex items-center justify-between mb-5">
-              <h3 className="text-lg font-semibold text-gray-900">
-                {mapEditIndex !== null ? '编辑路径映射' : '添加路径映射'}
-              </h3>
-              <button
-                type="button"
-                onClick={() => setMapModalOpen(false)}
-                className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
 
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                  rclone 传输路径 <span className="text-red-500">*</span>
-                </label>
-                <input
-                  type="text"
-                  value={mapRclonePath}
-                  onChange={(e) => setMapRclonePath(e.target.value)}
-                  placeholder="例如：op:s1"
-                  autoFocus
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-sm"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                  OpenList 路径 <span className="text-red-500">*</span>
-                </label>
-                <input
-                  type="text"
-                  value={mapOpenlistPath}
-                  onChange={(e) => setMapOpenlistPath(e.target.value)}
-                  placeholder="例如：/s2"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-sm"
-                />
-                <p className="text-xs text-gray-400 mt-1">OpenList 中对应的挂载路径，刷新时将用此路径调用 API</p>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-end gap-2 mt-6">
-              <button
-                type="button"
-                onClick={() => setMapModalOpen(false)}
-                className="px-4 py-2 text-gray-700 hover:bg-gray-100 rounded-lg transition-colors font-medium text-sm"
-              >
-                取消
-              </button>
-              <button
-                type="button"
-                onClick={saveMapping}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium text-sm"
-              >
-                {mapEditIndex !== null ? '保存修改' : '添加映射'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-      
       {/* Directory Browser Modal */}
       {browserOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">

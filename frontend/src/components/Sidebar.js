@@ -10,7 +10,6 @@ import {
   ChevronLeft,
   ChevronRight,
   HardDrive,
-  Server,
   Cloud
 } from 'lucide-react';
 import useAuthStore from '../hooks/useAuthStore';
@@ -29,7 +28,7 @@ const Sidebar = ({ open, setOpen }) => {
     { path: '/tasks', icon: List, label: '任务管理' },
     { path: '/files', icon: FolderOpen, label: '文件浏览器' },
     { path: '/mounts', icon: Cloud, label: '云盘挂载' },
-    { path: '/openlist-configs', icon: Server, label: 'OpenList 配置' },
+
     { path: '/logs', icon: FileText, label: '日志查看' },
     { path: '/settings', icon: Settings, label: '系统设置' },
   ];

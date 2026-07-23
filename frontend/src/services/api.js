@@ -80,12 +80,6 @@ export const listRemoteFiles = (remote, path = '/') => api.get(`/files/remote?re
 // Quick task from file browser
 export const createQuickTask = (data) => api.post('/tasks/quick', data);
 
-// OpenList configs
-export const getOpenlistConfigs = () => api.get('/openlist-configs');
-export const createOpenlistConfig = (data) => api.post('/openlist-configs', data);
-export const updateOpenlistConfig = (id, data) => api.put(`/openlist-configs/${id}`, data);
-export const deleteOpenlistConfig = (id) => api.delete(`/openlist-configs/${id}`);
-
 // Output logs (structured persistent format) - requires ?token= query param
 export const getOutputLogs = (page = 1, pageSize = 20, taskId = '') => {
   const token = localStorage.getItem('apiToken') || '';
