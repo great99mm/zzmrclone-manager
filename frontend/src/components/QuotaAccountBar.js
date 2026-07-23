@@ -42,10 +42,10 @@ const QuotaAccountBar = ({ account }) => {
   const resetText = formatReset(account.next_reset_at);
   const blocked = isFutureTimestamp(account.provider_blocked_until);
   return (
-    <div className="min-w-0">
-      <div className="flex items-center justify-between gap-2 text-xs text-gray-700">
-        <span className="font-medium truncate">{account.remote_name || `账号`}</span>
-        <span className="whitespace-nowrap text-gray-500">
+    <div className="min-w-0 max-w-full">
+      <div className="flex items-center justify-between gap-1.5 text-xs text-gray-700">
+        <span className="font-medium truncate min-w-0">{account.remote_name || `账号`}</span>
+        <span className="shrink-0 text-gray-500">
           {formatBytes(used)} / {formatBytes(budget)}
         </span>
       </div>
@@ -62,9 +62,9 @@ const QuotaAccountBar = ({ account }) => {
           style={{ width: `${percent}%` }}
         />
       </div>
-      <div className="mt-0.5 flex items-center justify-between gap-2 text-[11px] text-gray-500">
+      <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-gray-500">
         <span>剩余 {formatBytes(remaining)} · 预留 {formatBytes(reserved)}</span>
-        {resetText && <span aria-live="polite">距恢复 {resetText}</span>}
+        {resetText && <span aria-live="polite">{resetText} 后恢复</span>}
         {blocked && <span className="text-red-700">Provider 阻断</span>}
       </div>
     </div>
