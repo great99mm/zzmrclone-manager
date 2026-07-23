@@ -364,7 +364,7 @@ func getProactiveStatus(c *gin.Context) {
 		}
 		_ = db.Where("destination_scope = ? AND reason = ? AND (state <> ? OR dedupe_state IN ?)", models.DestinationScope(resolvedIdentity, task.RemoteDir), models.MaintenanceReasonQuotaExhaustion, models.MaintenanceStateClosed, []string{models.DedupeStateClaimed, models.DedupeStateRunning, models.DedupeStateUnknown}).Order("epoch DESC").First(&legacyRecovery).Error
 	}
-	maintenance.ManualMergeAvailable, maintenance.Blocker = proactiveManualMergeAvailability(models.DestinationScope(resolvedIdentity, task.RemoteDir), epoch, quotaKeys)
+	maintenance.ManualMergeAvailable, maintenance.Blocker = proactiveManualMergeAvailability(models.DestinationScope(resolvedIdentity, task.RemoteDir), epoch, quotaKeys, task.Status)
 	if legacyRecovery.ID != 0 {
 		maintenance.LegacyRecovery = &proactiveLegacyRecoveryStatus{
 			EpochID:                  legacyRecovery.ID,
@@ -380,7 +380,10 @@ func getProactiveStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"task": gin.H{"id": task.ID, "status": task.Status, "enabled": task.Enabled, "transfer_mode": task.TransferMode, "resolution_required": taskResolutionRequired, "rescan_pending": task.RotationRescanPending, "generation": task.RotationRescanGeneration, "stop_requested": task.RotationStopRequested, "wake_at": task.RotationQuotaWakeAt, "current_error": taskError, "last_error": taskError}, "accounts": bindings, "batches": resultBatches, "queue": queue, "maintenance": maintenance})
 }
 
-func proactiveManualMergeAvailability(scope string, epoch models.DestinationScopeMaintenance, keys map[string]string) (bool, string) {
+func proactiveManualMergeAvailability(scope string, epoch models.DestinationScopeMaintenance, keys map[string]string, taskStatus string) (bool, string) {
+	if taskStatus != "idle" {
+		return false, "task_running"
+	}
 	if epoch.ID != 0 && (epoch.State != models.MaintenanceStateClosed || epoch.DedupeState == models.DedupeStateClaimed || epoch.DedupeState == models.DedupeStateRunning || epoch.DedupeState == models.DedupeStateUnknown) {
 		return false, "maintenance_epoch"
 	}

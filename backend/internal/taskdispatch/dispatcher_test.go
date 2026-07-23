@@ -334,6 +334,32 @@ func TestMutationFenceRejectsActiveRun(t *testing.T) {
 	}
 }
 
+func TestProactiveTriggerFencedByActiveManualMaintenance(t *testing.T) {
+	db := taskDB(t)
+	if err := db.AutoMigrate(&models.DestinationScopeMaintenance{}, &models.DestinationScopeCoordinator{}); err != nil {
+		t.Fatal(err)
+	}
+	task := models.Task{Name: "proactive", TaskType: "rotation", RotationStrategy: "proactive_quota", SourceType: "local", SourceDir: "/tmp/source", DestType: "remote", RemoteName: "drive", RemoteDir: "/dst", TransferMode: models.TransferModeCopy, RotationRemotes: `["drive"]`, MinAge: "0s", Enabled: true, RotationQuotaLimitBytes: models.DefaultRotationQuotaLimitBytes, Status: "idle"}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatal(err)
+	}
+	configPath := "/tmp/rclone.conf"
+	if err := db.Create(&models.DestinationScopeMaintenance{DestinationScope: models.DestinationScope(configPath, "/dst"), Epoch: 1, OwnerTaskID: task.ID, State: models.MaintenanceStateExhausted, DedupeState: models.DedupeStatePending, Reason: models.MaintenanceReasonManualMerge, Revision: 1}).Error; err != nil {
+		t.Fatal(err)
+	}
+	p := &proactive.Dispatcher{DB: db, Executor: idleProactiveExecutor{}, ConfigResolver: func(string) (string, error) { return configPath, nil }, Now: func() time.Time { return time.Unix(100, 0) }}
+	d := New(db, nil, p)
+	if err := d.Trigger(context.Background(), task.ID, "start"); err != nil {
+		t.Fatalf("Trigger during active maintenance returned err=%v (expected no-op)", err)
+	}
+	if d.HasRunOwner(task.ID) {
+		t.Fatal("Trigger created a run owner during active maintenance")
+	}
+	if d.IsActive(task.ID) {
+		t.Fatal("Trigger marked task active during maintenance fence")
+	}
+}
+
 func TestProactiveTriggerIgnoresLedgerActiveWithoutRunOwner(t *testing.T) {
 	db := taskDB(t)
 	if err := db.AutoMigrate(&models.QuotaAccount{}, &models.RotationQuotaOversize{}, &models.RotationQuotaBatch{}, &models.RotationQuotaBatchFile{}, &models.QuotaReservation{}); err != nil {

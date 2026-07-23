@@ -322,6 +322,34 @@ func TestRecoverReturnsPermanentGroupFailure(t *testing.T) {
 	}
 }
 
+func TestRequestScanFencedByActiveManualMaintenance(t *testing.T) {
+	db := dispatcherDB(t)
+	if err := db.AutoMigrate(&models.DestinationScopeMaintenance{}, &models.DestinationScopeCoordinator{}); err != nil {
+		t.Fatal(err)
+	}
+	task, snapshot, config := dispatcherFixture(t, db, `["r1"]`)
+	if err := db.Model(&task).Update("status", "idle").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.DestinationScopeMaintenance{DestinationScope: models.DestinationScope(config, task.RemoteDir), Epoch: 1, OwnerTaskID: task.ID, State: models.MaintenanceStateExhausted, DedupeState: models.DedupeStatePending, Reason: models.MaintenanceReasonManualMerge, Revision: 1}).Error; err != nil {
+		t.Fatal(err)
+	}
+	d := &Dispatcher{DB: db, Quota: &quota.Service{DB: db, ConfigResolver: func(raw string) (string, error) { return raw, nil }}, Executor: &dispatchFakeExecutor{DB: db}, Scanner: func(models.Task) LocalScanner { return fixedScanner{snapshots: []quota.LocalSnapshot{snapshot}} }, Now: func() time.Time { return time.Unix(100, 0) }}
+	// RequestScan should be a no-op when maintenance is active — maintenancePaused
+	// will return true and cause the scan to be skipped without error.
+	if err := d.RequestScan(context.Background(), task.ID); err != nil {
+		t.Fatalf("RequestScan during active maintenance returned err=%v (expected no-op)", err)
+	}
+	// No batches should have been created since the scan was blocked.
+	var count int64
+	if err := db.Model(&models.RotationQuotaBatch{}).Where("task_id = ?", task.ID).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("RequestScan created %d batches despite active maintenance fence", count)
+	}
+}
+
 func TestRequestScanHeartbeatLossDoesNotClearNoEligiblePending(t *testing.T) {
 	db := dispatcherDB(t)
 	task, _, config := dispatcherFixture(t, db, `["r1"]`)

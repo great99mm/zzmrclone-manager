@@ -1069,6 +1069,14 @@ func startTask(c *gin.Context) {
 		}
 	}
 
+	if blocked, err := proactiveMutationBlocked(task); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check proactive maintenance fence"})
+		return
+	} else if blocked {
+		c.JSON(http.StatusConflict, gin.H{"error": "task destination scope is owned by an active manual merge"})
+		return
+	}
+
 	if err := taskRunner.Trigger(c.Request.Context(), uint(id), "start"); err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, taskdispatch.ErrTaskActive) {

@@ -120,6 +120,21 @@ func (d *TaskDispatcher) Trigger(ctx context.Context, taskID uint, source string
 			}
 			return d.Proactive.PersistImmediateWake(taskID)
 		}
+		// Fence: do not start a scan while the destination scope has active
+		// maintenance (manual merge or quota exhaustion). This mirrors the
+		// maintenancePaused check inside RequestScan but avoids briefly
+		// marking the task active in memory and then immediately returning.
+		if blocked, err := d.Proactive.MutationBlocked(task); err != nil {
+			g.entered--
+			g.cond.Broadcast()
+			g.mu.Unlock()
+			return err
+		} else if blocked {
+			g.entered--
+			g.cond.Broadcast()
+			g.mu.Unlock()
+			return nil
+		}
 	}
 	runCtx := ctx
 	if proactiveTask {

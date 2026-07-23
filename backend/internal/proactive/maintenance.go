@@ -240,6 +240,9 @@ func (d *Dispatcher) claimManualMerge(task models.Task) (models.DestinationScope
 	if task.TaskType != "rotation" || task.RotationStrategy != "proactive_quota" {
 		return models.DestinationScopeMaintenance{}, ErrManualMergeConflict
 	}
+	if task.Status != "idle" {
+		return models.DestinationScopeMaintenance{}, ErrManualMergeConflict
+	}
 	resolved := strings.TrimSpace(task.RcloneConfig)
 	if resolved == "" {
 		resolved = models.DefaultRcloneConfigPath

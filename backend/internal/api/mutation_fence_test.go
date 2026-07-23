@@ -215,6 +215,40 @@ func TestManualStartDeleteRaceLeavesNoOrphanEpoch(t *testing.T) {
 	}
 }
 
+func TestStartTaskRejectsActiveManualMaintenance(t *testing.T) {
+	database := proactiveStatusTestDB(t)
+	if err := database.AutoMigrate(&models.DestinationScopeMaintenance{}, &models.DestinationScopeCoordinator{}); err != nil {
+		t.Fatal(err)
+	}
+	configPath := t.TempDir() + "/rclone.conf"
+	if err := os.WriteFile(configPath, []byte("[remote]\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	task := models.Task{ID: 1, RcloneConfig: configPath, RemoteDir: "/shared", TaskType: "rotation", RotationStrategy: "proactive_quota", Status: "idle"}
+	if err := database.Create(&task).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Create(&models.DestinationScopeMaintenance{DestinationScope: models.DestinationScope(configPath, "/shared"), Epoch: 1, OwnerTaskID: task.ID, State: models.MaintenanceStateExhausted, DedupeState: models.DedupeStatePending, Reason: models.MaintenanceReasonManualMerge, Revision: 1}).Error; err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := &proactive.Dispatcher{DB: database, ConfigResolver: func(string) (string, error) { return configPath, nil }}
+	previousDB, previousDispatcher, previousRunner := db, proactiveDispatcher, taskRunner
+	db, proactiveDispatcher = database, dispatcher
+	taskRunner = taskdispatch.New(database, mutationRaceLegacyRunner{}, dispatcher)
+	defer func() { db, proactiveDispatcher, taskRunner = previousDB, previousDispatcher, previousRunner }()
+	gin.SetMode(gin.TestMode)
+
+	request := httptest.NewRequest(http.MethodPost, "/tasks/1/start", nil)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = request
+	context.Params = gin.Params{{Key: "id", Value: "1"}}
+	startTask(context)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("start task during active manual merge status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestManualStartUpdateRaceUsesPostUpdateScope(t *testing.T) {
 	database := proactiveStatusTestDB(t)
 	if err := database.AutoMigrate(&models.DestinationScopeMaintenance{}, &models.DestinationScopeCoordinator{}); err != nil {

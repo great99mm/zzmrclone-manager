@@ -398,9 +398,26 @@ func TestProactiveManualAvailabilityMatchesAccountWideBlocker(t *testing.T) {
 	previous := db
 	db = database
 	defer func() { db = previous }()
-	available, blocker := proactiveManualMergeAvailability(models.DestinationScope("/config", "/dest"), models.DestinationScopeMaintenance{}, map[string]string{"remote": "shared-status"})
+	available, blocker := proactiveManualMergeAvailability(models.DestinationScope("/config", "/dest"), models.DestinationScopeMaintenance{}, map[string]string{"remote": "shared-status"}, "idle")
 	if available || blocker != "account_active_elsewhere" {
 		t.Fatalf("status blocker parity = available=%v blocker=%q", available, blocker)
+	}
+}
+
+func TestProactiveManualAvailabilityRejectsNonIdleTask(t *testing.T) {
+	database := proactiveStatusTestDB(t)
+	previous := db
+	db = database
+	defer func() { db = previous }()
+	for _, status := range []string{"running", "paused", "error", "canceled"} {
+		available, blocker := proactiveManualMergeAvailability("scope", models.DestinationScopeMaintenance{}, map[string]string{}, status)
+		if available || blocker != "task_running" {
+			t.Fatalf("status=%q: available=%v blocker=%q", status, available, blocker)
+		}
+	}
+	available, blocker := proactiveManualMergeAvailability("scope", models.DestinationScopeMaintenance{}, map[string]string{}, "idle")
+	if !available || blocker != "" {
+		t.Fatalf("idle: available=%v blocker=%q", available, blocker)
 	}
 }
 
