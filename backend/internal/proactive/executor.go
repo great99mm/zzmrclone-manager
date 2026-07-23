@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"rclone-manager/internal/logger"
 	"rclone-manager/internal/models"
 	"rclone-manager/internal/quota"
 )
@@ -53,6 +54,7 @@ func (e *Executor) RunBatch(ctx context.Context, batchID uint) error {
 	if err != nil {
 		return err
 	}
+	_ = logger.WriteLog(fmt.Sprintf("task_%d.log", batch.TaskID), fmt.Sprintf("批次 #%d 开始（%d 个文件，%.0f bytes）", batchID, len(files), float64(batch.ReservedBytes)))
 	if !models.IsValidOwnerToken(batch.OwnerToken) {
 		return e.markUnknown(batchID, token, errors.New("invalid persisted owner token"))
 	}
@@ -133,6 +135,7 @@ func (e *Executor) RunBatch(ctx context.Context, batchID uint) error {
 			return result
 		}
 	}
+	_ = logger.WriteLog(fmt.Sprintf("task_%d.log", batch.TaskID), fmt.Sprintf("批次 #%d 开始复制到 %s:%s", batchID, batch.DestinationRemote, batch.DestinationPath))
 	process, err := e.Runner.StartCopy(ctx, CopySpec{ConfigPath: batch.RcloneConfigPath, ManifestPath: manifestPath, SourceRoot: stage.File(), DestinationRemote: batch.DestinationRemote, DestinationPath: batch.DestinationPath})
 	if err != nil {
 		var started *StartedProcessIdentityError
@@ -439,21 +442,29 @@ func (e *Executor) finishProcess(ctx context.Context, batch models.RotationQuota
 	if err := e.toReconciling(batch.ID, token, result, waitErr); err != nil {
 		_ = stage.Close()
 		e.recordStageRetention(batch.ID, token, "process stopped but reconciliation transition failed")
+		_ = logger.WriteLog(fmt.Sprintf("task_%d.log", batch.TaskID), fmt.Sprintf("批次 #%d 对账失败: %v", batch.ID, err))
 		return err
 	}
 	if err := e.freezeOnMarker(batch.ID, token, result); err != nil {
 		_ = stage.Close()
 		e.recordStageRetention(batch.ID, token, "process stopped but marker handling failed")
+		_ = logger.WriteLog(fmt.Sprintf("task_%d.log", batch.TaskID), fmt.Sprintf("批次 #%d marker 处理失败: %v", batch.ID, err))
 		return err
 	}
 	if err := e.reconcile(ctx, batch, token, files); err != nil {
 		_ = stage.Close()
 		e.recordStageRetention(batch.ID, token, "process stopped but remote reconciliation failed")
+		_ = logger.WriteLog(fmt.Sprintf("task_%d.log", batch.TaskID), fmt.Sprintf("批次 #%d 远端核验失败: %v", batch.ID, err))
 		return err
 	}
 	// Wait returned, so the process is confirmed stopped. Reconciliation has
 	// completed even when the batch remains unknown (for example, a marker).
 	e.cleanupStage(stage, batch.ID, token)
+	if processErr == nil {
+		_ = logger.WriteLog(fmt.Sprintf("task_%d.log", batch.TaskID), fmt.Sprintf("批次 #%d 完成", batch.ID))
+	} else {
+		_ = logger.WriteLog(fmt.Sprintf("task_%d.log", batch.TaskID), fmt.Sprintf("批次 #%d 失败: %v", batch.ID, processErr))
+	}
 	return processErr
 }
 

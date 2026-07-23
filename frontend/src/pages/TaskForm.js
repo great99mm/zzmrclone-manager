@@ -38,7 +38,7 @@ const TaskForm = () => {
     remote_name: '',
     remote_dir: '',
     rotation_remotes: '[]',
-    rotation_strategy: 'legacy_error',
+    rotation_strategy: 'proactive_quota',
     rotation_quota_limit_bytes: 700 * 1024 * 1024 * 1024,
     rotation_quota_keys: '{}',
     rotation_max_rounds: 3,
@@ -144,7 +144,7 @@ const TaskForm = () => {
         ...res.data,
         task_type: res.data.task_type || 'normal',
         rotation_remotes: res.data.rotation_remotes || '[]',
-        rotation_strategy: res.data.rotation_strategy || 'legacy_error',
+        rotation_strategy: res.data.rotation_strategy || 'proactive_quota',
         rotation_quota_limit_bytes: res.data.rotation_quota_limit_bytes == null
           ? 700 * 1024 * 1024 * 1024
           : res.data.rotation_quota_limit_bytes,
@@ -847,35 +847,10 @@ const TaskForm = () => {
             {isRotationTask && (
               <div className="border-t pt-4">
                 <div className="flex items-start gap-3 mb-3">
-                  <ShieldCheck className="w-5 h-5 text-emerald-600 mt-0.5" />
+                   <ShieldCheck className="w-5 h-5 text-emerald-600 mt-0.5" />
                   <div>
-                    <h3 className="text-sm font-semibold text-gray-900">轮转策略</h3>
-                    <p className="text-xs text-gray-500 mt-1 max-w-2xl">
-                      选择何时切换账号。已有的异常触发轮转保持不变；主动额度池会在上传前按账号配额预留批次。
-                    </p>
+                    <h3 className="text-sm font-semibold text-gray-900">主动额度账号池</h3>
                   </div>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                  {[
-                    { value: 'legacy_error', label: '异常触发轮转', desc: '遇到 403、429 或额度错误后切换账号' },
-                    { value: 'proactive_quota', label: '主动额度账号池', desc: '按每日额度预留和排队，减少中途失败' },
-                  ].map(strategy => (
-                    <button
-                      key={strategy.value}
-                      type="button"
-                      onClick={() => handleRotationStrategyChange(strategy.value)}
-                      aria-pressed={form.rotation_strategy === strategy.value}
-                      className={`p-3 rounded-lg border-2 text-left transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1 ${
-                        form.rotation_strategy === strategy.value
-                          ? 'border-blue-500 bg-blue-50'
-                          : 'border-gray-200 hover:border-gray-300'
-                      }`}
-                    >
-                      <div className="font-medium text-sm text-gray-900">{strategy.label}</div>
-                      <div className="text-xs text-gray-500 mt-1">{strategy.desc}</div>
-                    </button>
-                  ))}
                 </div>
 
                 {form.rotation_strategy === 'proactive_quota' && (
@@ -909,43 +884,7 @@ const TaskForm = () => {
                       </div>
                     </div>
 
-                    <fieldset>
-                      <legend className="text-xs font-medium text-gray-700 mb-2">账号池与 quota key（可选）</legend>
-                      {selectedRotationRemotes.length === 0 ? (
-                        <p className="text-xs text-amber-700 bg-amber-100 rounded-md px-3 py-2">先在上方选择至少一个轮转网盘，再为账号补充 quota key。</p>
-                      ) : (
-                        <div className="space-y-2">
-                          {selectedRotationRemotes.map((remote, index) => (
-                            <div key={remote} className="grid grid-cols-[auto_minmax(0,1fr)] md:grid-cols-[auto_180px_minmax(0,1fr)] items-center gap-2 bg-white border border-emerald-100 rounded-md p-2 min-w-0">
-                              <span className="text-xs font-mono text-gray-500 w-6">{String(index + 1).padStart(2, '0')}</span>
-                              <div className="flex items-center gap-2 min-w-0">
-                                <Cloud className="w-4 h-4 text-blue-500 shrink-0" />
-                                <span className="text-sm font-medium text-gray-800 truncate" title={remote}>{remote}</span>
-                              </div>
-                              <label className="relative block md:col-auto col-span-2 md:col-span-1 min-w-0 w-full">
-                                <span className="sr-only">{remote} 的 quota key</span>
-                                <KeyRound className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-                                <input
-                                  type="text"
-                                  value={parseRotationQuotaKeys[remote] || ''}
-                                  onChange={(e) => setRotationQuotaKey(remote, e.target.value)}
-                                  placeholder="quota key（可选）"
-                                  className="w-full h-9 pl-9 pr-3 border border-gray-300 rounded-md text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                                />
-                              </label>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      <p className="text-xs text-gray-500 mt-2">不填写时会根据配置身份和远程名生成稳定的默认 key；填写后会将该 key 绑定到对应账号。key 不会显示在任务列表中。</p>
-                    </fieldset>
 
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-xs text-gray-700">
-                      <div className="bg-white/80 rounded-md px-3 py-2"><strong>队列</strong><br />按文件快照生成批次</div>
-                      <div className="bg-white/80 rounded-md px-3 py-2"><strong>额度</strong><br />预留后再启动传输</div>
-                      <div className="bg-white/80 rounded-md px-3 py-2"><strong>恢复</strong><br />达到额度后等待下一窗口</div>
-                    </div>
-                    <p className="text-xs text-emerald-800">账号池任务使用额度预留与批次执行，不使用 qBittorrent 完成触发。</p>
                   </div>
                 )}
               </div>
