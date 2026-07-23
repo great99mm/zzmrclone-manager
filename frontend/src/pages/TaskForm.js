@@ -773,7 +773,7 @@ const TaskForm = () => {
                     </div>
 
                      <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
-                       <strong>重要：</strong>所有轮转网盘（team-1、team-2 等）必须挂载到<b>同一块共享存储</b>。文件按顺序上传到各账号，但所有账号共享同一媒体库目录。
+                       <strong>重要：</strong>所有轮转网盘必须隶属到<b>同一个谷歌共享硬盘</b>。文件按顺序通过各服务账号上传到同一目标目录。
                      </div>
 
                      <div>
