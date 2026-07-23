@@ -391,7 +391,7 @@ func (s *Service) reserveAttempt(req PackReserveRequest, requestKey, fingerprint
 				DestinationScope:        models.DestinationScope(resolvedConfig, destinationPath),
 				SourceRoot:              req.SourceRoot,
 				SourceRootDevice:        req.Snapshots[0].RootDevice,
-				SourceRootInode:         req.Snapshots[0].RootDevice,
+				SourceRootInode:         req.Snapshots[0].RootInode,
 				DestinationRemote:       remote,
 				TransferMode:            req.Task.TransferMode,
 				DestinationScopeVersion: 1,
