@@ -32,13 +32,15 @@ const QuotaAccountBar = ({ account }) => {
     return null;
   }
   const budget = Math.max(0, Number(account.budget_bytes) || 0);
-  const used = Math.max(0, Number(account.used_bytes) || 0);
-  const reserved = Math.max(0, Number(account.active_reserved_bytes) || 0);
+  const uploaded = Math.max(0, Number(account.used_bytes) || 0);
+  const uploading = Math.max(0, Number(account.uploading_bytes) || 0);
+  const queued = Math.max(0, (Number(account.active_reserved_bytes) || 0) - uploading);
   const remaining = Math.max(0, Number(account.remaining_bytes) || 0);
-  const consumed = used + reserved;
-  const percent = budget > 0 ? Math.min(100, Math.round((consumed / budget) * 100)) : 0;
-  const tone = percent >= 100 ? 'bg-red-500' : percent >= 80 ? 'bg-amber-500' : 'bg-emerald-500';
-  const ariaLabel = `${account.remote_name || '账号'} 配额 ${formatBytes(used)} 已用, ${formatBytes(reserved)} 预留, 剩余 ${formatBytes(remaining)} 共 ${formatBytes(budget)}`;
+  const consumed = uploaded + uploading + queued;
+  const uploadedPct = budget > 0 ? Math.min(100, (uploaded / budget) * 100) : 0;
+  const uploadingPct = budget > 0 ? Math.min(100, (uploading / budget) * 100) : 0;
+  const queuedPct = budget > 0 ? Math.min(100, (queued / budget) * 100) : 0;
+  const ariaLabel = `${account.remote_name || '账号'} 已上传 ${formatBytes(uploaded)}, 传输中 ${formatBytes(uploading)}, 等待 ${formatBytes(queued)}, 剩余 ${formatBytes(remaining)}`;
   const resetText = formatReset(account.next_reset_at);
   const blocked = isFutureTimestamp(account.provider_blocked_until);
   return (
@@ -57,12 +59,14 @@ const QuotaAccountBar = ({ account }) => {
         aria-valuenow={consumed}
         aria-label={ariaLabel}
       >
-        <div className={`h-full bg-emerald-500 transition-all`} style={{ width: `${Math.min(100, budget > 0 ? (used / budget) * 100 : 0)}%` }} />
-        <div className={`h-full bg-amber-400 transition-all`} style={{ width: `${Math.min(100, budget > 0 ? (reserved / budget) * 100 : 0)}%` }} />
+        <div className="h-full bg-emerald-500 transition-all" style={{ width: `${uploadedPct}%` }} />
+        <div className="h-full bg-blue-500 transition-all" style={{ width: `${uploadingPct}%` }} />
+        <div className="h-full bg-amber-400 transition-all" style={{ width: `${queuedPct}%` }} />
       </div>
       <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-gray-500">
-        <span className="text-emerald-700">已上传 {formatBytes(used)}</span>
-        <span className="text-amber-700">预留 {formatBytes(reserved)}</span>
+        {uploaded > 0 && <span className="text-emerald-700">已上传 {formatBytes(uploaded)}</span>}
+        {uploading > 0 && <span className="text-blue-600">传输中 {formatBytes(uploading)}</span>}
+        {queued > 0 && <span className="text-amber-700">等待 {formatBytes(queued)}</span>}
         <span>剩余 {formatBytes(Math.max(0, remaining))}</span>
         {resetText && <span aria-live="polite">{resetText} 后恢复</span>}
         {blocked && <span className="text-red-700">阻断</span>}

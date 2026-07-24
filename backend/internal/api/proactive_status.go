@@ -35,6 +35,7 @@ type proactiveAccountStatus struct {
 	UsedBytes            *int64     `json:"used_bytes"`
 	ActiveReservedBytes  *int64     `json:"active_reserved_bytes"`
 	RemainingBytes       *int64     `json:"remaining_bytes"`
+	UploadingBytes       *int64     `json:"uploading_bytes"`
 	ProviderBlockedUntil *time.Time `json:"provider_blocked_until"`
 	Enabled              *bool      `json:"enabled"`
 	// WindowStartedAt is the first moment the account's reservation usage
@@ -246,6 +247,7 @@ func getProactiveStatus(c *gin.Context) {
 	}
 	used := make(map[uint]int64)
 	reserved := make(map[uint]int64)
+	uploading := make(map[uint]int64)
 	if len(accountIDs) > 0 {
 		var rows []proactiveReservationAggregate
 		reservationQuery := db.Model(&models.QuotaReservation{}).Select("quota_account_id, state, bytes, expires_at").Where("quota_account_id IN ?", accountIDs)
@@ -269,7 +271,9 @@ func getProactiveStatus(c *gin.Context) {
 				if row.ExpiresAt == nil || row.ExpiresAt.After(time.Now()) {
 					used[row.QuotaAccountID] += row.Bytes
 				}
-			case models.ReservationStateHeld, models.ReservationStateActive, models.ReservationStateUnknown:
+			case models.ReservationStateActive:
+				uploading[row.QuotaAccountID] += row.Bytes
+			case models.ReservationStateHeld, models.ReservationStateUnknown:
 				reserved[row.QuotaAccountID] += row.Bytes
 			case models.ReservationStateReleased, models.ReservationStateExpired:
 			default:
@@ -289,10 +293,12 @@ func getProactiveStatus(c *gin.Context) {
 		binding := proactiveAccountStatus{RemoteName: remote, QuotaKey: key}
 		if account, ok := accountsByKey[key]; ok {
 			budget, window, enabled := account.BudgetBytes, account.WindowSeconds, account.Enabled
-			u, r := used[account.ID], reserved[account.ID]
-			remaining := budget - u - r
+			u, r, up := used[account.ID], reserved[account.ID], uploading[account.ID]
+			totalReserved := r + up
+			remaining := budget - u - totalReserved
 			binding.BudgetBytes, binding.WindowSeconds, binding.Enabled = &budget, &window, &enabled
-			binding.UsedBytes, binding.ActiveReservedBytes, binding.RemainingBytes = &u, &r, &remaining
+			binding.UsedBytes, binding.ActiveReservedBytes, binding.RemainingBytes = &u, &totalReserved, &remaining
+			binding.UploadingBytes = &up
 			binding.ProviderBlockedUntil = account.ProviderBlockedUntil
 			binding.WindowStartedAt = account.WindowStartedAt
 			if account.WindowStartedAt != nil && window > 0 {
