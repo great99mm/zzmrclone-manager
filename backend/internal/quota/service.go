@@ -944,6 +944,11 @@ func accountUsage(tx *gorm.DB, ids []uint, now time.Time) (map[uint]int64, error
 	return usage, nil
 }
 
+// maxBatchFiles limits the number of files in a single batch so that
+// individual batches complete faster and committed reservations update
+// sooner, giving the user real-time progress visibility.
+const maxBatchFiles = 50
+
 func packSnapshots(snapshots []LocalSnapshot, remotes []string, keys map[string]string, accounts []models.QuotaAccount, usage map[uint]int64, taskLimit int64, now time.Time) (map[string][]LocalSnapshot, []LocalSnapshot, error) {
 	if taskLimit < 0 {
 		return nil, nil, fmt.Errorf("rotation quota limit cannot be negative")
@@ -956,6 +961,7 @@ func packSnapshots(snapshots []LocalSnapshot, remotes []string, keys map[string]
 	for id, bytes := range usage {
 		used[id] = bytes
 	}
+	counts := make(map[string]int)
 	pending := make([]LocalSnapshot, 0)
 	for _, snapshot := range ordered {
 		placed := false
@@ -964,12 +970,16 @@ func packSnapshots(snapshots []LocalSnapshot, remotes []string, keys map[string]
 			if !account.Enabled || (account.ProviderBlockedUntil != nil && account.ProviderBlockedUntil.After(now)) {
 				continue
 			}
+			if counts[remote] >= maxBatchFiles {
+				continue
+			}
 			limit := account.BudgetBytes
 			if taskLimit < limit {
 				limit = taskLimit
 			}
 			if used[account.ID] <= limit && snapshot.SizeBytes <= limit-used[account.ID] {
 				selected[remote] = append(selected[remote], snapshot)
+				counts[remote]++
 				updated, err := safeAdd(used[account.ID], snapshot.SizeBytes)
 				if err != nil {
 					return nil, nil, fmt.Errorf("quota packing overflows account %d", account.ID)
