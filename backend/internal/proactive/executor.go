@@ -311,7 +311,9 @@ func (e *Executor) claim(batchID uint) (models.RotationQuotaBatch, []models.Rota
 	token := randomToken()
 	var batch models.RotationQuotaBatch
 	var files []models.RotationQuotaBatchFile
-	err := e.DB.Transaction(func(tx *gorm.DB) error {
+	err := e.claimTransaction(func(tx *gorm.DB) error {
+		batch = models.RotationQuotaBatch{}
+		files = nil
 		if err := tx.First(&batch, batchID).Error; err != nil {
 			return err
 		}
@@ -334,6 +336,18 @@ func (e *Executor) claim(batchID uint) (models.RotationQuotaBatch, []models.Rota
 		return tx.Where("batch_id = ?", batchID).Order("relative_path").Find(&files).Error
 	})
 	return batch, files, token, err
+}
+
+func (e *Executor) claimTransaction(run func(*gorm.DB) error) error {
+	var err error
+	for attempt := 0; attempt < 8; attempt++ {
+		err = e.DB.Transaction(run)
+		if err == nil || !retryableSQLiteError(err) {
+			return err
+		}
+		time.Sleep(time.Duration(attempt+1) * 25 * time.Millisecond)
+	}
+	return err
 }
 
 func (e *Executor) claimScope(tx *gorm.DB, batch models.RotationQuotaBatch, batchID uint) error {

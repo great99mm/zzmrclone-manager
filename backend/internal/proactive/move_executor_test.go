@@ -446,3 +446,51 @@ func TestMoveClaimAllowsDistinctAccountsFromSameTaskWithinLimit(t *testing.T) {
 		t.Fatalf("distinct account claim: %v", err)
 	}
 }
+
+func TestMoveClaimsRetrySQLiteContentionForDistinctAccounts(t *testing.T) {
+	db := executionDB(t)
+	fixture := makeMoveFixture(t, db, 1)
+	if err := db.Model(&models.RotationQuotaBatch{}).Where("id = ?", fixture.batch.ID).Update("rotation_concurrent_batches", 4).Error; err != nil {
+		t.Fatal(err)
+	}
+	batchIDs := []uint{fixture.batch.ID}
+	for i := 2; i <= 4; i++ {
+		account := models.QuotaAccount{QuotaKey: fmt.Sprintf("account-%d", i), BudgetBytes: 100, Enabled: true, WindowSeconds: 3600}
+		if err := db.Create(&account).Error; err != nil {
+			t.Fatal(err)
+		}
+		batch := fixture.batch
+		batch.ID = 0
+		batch.QuotaAccountID = account.ID
+		batch.DestinationRemote = fmt.Sprintf("remote-%d", i)
+		batch.RequestKey = fmt.Sprintf("move-request-%d", i)
+		batch.RequestFingerprint = fmt.Sprintf("move-fingerprint-%d", i)
+		batch.OwnerToken = fmt.Sprintf("%040d", i)
+		batch.LeaseToken = ""
+		batch.LeaseUntil = nil
+		batch.StartedAt = nil
+		batch.State = models.BatchStateReserved
+		batch.RotationConcurrentBatches = 4
+		if err := db.Create(&batch).Error; err != nil {
+			t.Fatal(err)
+		}
+		batchIDs = append(batchIDs, batch.ID)
+	}
+
+	executor := &Executor{DB: db}
+	start := make(chan struct{})
+	errs := make(chan error, len(batchIDs))
+	for _, batchID := range batchIDs {
+		go func(batchID uint) {
+			<-start
+			_, _, _, err := executor.claimMove(batchID)
+			errs <- err
+		}(batchID)
+	}
+	close(start)
+	for range batchIDs {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent claim: %v", err)
+		}
+	}
+}

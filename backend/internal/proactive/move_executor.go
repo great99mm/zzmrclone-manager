@@ -16,7 +16,9 @@ func (e *Executor) claimMove(batchID uint) (models.RotationQuotaBatch, []models.
 	token := randomToken()
 	var batch models.RotationQuotaBatch
 	var files []models.RotationQuotaBatchFile
-	err := e.DB.Transaction(func(tx *gorm.DB) error {
+	err := e.claimTransaction(func(tx *gorm.DB) error {
+		batch = models.RotationQuotaBatch{}
+		files = nil
 		if err := tx.First(&batch, batchID).Error; err != nil {
 			return err
 		}
