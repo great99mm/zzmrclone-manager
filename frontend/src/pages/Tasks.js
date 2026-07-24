@@ -491,7 +491,7 @@ const PoolTaskSummary = ({ summary, loading, error }) => {
   const transferMode = summary.task?.transfer_mode || runningBatch?.transfer_mode || 'copy';
   const unknownMoveCount = batches.filter(batch => batch.state === 'unknown' && (batch.transfer_mode || transferMode) === 'move').length;
   const evidenceBatch = batches.find(batch => batch.state === 'succeeded' && batch.completion_evidence) || runningBatch;
-  const accountName = runningBatch?.account || runningBatch?.remote || batches[0]?.account || batches[0]?.remote;
+  const accountName = runningBatch?.remote || runningBatch?.account || batches[0]?.remote || batches[0]?.account;
   const account = (summary.accounts || []).find(item => item.remote_name === accountName || item.quota_key === accountName);
   const accountReady = account?.budget_bytes != null && account?.remaining_bytes != null;
   const blocked = isFutureTimestamp(account?.provider_blocked_until);
