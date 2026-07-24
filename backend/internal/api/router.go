@@ -634,7 +634,7 @@ func applyRuntimeStatus(task *models.Task) {
 	if task == nil {
 		return
 	}
-	if executor.IsRunning(task.ID) {
+	if executor.IsRunning(task.ID) || proactiveIsActive(task) {
 		task.Status = "running"
 		return
 	}
@@ -646,6 +646,16 @@ func applyRuntimeStatus(task *models.Task) {
 		return
 	}
 	task.Status = "idle"
+}
+
+func proactiveIsActive(task *models.Task) bool {
+	if task == nil || proactiveDispatcher == nil {
+		return false
+	}
+	if task.TaskType != "rotation" || task.RotationStrategy != "proactive_quota" {
+		return false
+	}
+	return proactiveDispatcher.IsActive(task.ID)
 }
 
 func listTasks(c *gin.Context) {
