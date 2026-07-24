@@ -592,7 +592,7 @@ const TaskDetail = () => {
                       <div key={batch.id} className="border border-amber-100 bg-amber-50 rounded-lg px-3 py-2.5">
                       <div className="flex items-center justify-between text-xs">
                         <span className="font-medium text-gray-700">批次 #{batch.id} 等待启动</span>
-                        <span className="text-amber-700">{batch.account || batch.remote || '-'} · {formatBytes(batch.reserved_bytes || 0)}</span>
+                        <span className="text-amber-700">{batch.remote || batch.account || '-'} · {formatBytes(batch.reserved_bytes || 0)}</span>
                       </div>
                       {(batch.file_paths || []).length > 0 && (
                         <div className="mt-1.5 space-y-0.5 text-[10px] text-gray-500">
@@ -612,7 +612,7 @@ const TaskDetail = () => {
                     <div key={batch.id} className="border border-blue-100 bg-blue-50 rounded-lg px-3 py-2.5">
                       <div className="flex items-center justify-between text-xs mb-1.5">
                         <span className="font-medium text-blue-700">批次 #{batch.id} 传输中</span>
-                        <span className="text-blue-600">{batch.account || batch.remote || '-'} · {formatBytes(batch.reserved_bytes || 0)}</span>
+                        <span className="text-blue-600">{batch.remote || batch.account || '-'} · {formatBytes(batch.reserved_bytes || 0)}</span>
                       </div>
                       {(batch.file_paths || []).length > 0 && (
                         <div className="text-[10px] text-gray-500 mb-1.5 space-y-0.5">
@@ -1017,7 +1017,7 @@ const ProactiveQuotaPanel = ({ status, loading, error, onRetry, resolutionState,
                   <span className="text-xs text-blue-700 bg-blue-50 rounded-full px-2 py-0.5">{BATCH_STATE_LABELS[activeBatch.state] || activeBatch.state}</span>
                 </div>
                 <dl className="grid grid-cols-2 gap-3 text-xs">
-                  <div><dt className="text-gray-500">账号</dt><dd className="font-medium text-gray-800 mt-0.5">{activeBatch.account || activeBatch.remote_name || activeBatch.destination_remote || '-'}</dd></div>
+                  <div><dt className="text-gray-500">账号</dt><dd className="font-medium text-gray-800 mt-0.5">{activeBatch.remote || activeBatch.account || activeBatch.destination_remote || '-'}</dd></div>
                   <div><dt className="text-gray-500">批次 ID</dt><dd className="font-mono text-gray-800 mt-0.5">{activeBatch.id || '-'}</dd></div>
                   <div><dt className="text-gray-500">文件数</dt><dd className="font-medium text-gray-800 mt-0.5">{Object.values(activeBatch.file_counts || {}).reduce((total, item) => total + (item.count || 0), 0) || '-'}</dd></div>
                   <div><dt className="text-gray-500">预留额度</dt><dd className="font-medium text-gray-800 mt-0.5">{formatBytes(activeBatch.reserved_bytes || 0)}</dd></div>

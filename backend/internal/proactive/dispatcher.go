@@ -283,7 +283,13 @@ func (d *Dispatcher) RequestScan(ctx context.Context, taskID uint) error {
 		wakeErr := d.persistScopeWake(resolved, task.RemoteDir, now)
 		return errors.Join(err, wakeErr, d.persistRequestError(taskID, err))
 	}
-	if len(result.Pending) == 0 && d.groupTerminal(taskID, requestKey) {
+	if d.groupTerminal(taskID, requestKey) {
+		if len(result.Pending) > 0 {
+			// The file-count batch limit leaves eligible files pending even though
+			// every batch in this group completed. Continue packing them without
+			// waiting for another filesystem event or a quota expiry.
+			return d.persistFollowUpWake(taskID)
+		}
 		if err := heartbeat.Err(); err != nil {
 			return d.persistRequestError(taskID, err)
 		}
@@ -1371,6 +1377,10 @@ func (d *Dispatcher) setRetryWake(id uint, candidate time.Time) error {
 }
 func (d *Dispatcher) persistImmediateWake(id uint) error {
 	return d.setEarliestWake(id, d.now().Add(time.Minute))
+}
+
+func (d *Dispatcher) persistFollowUpWake(id uint) error {
+	return d.setEarliestWake(id, d.now())
 }
 func (d *Dispatcher) setTaskError(id uint, err error) error {
 	return d.updateTaskRetry("id = ?", []interface{}{id}, map[string]interface{}{"last_error": err.Error()})

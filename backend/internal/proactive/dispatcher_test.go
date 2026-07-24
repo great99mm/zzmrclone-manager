@@ -3,6 +3,7 @@ package proactive
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -611,6 +612,37 @@ func TestDispatcherOversizedFileSetsErrorAndDoesNotLoop(t *testing.T) {
 	}
 	if len(fake.calls) != 0 {
 		t.Fatal("oversized file was dispatched")
+	}
+}
+
+func TestDispatcherSchedulesImmediateFollowUpForBatchLimitPendingFiles(t *testing.T) {
+	db := dispatcherDB(t)
+	task, snapshot, _ := dispatcherFixture(t, db, "[\"r1\"]")
+	snapshots := make([]quota.LocalSnapshot, 6)
+	for i := range snapshots {
+		snapshots[i] = snapshot
+		snapshots[i].RelativePath = fmt.Sprintf("file-%d.mkv", i)
+		snapshots[i].SnapshotKey = fmt.Sprintf("snapshot-%d", i)
+	}
+	wake := &recordingWake{}
+	fake := &dispatchFakeExecutor{DB: db}
+	d := newDispatcher(db, fake, fixedScanner{snapshots: snapshots})
+	d.Wake = wake
+
+	if err := d.RequestScan(context.Background(), task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.calls) != 1 {
+		t.Fatalf("completed batches=%d, want 1", len(fake.calls))
+	}
+
+	var stored models.Task
+	if err := db.First(&stored, task.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	want := time.Unix(100, 0)
+	if !stored.RotationRescanPending || stored.RotationQuotaWakeAt == nil || !stored.RotationQuotaWakeAt.Equal(want) || !wake.at.Equal(want) {
+		t.Fatalf("remaining files did not schedule an immediate follow-up: task=%#v wake=%#v", stored, wake)
 	}
 }
 
