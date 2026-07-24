@@ -23,12 +23,8 @@ func (e *Executor) claimMove(batchID uint) (models.RotationQuotaBatch, []models.
 		if batch.TransferMode != models.TransferModeMove || batch.StartedAt != nil || (batch.State != models.BatchStateReserved && batch.State != models.BatchStatePlanned) {
 			return fmt.Errorf("batch %d is not a move batch ready to run", batchID)
 		}
-		var running int64
-		if err := tx.Model(&models.RotationQuotaBatch{}).Where("id <> ? AND destination_scope = ? AND state IN ?", batchID, batch.DestinationScope, []string{models.BatchStateRunning, models.BatchStateReconciling, models.BatchStateUnknown}).Count(&running).Error; err != nil {
+		if err := e.claimScope(tx, batch, batchID); err != nil {
 			return err
-		}
-		if running > 0 {
-			return ErrLeaseConflict
 		}
 		result := tx.Model(&models.RotationQuotaBatch{}).Where("id = ? AND state IN ? AND (lease_until IS NULL OR lease_until <= ? OR lease_token = '')", batchID, []string{models.BatchStateReserved, models.BatchStatePlanned}, e.now()).Updates(map[string]interface{}{"lease_token": token, "lease_until": e.now().Add(e.leaseDuration())})
 		if result.Error != nil {

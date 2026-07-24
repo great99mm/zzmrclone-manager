@@ -476,6 +476,9 @@ func normalizeTaskDefaults(task *models.Task) {
 	if task.RotationBatchFiles == 0 {
 		task.RotationBatchFiles = 5
 	}
+	if task.RotationConcurrentBatches == 0 {
+		task.RotationConcurrentBatches = 1
+	}
 }
 
 func validateAndNormalizeTask(task *models.Task) error {
@@ -540,6 +543,9 @@ func validateAndNormalizeTask(task *models.Task) error {
 	remotes := models.ParseRotationRemotes(task.RotationRemotes)
 	if len(remotes) == 0 {
 		return fmt.Errorf("请选择至少一个轮转网盘")
+	}
+	if task.RotationStrategy == "proactive_quota" && (task.RotationConcurrentBatches < 1 || task.RotationConcurrentBatches > len(remotes)) {
+		return fmt.Errorf("并行账号批次数必须在 1 到已选账号数之间")
 	}
 	if task.RotationMaxRounds <= 0 {
 		return fmt.Errorf("轮数必须大于 0")
@@ -945,51 +951,52 @@ func updateTaskUnsafe(c *gin.Context) {
 	}
 
 	if err := db.Model(&task).Updates(map[string]interface{}{
-		"name":                       updates.Name,
-		"source_type":                updates.SourceType,
-		"source_dir":                 updates.SourceDir,
-		"dest_type":                  updates.DestType,
-		"remote_name":                updates.RemoteName,
-		"remote_dir":                 updates.RemoteDir,
-		"transfer_mode":              updates.TransferMode,
-		"transfers":                  updates.Transfers,
-		"checkers":                   updates.Checkers,
-		"bind_ip":                    updates.BindIP,
-		"rclone_config":              updates.RcloneConfig,
-		"enabled":                    updates.Enabled,
-		"auto_dedupe":                false,
-		"min_age":                    updates.MinAge,
-		"drive_chunk_size":           updates.DriveChunkSize,
-		"buffer_size":                updates.BufferSize,
-		"retries":                    updates.Retries,
-		"schedule_enabled":           updates.ScheduleEnabled,
-		"schedule_interval":          updates.ScheduleInterval,
-		"watch_enabled":              updates.WatchEnabled,
-		"qb_enabled":                 updates.QBEnabled,
-		"qb_url":                     updates.QBURL,
-		"qb_username":                updates.QBUsername,
-		"qb_password":                updates.QBPassword,
-		"qb_poll_interval":           updates.QBPollInterval,
-		"qb_delete_files":            updates.QBDeleteFiles,
-		"status":                     status,
-		"last_error":                 lastError,
-		"openlist_enabled":           updates.OpenlistEnabled,
-		"openlist_config_id":         updates.OpenlistConfigID,
-		"openlist_url":               updates.OpenlistURL,
-		"openlist_token":             updates.OpenlistToken,
-		"openlist_mapping":           updates.OpenlistMapping,
-		"openlist_refresh_dir":       updates.OpenlistRefreshDir,
-		"task_type":                  updates.TaskType,
-		"rotation_strategy":          updates.RotationStrategy,
-		"rotation_quota_limit_bytes": updates.RotationQuotaLimitBytes,
-		"rotation_quota_keys":        updates.RotationQuotaKeys,
-		"rotation_batch_files":       updates.RotationBatchFiles,
-		"rotation_remotes":           updates.RotationRemotes,
-		"rotation_max_rounds":        updates.RotationMaxRounds,
-		"rotation_resume_time":       updates.RotationResumeTime,
-		"rotation_current_index":     updates.RotationCurrentIndex,
-		"rotation_current_round":     updates.RotationCurrentRound,
-		"rotation_paused_until":      nil,
+		"name":                        updates.Name,
+		"source_type":                 updates.SourceType,
+		"source_dir":                  updates.SourceDir,
+		"dest_type":                   updates.DestType,
+		"remote_name":                 updates.RemoteName,
+		"remote_dir":                  updates.RemoteDir,
+		"transfer_mode":               updates.TransferMode,
+		"transfers":                   updates.Transfers,
+		"checkers":                    updates.Checkers,
+		"bind_ip":                     updates.BindIP,
+		"rclone_config":               updates.RcloneConfig,
+		"enabled":                     updates.Enabled,
+		"auto_dedupe":                 false,
+		"min_age":                     updates.MinAge,
+		"drive_chunk_size":            updates.DriveChunkSize,
+		"buffer_size":                 updates.BufferSize,
+		"retries":                     updates.Retries,
+		"schedule_enabled":            updates.ScheduleEnabled,
+		"schedule_interval":           updates.ScheduleInterval,
+		"watch_enabled":               updates.WatchEnabled,
+		"qb_enabled":                  updates.QBEnabled,
+		"qb_url":                      updates.QBURL,
+		"qb_username":                 updates.QBUsername,
+		"qb_password":                 updates.QBPassword,
+		"qb_poll_interval":            updates.QBPollInterval,
+		"qb_delete_files":             updates.QBDeleteFiles,
+		"status":                      status,
+		"last_error":                  lastError,
+		"openlist_enabled":            updates.OpenlistEnabled,
+		"openlist_config_id":          updates.OpenlistConfigID,
+		"openlist_url":                updates.OpenlistURL,
+		"openlist_token":              updates.OpenlistToken,
+		"openlist_mapping":            updates.OpenlistMapping,
+		"openlist_refresh_dir":        updates.OpenlistRefreshDir,
+		"task_type":                   updates.TaskType,
+		"rotation_strategy":           updates.RotationStrategy,
+		"rotation_quota_limit_bytes":  updates.RotationQuotaLimitBytes,
+		"rotation_quota_keys":         updates.RotationQuotaKeys,
+		"rotation_batch_files":        updates.RotationBatchFiles,
+		"rotation_concurrent_batches": updates.RotationConcurrentBatches,
+		"rotation_remotes":            updates.RotationRemotes,
+		"rotation_max_rounds":         updates.RotationMaxRounds,
+		"rotation_resume_time":        updates.RotationResumeTime,
+		"rotation_current_index":      updates.RotationCurrentIndex,
+		"rotation_current_round":      updates.RotationCurrentRound,
+		"rotation_paused_until":       nil,
 	}).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

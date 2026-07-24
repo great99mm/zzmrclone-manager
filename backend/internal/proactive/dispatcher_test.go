@@ -52,6 +52,26 @@ type dispatchFakeExecutor struct {
 	runErr  error
 }
 
+type parallelDispatchExecutor struct {
+	mu       sync.Mutex
+	calls    []uint
+	expected int
+	started  chan struct{}
+	release  <-chan struct{}
+	once     sync.Once
+}
+
+func (e *parallelDispatchExecutor) RunBatch(_ context.Context, batchID uint) error {
+	e.mu.Lock()
+	e.calls = append(e.calls, batchID)
+	if len(e.calls) == e.expected {
+		e.once.Do(func() { close(e.started) })
+	}
+	e.mu.Unlock()
+	<-e.release
+	return errors.New("test batch stop")
+}
+
 type startupMoveInspector struct{ stopped bool }
 
 type alwaysLiveDedupeInspector struct{ stops int }
@@ -847,6 +867,34 @@ func TestDispatcherUnknownSiblingReleasesLaterHeldOnly(t *testing.T) {
 	}
 	if taskState.RotationQuotaWakeAt == nil || taskState.RotationQuotaWakeAt.After(time.Unix(160, 0)) {
 		t.Fatalf("failed group retry wake missing: %#v", taskState)
+	}
+}
+
+func TestDispatcherRunsDistinctAccountsInParallelUpToTaskLimit(t *testing.T) {
+	db := dispatcherDB(t)
+	task, _, config := dispatcherFixture(t, db, `["r1","r2","r3","r4"]`)
+	if err := db.Model(&models.Task{}).Where("id = ?", task.ID).Update("rotation_concurrent_batches", 4).Error; err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		batch := models.RotationQuotaBatch{TaskID: task.ID, QuotaAccountID: uint(i + 1), DestinationScope: models.DestinationScope(config, "/shared"), DestinationRemote: fmt.Sprintf("r%d", i+1), TransferMode: models.TransferModeCopy, DestinationScopeVersion: 1, RcloneConfigPath: config, RequestKey: "parallel", RequestFingerprint: "parallel", DestinationPath: "/shared", State: models.BatchStateReserved, OwnerToken: fmt.Sprintf("%040d", i+1), RotationConcurrentBatches: 4}
+		if err := db.Create(&batch).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	release := make(chan struct{})
+	fake := &parallelDispatchExecutor{expected: 4, started: make(chan struct{}), release: release}
+	dispatcher := &Dispatcher{DB: db, Executor: fake}
+	done := make(chan error, 1)
+	go func() { done <- dispatcher.executeGroup(context.Background(), task.ID, "parallel") }()
+	select {
+	case <-fake.started:
+	case <-time.After(time.Second):
+		t.Fatal("four batches did not enter execution concurrently")
+	}
+	close(release)
+	if err := <-done; err == nil || err.Error() != "test batch stop" {
+		t.Fatalf("executeGroup error = %v", err)
 	}
 }
 

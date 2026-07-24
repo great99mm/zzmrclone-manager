@@ -1095,63 +1095,72 @@ func (d *Dispatcher) executeGroup(ctx context.Context, taskID uint, requestKey s
 	if requestKey == "" {
 		return nil
 	}
-	var batches []models.RotationQuotaBatch
-	if err := d.DB.Where("task_id = ? AND request_key = ?", taskID, requestKey).Order("id").Find(&batches).Error; err != nil {
+	var task models.Task
+	if err := d.DB.Select("rotation_concurrent_batches").First(&task, taskID).Error; err != nil {
 		return err
 	}
-	for i, b := range batches {
-		if b.State == models.BatchStateUnknown {
-			if err := d.cancelLaterHeld(batches[i+1:]); err != nil {
-				return err
-			}
-			return d.persistRetryWake(taskID)
-		}
-		if b.State == models.BatchStateRunning || b.State == models.BatchStateReconciling {
-			return nil
-		}
-		if b.State == models.BatchStateFailed {
-			if err := d.cancelLaterHeld(batches[i+1:]); err != nil {
-				return err
-			}
-			return d.persistRetryWake(taskID)
-		}
-		if b.State == models.BatchStateCanceled || b.State == models.BatchStateExpired {
-			continue
-		}
-		if b.State != models.BatchStateReserved && b.State != models.BatchStatePlanned {
-			continue
-		}
-		err := d.Executor.RunBatch(ctx, b.ID)
-		var current models.RotationQuotaBatch
-		if loadErr := d.DB.First(&current, b.ID).Error; loadErr != nil {
-			return loadErr
-		}
-		if err != nil && isRetryableDispatchError(err) {
+	limit := task.RotationConcurrentBatches
+	if limit <= 0 {
+		limit = 1
+	}
+
+	for {
+		var batches []models.RotationQuotaBatch
+		if err := d.DB.Where("task_id = ? AND request_key = ?", taskID, requestKey).Order("id").Find(&batches).Error; err != nil {
 			return err
 		}
-		if err != nil || current.State == models.BatchStateUnknown || current.State == models.BatchStateRunning || current.State == models.BatchStateReconciling {
-			if cancelErr := d.cancelLaterHeld(batches[i+1:]); cancelErr != nil {
-				return cancelErr
-			}
-			if wakeErr := d.persistRetryWake(taskID); wakeErr != nil {
-				return wakeErr
-			}
-			if err != nil {
-				return err
-			}
-			return nil
-		}
-		if current.State != models.BatchStateSucceeded {
-			if current.State == models.BatchStateFailed || current.State == models.BatchStateUnknown {
+		candidates := make([]models.RotationQuotaBatch, 0, limit)
+		accounts := make(map[uint]struct{}, limit)
+		for i, batch := range batches {
+			switch batch.State {
+			case models.BatchStateUnknown, models.BatchStateFailed:
 				if err := d.cancelLaterHeld(batches[i+1:]); err != nil {
 					return err
 				}
 				return d.persistRetryWake(taskID)
+			case models.BatchStateRunning, models.BatchStateReconciling:
+				return nil
+			case models.BatchStateReserved, models.BatchStatePlanned:
+				if len(candidates) >= limit {
+					continue
+				}
+				if _, exists := accounts[batch.QuotaAccountID]; exists {
+					continue
+				}
+				accounts[batch.QuotaAccountID] = struct{}{}
+				candidates = append(candidates, batch)
 			}
+		}
+		if len(candidates) == 0 {
 			return nil
 		}
+
+		errs := make(chan error, len(candidates))
+		var wg sync.WaitGroup
+		for _, batch := range candidates {
+			wg.Add(1)
+			go func(batchID uint) {
+				defer wg.Done()
+				errs <- d.Executor.RunBatch(ctx, batchID)
+			}(batch.ID)
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			if err != nil {
+				return err
+			}
+		}
+		for _, batch := range candidates {
+			var current models.RotationQuotaBatch
+			if err := d.DB.Select("state").First(&current, batch.ID).Error; err != nil {
+				return err
+			}
+			if current.State != models.BatchStateSucceeded && current.State != models.BatchStateFailed && current.State != models.BatchStateUnknown {
+				return nil
+			}
+		}
 	}
-	return nil
 }
 
 func (d *Dispatcher) cancelLaterHeld(batches []models.RotationQuotaBatch) error {

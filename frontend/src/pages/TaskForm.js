@@ -37,6 +37,7 @@ const TaskForm = () => {
     rotation_quota_limit_bytes: 700 * 1024 * 1024 * 1024,
     rotation_quota_keys: '{}',
     rotation_batch_files: 5,
+    rotation_concurrent_batches: 1,
     rotation_current_index: 0,
     rotation_current_round: 0,
     rotation_paused_until: null,
@@ -122,6 +123,7 @@ const TaskForm = () => {
           : res.data.rotation_quota_limit_bytes,
         rotation_quota_keys: res.data.rotation_quota_keys || '{}',
         rotation_batch_files: res.data.rotation_batch_files || 5,
+        rotation_concurrent_batches: res.data.rotation_concurrent_batches || 1,
       });
     } catch (err) {
       toast.error('加载任务失败');
@@ -294,6 +296,11 @@ const TaskForm = () => {
         const batchFiles = Number(submitForm.rotation_batch_files);
         if (!Number.isInteger(batchFiles) || batchFiles < 1 || batchFiles > 128) {
           toast.error('每批文件数必须在 1 到 128 之间');
+          return;
+        }
+        const concurrentBatches = Number(submitForm.rotation_concurrent_batches);
+        if (!Number.isInteger(concurrentBatches) || concurrentBatches < 1 || concurrentBatches > normalizedRemotes.length) {
+          toast.error('并行账号批次数必须在 1 到已选账号数之间');
           return;
         }
         try {
@@ -782,6 +789,19 @@ const TaskForm = () => {
                           max="128"
                           value={form.rotation_batch_files}
                           onChange={(e) => handleChange('rotation_batch_files', parseInt(e.target.value, 10))}
+                          className="w-36 h-10 px-3 border border-emerald-300 bg-white rounded-lg text-sm font-medium text-gray-800 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                        />
+                      </div>
+
+                      <div>
+                        <label htmlFor="rotation-concurrent-batches" className="block text-xs font-medium text-gray-700 mb-1">并行账号批次</label>
+                        <input
+                          id="rotation-concurrent-batches"
+                          type="number"
+                          min="1"
+                          max={Math.max(1, selectedRotationRemotes.length)}
+                          value={form.rotation_concurrent_batches}
+                          onChange={(e) => handleChange('rotation_concurrent_batches', parseInt(e.target.value, 10))}
                           className="w-36 h-10 px-3 border border-emerald-300 bg-white rounded-lg text-sm font-medium text-gray-800 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                         />
                       </div>

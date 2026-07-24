@@ -321,19 +321,8 @@ func (e *Executor) claim(batchID uint) (models.RotationQuotaBatch, []models.Rota
 		if batch.TransferMode != models.TransferModeCopy || (batch.State != models.BatchStateReserved && batch.State != models.BatchStatePlanned) {
 			return fmt.Errorf("batch %d is not a copy batch ready to run", batchID)
 		}
-		var running int64
-		if err := tx.Model(&models.RotationQuotaBatch{}).Where("id <> ? AND destination_scope = ? AND state IN ?", batchID, batch.DestinationScope, []string{models.BatchStateRunning, models.BatchStateReconciling, models.BatchStateUnknown}).Count(&running).Error; err != nil {
+		if err := e.claimScope(tx, batch, batchID); err != nil {
 			return err
-		}
-		if running > 0 {
-			return ErrLeaseConflict
-		}
-		var leased int64
-		if err := tx.Model(&models.RotationQuotaBatch{}).Where("id <> ? AND destination_scope = ? AND state IN ? AND lease_token <> '' AND lease_until > ?", batchID, batch.DestinationScope, []string{models.BatchStateReserved, models.BatchStatePlanned}, e.now()).Count(&leased).Error; err != nil {
-			return err
-		}
-		if leased > 0 {
-			return ErrLeaseConflict
 		}
 		result := tx.Model(&models.RotationQuotaBatch{}).Where("id = ? AND state IN ? AND (lease_until IS NULL OR lease_until <= ? OR lease_token = '')", batchID, []string{models.BatchStateReserved, models.BatchStatePlanned}, e.now()).Updates(map[string]interface{}{"lease_token": token, "lease_until": e.now().Add(e.leaseDuration())})
 		if result.Error != nil {
@@ -345,6 +334,26 @@ func (e *Executor) claim(batchID uint) (models.RotationQuotaBatch, []models.Rota
 		return tx.Where("batch_id = ?", batchID).Order("relative_path").Find(&files).Error
 	})
 	return batch, files, token, err
+}
+
+func (e *Executor) claimScope(tx *gorm.DB, batch models.RotationQuotaBatch, batchID uint) error {
+	var active []models.RotationQuotaBatch
+	if err := tx.Where("id <> ? AND destination_scope = ? AND (state IN ? OR (state IN ? AND lease_token <> '' AND lease_until > ?))", batchID, batch.DestinationScope, []string{models.BatchStateRunning, models.BatchStateReconciling, models.BatchStateUnknown}, []string{models.BatchStateReserved, models.BatchStatePlanned}, e.now()).Find(&active).Error; err != nil {
+		return err
+	}
+	limit := batch.RotationConcurrentBatches
+	if limit <= 0 {
+		limit = 1
+	}
+	for _, other := range active {
+		if other.State == models.BatchStateUnknown || other.TaskID != batch.TaskID || other.QuotaAccountID == batch.QuotaAccountID {
+			return ErrLeaseConflict
+		}
+	}
+	if len(active) >= limit {
+		return ErrLeaseConflict
+	}
+	return nil
 }
 
 func (e *Executor) persistManifest(batchID uint, token, path, hash string) error {

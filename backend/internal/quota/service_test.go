@@ -305,6 +305,7 @@ func TestReserveRespectsConfiguredBatchFileLimit(t *testing.T) {
 	service := testService(db, time.Unix(100, 0))
 	task := quotaTask([]string{"remote"}, map[string]string{"remote": "key"}, 20)
 	task.RotationBatchFiles = 2
+	task.RotationConcurrentBatches = 4
 	task.Transfers = 16
 	result, err := service.Reserve(PackReserveRequest{
 		Task: task, Snapshots: []LocalSnapshot{snapshot("a", 3), snapshot("b", 3), snapshot("c", 3)},
@@ -320,8 +321,8 @@ func TestReserveRespectsConfiguredBatchFileLimit(t *testing.T) {
 	if err := db.Model(&models.RotationQuotaBatchFile{}).Where("batch_id = ?", result.Batches[0].ID).Count(&files).Error; err != nil {
 		t.Fatal(err)
 	}
-	if files != 2 || result.Batches[0].RcloneTransfers != task.Transfers {
-		t.Fatalf("files=%d transfers=%d", files, result.Batches[0].RcloneTransfers)
+	if files != 2 || result.Batches[0].RcloneTransfers != task.Transfers || result.Batches[0].RotationConcurrentBatches != task.RotationConcurrentBatches {
+		t.Fatalf("files=%d transfers=%d concurrent=%d", files, result.Batches[0].RcloneTransfers, result.Batches[0].RotationConcurrentBatches)
 	}
 }
 

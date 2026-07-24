@@ -412,3 +412,37 @@ func TestMoveExecutorMixedLocalPresenceFreezesRetainedFile(t *testing.T) {
 		t.Fatalf("unknown file count = %d, want 1", unknown)
 	}
 }
+
+func TestMoveClaimAllowsDistinctAccountsFromSameTaskWithinLimit(t *testing.T) {
+	db := executionDB(t)
+	fixture := makeMoveFixture(t, db, 1)
+	if err := db.Model(&models.RotationQuotaBatch{}).Where("id = ?", fixture.batch.ID).Update("rotation_concurrent_batches", 2).Error; err != nil {
+		t.Fatal(err)
+	}
+	secondAccount := models.QuotaAccount{QuotaKey: "second", BudgetBytes: 100, Enabled: true, WindowSeconds: 3600}
+	if err := db.Create(&secondAccount).Error; err != nil {
+		t.Fatal(err)
+	}
+	sibling := fixture.batch
+	sibling.ID = 0
+	sibling.QuotaAccountID = secondAccount.ID
+	sibling.DestinationRemote = "remote-2"
+	sibling.RequestKey = "move-request-2"
+	sibling.RequestFingerprint = "move-fingerprint-2"
+	sibling.OwnerToken = "0123456789abcdef0123456789abcdef0123456789abcdee"
+	sibling.LeaseToken = ""
+	sibling.LeaseUntil = nil
+	sibling.State = models.BatchStateReserved
+	sibling.StartedAt = nil
+	sibling.RotationConcurrentBatches = 2
+	if err := db.Create(&sibling).Error; err != nil {
+		t.Fatal(err)
+	}
+	executor := &Executor{DB: db}
+	if _, _, _, err := executor.claimMove(fixture.batch.ID); err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+	if _, _, _, err := executor.claimMove(sibling.ID); err != nil {
+		t.Fatalf("distinct account claim: %v", err)
+	}
+}

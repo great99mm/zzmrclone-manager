@@ -11,7 +11,7 @@ func TestValidateProactiveQuotaContract(t *testing.T) {
 	if err := validateAndNormalizeTask(&base); err != nil {
 		t.Fatalf("valid proactive task rejected: %v", err)
 	}
-	for name, mutate := range map[string]func(*models.Task){"remote source": func(x *models.Task) { x.SourceType = "remote" }, "move": func(x *models.Task) { x.TransferMode = "move" }, "sync": func(x *models.Task) { x.TransferMode = "sync" }, "no remotes": func(x *models.Task) { x.RotationRemotes = "[]" }, "budget": func(x *models.Task) { x.RotationQuotaLimitBytes = models.DefaultRotationQuotaLimitBytes + 1 }, "batch files": func(x *models.Task) { x.RotationBatchFiles = 129 }, "negative batch files": func(x *models.Task) { x.RotationBatchFiles = -1 }} {
+	for name, mutate := range map[string]func(*models.Task){"remote source": func(x *models.Task) { x.SourceType = "remote" }, "move": func(x *models.Task) { x.TransferMode = "move" }, "sync": func(x *models.Task) { x.TransferMode = "sync" }, "no remotes": func(x *models.Task) { x.RotationRemotes = "[]" }, "budget": func(x *models.Task) { x.RotationQuotaLimitBytes = models.DefaultRotationQuotaLimitBytes + 1 }, "batch files": func(x *models.Task) { x.RotationBatchFiles = 129 }, "negative batch files": func(x *models.Task) { x.RotationBatchFiles = -1 }, "concurrent batches": func(x *models.Task) { x.RotationConcurrentBatches = 2 }} {
 		candidate := base
 		mutate(&candidate)
 		if err := validateAndNormalizeTask(&candidate); err == nil {
