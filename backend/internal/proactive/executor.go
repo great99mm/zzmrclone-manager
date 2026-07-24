@@ -339,9 +339,13 @@ func (e *Executor) claim(batchID uint) (models.RotationQuotaBatch, []models.Rota
 }
 
 func (e *Executor) claimTransaction(run func(*gorm.DB) error) error {
+	return e.retrySQLite(func() error { return e.DB.Transaction(run) })
+}
+
+func (e *Executor) retrySQLite(run func() error) error {
 	var err error
 	for attempt := 0; attempt < 8; attempt++ {
-		err = e.DB.Transaction(run)
+		err = run()
 		if err == nil || !retryableSQLiteError(err) {
 			return err
 		}

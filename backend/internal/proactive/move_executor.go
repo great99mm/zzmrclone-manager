@@ -150,7 +150,7 @@ func quarantineFile(quarantine *quota.MoveQuarantine) *os.File { return quaranti
 
 func (e *Executor) persistMoveContract(batch models.RotationQuotaBatch, token, path string, device, inode int64, files []models.RotationQuotaBatchFile) error {
 	now := e.now()
-	return e.DB.Transaction(func(tx *gorm.DB) error {
+	return e.claimTransaction(func(tx *gorm.DB) error {
 		result := tx.Model(&models.RotationQuotaBatch{}).Where("id = ? AND lease_token = ? AND state IN ?", batch.ID, token, []string{models.BatchStateReserved, models.BatchStatePlanned}).Updates(map[string]interface{}{"move_handoff_contract_version": models.MoveHandoffVersion, "move_quarantine_path": path, "move_quarantine_device": device, "move_quarantine_inode": inode, "move_handoff_started_at": now, "state": models.BatchStatePlanned})
 		if result.Error != nil || result.RowsAffected != 1 {
 			if result.Error != nil {
@@ -172,18 +172,20 @@ func (e *Executor) persistMoveContract(batch models.RotationQuotaBatch, token, p
 }
 
 func (e *Executor) updateMoveFile(batchID uint, token string, fileID uint, state string, device, inode int64) error {
-	result := e.DB.Model(&models.RotationQuotaBatchFile{}).Where("id = ? AND batch_id = ? AND move_handoff_state IN ?", fileID, batchID, []string{"", models.MoveHandoffReady, models.MoveHandoffQuarantined}).Updates(map[string]interface{}{"move_handoff_state": state, "move_handoff_device": device, "move_handoff_inode": inode})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected != 1 {
-		return ErrLeaseConflict
-	}
-	return nil
+	return e.retrySQLite(func() error {
+		result := e.DB.Model(&models.RotationQuotaBatchFile{}).Where("id = ? AND batch_id = ? AND move_handoff_state IN ?", fileID, batchID, []string{"", models.MoveHandoffReady, models.MoveHandoffQuarantined}).Updates(map[string]interface{}{"move_handoff_state": state, "move_handoff_device": device, "move_handoff_inode": inode})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrLeaseConflict
+		}
+		return nil
+	})
 }
 
 func (e *Executor) startMoveIntent(batchID uint, token string) error {
-	return e.DB.Transaction(func(tx *gorm.DB) error {
+	return e.claimTransaction(func(tx *gorm.DB) error {
 		var batch models.RotationQuotaBatch
 		if err := tx.First(&batch, batchID).Error; err != nil {
 			return err
@@ -292,7 +294,7 @@ func validateMoveIdentities(batch models.RotationQuotaBatch, root *quota.SourceR
 }
 
 func (e *Executor) releaseMoveBeforeStart(batchID uint, token string, cause error) error {
-	return e.DB.Transaction(func(tx *gorm.DB) error {
+	return e.claimTransaction(func(tx *gorm.DB) error {
 		now := e.now()
 		if result := tx.Model(&models.QuotaReservation{}).Where("batch_id = ? AND state IN ?", batchID, []string{models.ReservationStateHeld, models.ReservationStateActive}).Updates(map[string]interface{}{"state": models.ReservationStateReleased, "released_at": now, "last_error": cause.Error()}); result.Error != nil {
 			return result.Error
@@ -319,7 +321,9 @@ func (e *Executor) finishMoveProcess(ctx context.Context, batch models.RotationQ
 	if waitErr != nil {
 		message = message + ": " + waitErr.Error()
 	}
-	if err := e.DB.Model(&models.RotationQuotaBatch{}).Where("id = ? AND lease_token = ? AND state = ?", batch.ID, token, models.BatchStateRunning).Updates(map[string]interface{}{"state": models.BatchStateReconciling, "exit_code": result.ExitCode, "last_error": message}).Error; err != nil {
+	if err := e.retrySQLite(func() error {
+		return e.DB.Model(&models.RotationQuotaBatch{}).Where("id = ? AND lease_token = ? AND state = ?", batch.ID, token, models.BatchStateRunning).Updates(map[string]interface{}{"state": models.BatchStateReconciling, "exit_code": result.ExitCode, "last_error": message}).Error
+	}); err != nil {
 		return err
 	}
 	if err := e.reconcileMove(batch, files, token, quarantine); err != nil {
@@ -329,7 +333,7 @@ func (e *Executor) finishMoveProcess(ctx context.Context, batch models.RotationQ
 }
 
 func (e *Executor) reconcileMove(batch models.RotationQuotaBatch, files []models.RotationQuotaBatchFile, token string, quarantine *quota.MoveQuarantine) error {
-	return e.DB.Transaction(func(tx *gorm.DB) error {
+	return e.claimTransaction(func(tx *gorm.DB) error {
 		var current models.RotationQuotaBatch
 		if err := tx.First(&current, batch.ID).Error; err != nil {
 			return err
