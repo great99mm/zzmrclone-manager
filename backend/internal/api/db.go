@@ -64,6 +64,7 @@ func InitDB(dataDir string) error {
 		&models.MountConfig{},
 		&models.QuotaAccount{},
 		&models.RotationQuotaOversize{},
+		&models.RotationQuotaDirectoryAssignment{},
 		&models.RotationQuotaBatch{},
 		&models.RotationQuotaBatchFile{},
 		&models.QuotaReservation{},

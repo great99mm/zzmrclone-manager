@@ -413,7 +413,7 @@ func dispatcherDB(t *testing.T) *gorm.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
-	if err := db.AutoMigrate(&models.Task{}, &models.QuotaAccount{}, &models.RotationQuotaOversize{}, &models.RotationQuotaBatch{}, &models.RotationQuotaBatchFile{}, &models.QuotaReservation{}); err != nil {
+	if err := db.AutoMigrate(&models.Task{}, &models.QuotaAccount{}, &models.RotationQuotaOversize{}, &models.RotationQuotaDirectoryAssignment{}, &models.RotationQuotaBatch{}, &models.RotationQuotaBatchFile{}, &models.QuotaReservation{}); err != nil {
 		t.Fatal(err)
 	}
 	return db
@@ -895,6 +895,22 @@ func TestDispatcherRunsDistinctAccountsInParallelUpToTaskLimit(t *testing.T) {
 	close(release)
 	if err := <-done; err == nil || err.Error() != "test batch stop" {
 		t.Fatalf("executeGroup error = %v", err)
+	}
+}
+
+func TestFinishPauseMarksTaskPausedAfterLiveBatchesComplete(t *testing.T) {
+	db := dispatcherDB(t)
+	task, _, _ := dispatcherFixture(t, db, `["r1"]`)
+	if err := db.Model(&models.Task{}).Where("id = ?", task.ID).Updates(map[string]interface{}{"rotation_stop_requested": true, "rotation_rescan_pending": true, "status": "pausing"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	(&Dispatcher{DB: db}).finishPauseIfRequested(task.ID)
+	var stored models.Task
+	if err := db.First(&stored, task.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "paused" || stored.RotationRescanPending || stored.RotationQuotaWakeAt != nil {
+		t.Fatalf("task=%#v", stored)
 	}
 }
 

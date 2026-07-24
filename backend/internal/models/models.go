@@ -418,6 +418,17 @@ type RotationQuotaOversize struct {
 	UpdatedAt    time.Time `json:"updated_at"`
 }
 
+// RotationQuotaDirectoryAssignment keeps every leaf directory on one quota
+// account across scans and batch-file limits.
+type RotationQuotaDirectoryAssignment struct {
+	ID             uint      `json:"id" gorm:"primaryKey"`
+	TaskID         uint      `json:"task_id" gorm:"uniqueIndex:uq_rotation_quota_directory_task_path"`
+	Directory      string    `json:"directory" gorm:"uniqueIndex:uq_rotation_quota_directory_task_path"`
+	QuotaAccountID uint      `json:"quota_account_id" gorm:"index"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
 // RotationQuotaBatch is an immutable attempt. A retry creates a new batch;
 // existing attempts must not be mutated.
 type RotationQuotaBatch struct {

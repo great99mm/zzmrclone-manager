@@ -361,9 +361,22 @@ func (s *Service) reserveAttempt(req PackReserveRequest, requestKey, fingerprint
 		if err != nil {
 			return err
 		}
-		selected, pending, err := packSnapshots(req.Snapshots, remotes, quotaKeys, accounts, usage, req.Task.RotationQuotaLimitBytes, req.Task.RotationBatchFiles, transactionNow)
+		var persistedAssignments []models.RotationQuotaDirectoryAssignment
+		if err := tx.Where("task_id = ?", req.Task.ID).Find(&persistedAssignments).Error; err != nil {
+			return err
+		}
+		directoryAccounts := make(map[string]uint, len(persistedAssignments))
+		for _, assignment := range persistedAssignments {
+			directoryAccounts[assignment.Directory] = assignment.QuotaAccountID
+		}
+		selected, pending, newAssignments, err := packSnapshots(req.Snapshots, remotes, quotaKeys, accounts, usage, req.Task.RotationQuotaLimitBytes, req.Task.RotationBatchFiles, directoryAccounts, transactionNow)
 		if err != nil {
 			return err
+		}
+		for directory, accountID := range newAssignments {
+			if err := tx.Create(&models.RotationQuotaDirectoryAssignment{TaskID: req.Task.ID, Directory: directory, QuotaAccountID: accountID}).Error; err != nil {
+				return err
+			}
 		}
 		returnResult.Pending = pending
 		returnResult.Classification = classifyReserveOutcome(pending, selected, accounts, usage, req.Task.RotationQuotaLimitBytes, transactionNow)
@@ -948,9 +961,9 @@ func accountUsage(tx *gorm.DB, ids []uint, now time.Time) (map[uint]int64, error
 
 const defaultBatchFiles = 5
 
-func packSnapshots(snapshots []LocalSnapshot, remotes []string, keys map[string]string, accounts []models.QuotaAccount, usage map[uint]int64, taskLimit int64, batchFiles int, now time.Time) (map[string][]LocalSnapshot, []LocalSnapshot, error) {
+func packSnapshots(snapshots []LocalSnapshot, remotes []string, keys map[string]string, accounts []models.QuotaAccount, usage map[uint]int64, taskLimit int64, batchFiles int, directoryAccounts map[string]uint, now time.Time) (map[string][]LocalSnapshot, []LocalSnapshot, map[string]uint, error) {
 	if taskLimit < 0 {
-		return nil, nil, fmt.Errorf("rotation quota limit cannot be negative")
+		return nil, nil, nil, fmt.Errorf("rotation quota limit cannot be negative")
 	}
 	if batchFiles <= 0 {
 		batchFiles = defaultBatchFiles
@@ -958,7 +971,17 @@ func packSnapshots(snapshots []LocalSnapshot, remotes []string, keys map[string]
 	ordered := append([]LocalSnapshot(nil), snapshots...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].RelativePath < ordered[j].RelativePath })
 	byKey := accountsByKey(accounts)
+	remoteByAccount := make(map[uint]string, len(remotes))
+	for _, remote := range remotes {
+		account, ok := byKey[keys[remote]]
+		if ok {
+			if _, exists := remoteByAccount[account.ID]; !exists {
+				remoteByAccount[account.ID] = remote
+			}
+		}
+	}
 	selected := make(map[string][]LocalSnapshot)
+	newAssignments := make(map[string]uint)
 	used := make(map[uint]int64, len(usage))
 	for id, bytes := range usage {
 		used[id] = bytes
@@ -967,7 +990,18 @@ func packSnapshots(snapshots []LocalSnapshot, remotes []string, keys map[string]
 	pending := make([]LocalSnapshot, 0)
 	for _, snapshot := range ordered {
 		placed := false
-		for _, remote := range remotes {
+		directory := path.Dir(snapshot.RelativePath)
+		assignedAccountID := directoryAccounts[directory]
+		candidateRemotes := remotes
+		if assignedAccountID != 0 {
+			remote, ok := remoteByAccount[assignedAccountID]
+			if !ok {
+				pending = append(pending, snapshot)
+				continue
+			}
+			candidateRemotes = []string{remote}
+		}
+		for _, remote := range candidateRemotes {
 			account := byKey[keys[remote]]
 			if !account.Enabled || (account.ProviderBlockedUntil != nil && account.ProviderBlockedUntil.After(now)) {
 				continue
@@ -984,9 +1018,13 @@ func packSnapshots(snapshots []LocalSnapshot, remotes []string, keys map[string]
 				counts[remote]++
 				updated, err := safeAdd(used[account.ID], snapshot.SizeBytes)
 				if err != nil {
-					return nil, nil, fmt.Errorf("quota packing overflows account %d", account.ID)
+					return nil, nil, nil, fmt.Errorf("quota packing overflows account %d", account.ID)
 				}
 				used[account.ID] = updated
+				if assignedAccountID == 0 {
+					directoryAccounts[directory] = account.ID
+					newAssignments[directory] = account.ID
+				}
 				placed = true
 				break
 			}
@@ -995,7 +1033,7 @@ func packSnapshots(snapshots []LocalSnapshot, remotes []string, keys map[string]
 			pending = append(pending, snapshot)
 		}
 	}
-	return selected, pending, nil
+	return selected, pending, newAssignments, nil
 }
 
 func totalBytes(snapshots []LocalSnapshot) (int64, error) {

@@ -37,18 +37,23 @@ const QuotaAccountBar = ({ account }) => {
   const queued = Math.max(0, (Number(account.active_reserved_bytes) || 0) - uploading);
   const remaining = Math.max(0, Number(account.remaining_bytes) || 0);
   const consumed = uploaded + uploading + queued;
+  const blocked = isFutureTimestamp(account.provider_blocked_until);
+  const displayedConsumed = blocked ? budget : consumed;
+  const displayedRemaining = blocked ? 0 : remaining;
   const uploadedPct = budget > 0 ? Math.min(100, (uploaded / budget) * 100) : 0;
   const uploadingPct = budget > 0 ? Math.min(100, (uploading / budget) * 100) : 0;
   const queuedPct = budget > 0 ? Math.min(100, (queued / budget) * 100) : 0;
-  const ariaLabel = `${account.remote_name || '账号'} 已上传 ${formatBytes(uploaded)}, 传输中 ${formatBytes(uploading)}, 等待 ${formatBytes(queued)}, 剩余 ${formatBytes(remaining)}`;
-  const resetText = formatReset(account.next_reset_at);
-  const blocked = isFutureTimestamp(account.provider_blocked_until);
+  const blockedPct = blocked ? Math.max(0, 100 - Math.min(100, uploadedPct + uploadingPct + queuedPct)) : 0;
+  const ariaLabel = `${account.remote_name || '账号'} 已上传 ${formatBytes(uploaded)}, 传输中 ${formatBytes(uploading)}, 等待 ${formatBytes(queued)}, ${blocked ? '额度已满' : `剩余 ${formatBytes(displayedRemaining)}`}`;
+  const resetText = formatReset(account.next_reset_at || (blocked ? account.provider_blocked_until : null));
   return (
     <div className="min-w-0 max-w-full">
       <div className="flex items-center justify-between gap-1.5 text-xs text-gray-700">
         <span className="font-medium truncate min-w-0">{account.remote_name || `账号`}</span>
         <span className="shrink-0 text-gray-500">
-          已留 {(consumed > 0 && consumed >= 1e9) ? `${(consumed / (1024*1024*1024)).toFixed(0)}G` : formatBytes(consumed)} / {(budget / (1024*1024*1024)).toFixed(0)}G
+          {blocked
+            ? `额度已满 / ${(budget / (1024 * 1024 * 1024)).toFixed(0)}G`
+            : `已留 ${(displayedConsumed > 0 && displayedConsumed >= 1e9) ? `${(displayedConsumed / (1024 * 1024 * 1024)).toFixed(0)}G` : formatBytes(displayedConsumed)} / ${(budget / (1024 * 1024 * 1024)).toFixed(0)}G`}
         </span>
       </div>
       <div
@@ -56,20 +61,21 @@ const QuotaAccountBar = ({ account }) => {
         role="progressbar"
         aria-valuemin={0}
         aria-valuemax={budget}
-        aria-valuenow={consumed}
+        aria-valuenow={displayedConsumed}
         aria-label={ariaLabel}
       >
         <div className="h-full bg-emerald-500 transition-all" style={{ width: `${uploadedPct}%` }} />
         <div className="h-full bg-blue-500 transition-all" style={{ width: `${uploadingPct}%` }} />
         <div className="h-full bg-amber-400 transition-all" style={{ width: `${queuedPct}%` }} />
+        <div className="h-full bg-red-500 transition-all" style={{ width: `${blockedPct}%` }} />
       </div>
       <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-gray-500">
         {uploaded > 0 && <span className="text-emerald-700">已上传 {formatBytes(uploaded)}</span>}
         {uploading > 0 && <span className="text-blue-600">传输中 {formatBytes(uploading)}</span>}
         {queued > 0 && <span className="text-amber-700">等待 {formatBytes(queued)}</span>}
-        <span>剩余 {formatBytes(Math.max(0, remaining))}</span>
+        <span>{blocked ? '额度已满' : `剩余 ${formatBytes(displayedRemaining)}`}</span>
         {resetText && <span aria-live="polite">{resetText} 后恢复</span>}
-        {blocked && <span className="text-red-700">阻断</span>}
+        {blocked && <span className="text-red-700">等待提供方重置</span>}
       </div>
     </div>
   );

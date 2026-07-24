@@ -270,6 +270,23 @@ func (d *TaskDispatcher) StopAndWait(ctx context.Context, taskID uint) error {
 	return nil
 }
 
+// PauseAfterCurrent prevents new proactive batches without cancelling the
+// currently running rclone processes.
+func (d *TaskDispatcher) PauseAfterCurrent(taskID uint) error {
+	if d == nil || d.Proactive == nil {
+		return errors.New("proactive dispatcher is unavailable")
+	}
+	var task models.Task
+	if err := d.DB.First(&task, taskID).Error; err != nil {
+		return err
+	}
+	if task.TaskType != "rotation" || task.RotationStrategy != "proactive_quota" {
+		return errors.New("deferred pause only supports proactive quota tasks")
+	}
+	_, err := d.Proactive.RequestStop(taskID)
+	return err
+}
+
 func (d *TaskDispatcher) reopen(g *taskGate) {
 	g.mu.Lock()
 	g.closed = false

@@ -35,6 +35,7 @@ func TestRotationQuotaSchemaMigration(t *testing.T) {
 	for _, model := range []interface{}{
 		&models.Task{},
 		&models.QuotaAccount{},
+		&models.RotationQuotaDirectoryAssignment{},
 		&models.RotationQuotaBatch{},
 		&models.RotationQuotaBatchFile{},
 		&models.QuotaReservation{},

@@ -84,6 +84,7 @@ func (d *Dispatcher) RequestScan(ctx context.Context, taskID uint) error {
 	d.active[taskID] = true
 	d.mu.Unlock()
 	defer func() { d.mu.Lock(); delete(d.active, taskID); d.mu.Unlock() }()
+	defer d.finishPauseIfRequested(taskID)
 	var task models.Task
 	if err := d.DB.First(&task, taskID).Error; err != nil {
 		return d.persistRequestError(taskID, err)
@@ -1160,7 +1161,26 @@ func (d *Dispatcher) executeGroup(ctx context.Context, taskID uint, requestKey s
 				return nil
 			}
 		}
+		var task models.Task
+		if err := d.DB.Select("rotation_stop_requested").First(&task, taskID).Error; err != nil {
+			return err
+		}
+		if task.RotationStopRequested {
+			return nil
+		}
 	}
+}
+
+func (d *Dispatcher) finishPauseIfRequested(taskID uint) {
+	var task models.Task
+	if err := d.DB.Select("rotation_stop_requested").First(&task, taskID).Error; err != nil || !task.RotationStopRequested {
+		return
+	}
+	var active int64
+	if err := d.DB.Model(&models.RotationQuotaBatch{}).Where("task_id = ? AND state IN ?", taskID, []string{models.BatchStateRunning, models.BatchStateReconciling}).Count(&active).Error; err != nil || active > 0 {
+		return
+	}
+	_ = d.DB.Model(&models.Task{}).Where("id = ? AND rotation_stop_requested = ?", taskID, true).Updates(map[string]interface{}{"status": "paused", "rotation_rescan_pending": false, "rotation_quota_wake_at": nil}).Error
 }
 
 func (d *Dispatcher) cancelLaterHeld(batches []models.RotationQuotaBatch) error {

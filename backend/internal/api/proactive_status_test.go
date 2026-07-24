@@ -577,7 +577,6 @@ func TestProactiveStatusDoesNotRequireCredentials(t *testing.T) {
 
 func ptrTime(value time.Time) *time.Time { return &value }
 
-
 func TestProactiveStatusExposesWindowAnchorAndExhaustionFlag(t *testing.T) {
 	database := proactiveStatusTestDB(t)
 	configPath := filepath.Join(t.TempDir(), "anchor-rclone.conf")
@@ -623,5 +622,34 @@ func TestProactiveStatusExposesWindowAnchorAndExhaustionFlag(t *testing.T) {
 	}
 	if first["next_reset_at"] == nil {
 		t.Fatalf("expected next_reset_at, got nil")
+	}
+}
+
+func TestProactiveStatusTreatsProviderBlockAsExhaustedUntilReset(t *testing.T) {
+	database := proactiveStatusTestDB(t)
+	task := models.Task{ID: 1, Enabled: true, TaskType: "rotation", RotationStrategy: "proactive_quota", RotationRemotes: `["remote"]`, RotationQuotaKeys: `{"remote":"blocked-key"}`}
+	if err := database.Create(&task).Error; err != nil {
+		t.Fatal(err)
+	}
+	blockedUntil := time.Now().Add(24 * time.Hour)
+	account := models.QuotaAccount{QuotaKey: "blocked-key", RemoteName: "remote", BudgetBytes: 100, WindowSeconds: 86400, Enabled: true, ProviderBlockedUntil: &blockedUntil}
+	if err := database.Create(&account).Error; err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Now().Add(time.Hour)
+	if err := database.Create(&models.QuotaReservation{QuotaAccountID: account.ID, BatchFileID: 1, Bytes: 25, State: models.ReservationStateCommitted, ExpiresAt: &expires, IdempotencyKey: "blocked-usage"}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	code, body := callProactiveStatus(t, database, 1)
+	if code != http.StatusOK {
+		t.Fatalf("status failed: %d %#v", code, body)
+	}
+	if body["all_accounts_exhausted"] != true || body["next_quota_reset_at"] == nil {
+		t.Fatalf("blocked account did not project an exhausted reset state: %#v", body)
+	}
+	accountStatus := body["accounts"].([]interface{})[0].(map[string]interface{})
+	if accountStatus["remaining_bytes"] != float64(0) || accountStatus["next_reset_at"] == nil {
+		t.Fatalf("blocked account did not project empty quota and provider reset: %#v", accountStatus)
 	}
 }

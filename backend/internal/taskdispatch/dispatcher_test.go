@@ -362,7 +362,7 @@ func TestProactiveTriggerFencedByActiveManualMaintenance(t *testing.T) {
 
 func TestProactiveTriggerIgnoresLedgerActiveWithoutRunOwner(t *testing.T) {
 	db := taskDB(t)
-	if err := db.AutoMigrate(&models.QuotaAccount{}, &models.RotationQuotaOversize{}, &models.RotationQuotaBatch{}, &models.RotationQuotaBatchFile{}, &models.QuotaReservation{}); err != nil {
+	if err := db.AutoMigrate(&models.QuotaAccount{}, &models.RotationQuotaOversize{}, &models.RotationQuotaDirectoryAssignment{}, &models.RotationQuotaBatch{}, &models.RotationQuotaBatchFile{}, &models.QuotaReservation{}); err != nil {
 		t.Fatal(err)
 	}
 	task := models.Task{Name: "proactive", TaskType: "rotation", RotationStrategy: "proactive_quota", SourceType: "local", SourceDir: "/tmp/source", DestType: "remote", RemoteName: "drive", RemoteDir: "/dst", TransferMode: models.TransferModeCopy, RotationRemotes: `["drive"]`, MinAge: "0s", Enabled: true, RotationQuotaLimitBytes: models.DefaultRotationQuotaLimitBytes}

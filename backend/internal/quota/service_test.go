@@ -21,7 +21,7 @@ func newQuotaTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&models.QuotaAccount{}, &models.RotationQuotaBatch{}, &models.RotationQuotaBatchFile{}, &models.QuotaReservation{}); err != nil {
+	if err := db.AutoMigrate(&models.QuotaAccount{}, &models.RotationQuotaDirectoryAssignment{}, &models.RotationQuotaBatch{}, &models.RotationQuotaBatchFile{}, &models.QuotaReservation{}); err != nil {
 		t.Fatal(err)
 	}
 	if sqlDB, err := db.DB(); err == nil {
@@ -245,31 +245,25 @@ func TestReserveFirstFitSharedCapacityAndIdempotency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reserve: %v", err)
 	}
-	if len(result.Batches) != 2 || len(result.Pending) != 0 {
+	if len(result.Batches) != 1 || len(result.Pending) != 1 || result.Pending[0].RelativePath != "z" {
 		t.Fatalf("result = batches %d pending %d", len(result.Batches), len(result.Pending))
 	}
 	if result.Batches[0].DestinationRemote != "remote-b" || result.Batches[0].ReservedBytes != 7 {
 		t.Fatalf("first-fit batch = %#v", result.Batches[0])
-	}
-	if result.Batches[1].DestinationRemote != "remote-a" || result.Batches[1].ReservedBytes != 7 {
-		t.Fatalf("second batch = %#v", result.Batches[1])
-	}
-	if result.Batches[0].DestinationScope != result.Batches[1].DestinationScope {
-		t.Fatal("sibling batches did not share destination scope")
 	}
 
 	retry, err := service.Reserve(req)
 	if err != nil {
 		t.Fatalf("idempotent retry: %v", err)
 	}
-	if !retry.Existing || len(retry.Batches) != 2 {
+	if !retry.Existing || len(retry.Batches) != 1 || len(retry.Pending) != 1 {
 		t.Fatalf("retry result = %#v", retry)
 	}
 	var reservationCount int64
 	if err := db.Model(&models.QuotaReservation{}).Count(&reservationCount).Error; err != nil {
 		t.Fatal(err)
 	}
-	if reservationCount != 3 {
+	if reservationCount != 2 {
 		t.Fatalf("reservation count = %d, want 3", reservationCount)
 	}
 }
@@ -323,6 +317,48 @@ func TestReserveRespectsConfiguredBatchFileLimit(t *testing.T) {
 	}
 	if files != 2 || result.Batches[0].RcloneTransfers != task.Transfers || result.Batches[0].RotationConcurrentBatches != task.RotationConcurrentBatches {
 		t.Fatalf("files=%d transfers=%d concurrent=%d", files, result.Batches[0].RcloneTransfers, result.Batches[0].RotationConcurrentBatches)
+	}
+}
+
+func TestReserveKeepsLeafDirectoryOnOneQuotaAccount(t *testing.T) {
+	db := newQuotaTestDB(t)
+	accountA := addAccount(t, db, "key-a", 100)
+	addAccount(t, db, "key-b", 100)
+	service := testService(db, time.Unix(100, 0))
+	task := quotaTask([]string{"remote-a", "remote-b"}, map[string]string{"remote-a": "key-a", "remote-b": "key-b"}, 100)
+	task.RotationBatchFiles = 1
+	request := PackReserveRequest{
+		Task: task,
+		Snapshots: []LocalSnapshot{
+			snapshot("series-a/Season 1/episode-01.mkv", 1),
+			snapshot("series-a/Season 1/episode-02.mkv", 1),
+			snapshot("series-b/Season 1/episode-01.mkv", 1),
+		},
+		RequestIdempotencyKey: "directory-affinity-1", SourceRoot: t.TempDir(), DestinationPath: "/dest",
+	}
+	first, err := service.Reserve(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Batches) != 2 || len(first.Pending) != 1 || first.Pending[0].RelativePath != "series-a/Season 1/episode-02.mkv" {
+		t.Fatalf("first=%#v", first)
+	}
+	var assignment models.RotationQuotaDirectoryAssignment
+	if err := db.Where("task_id = ? AND directory = ?", task.ID, "series-a/Season 1").First(&assignment).Error; err != nil {
+		t.Fatal(err)
+	}
+	if assignment.QuotaAccountID != accountA.ID {
+		t.Fatalf("directory account=%d, want %d", assignment.QuotaAccountID, accountA.ID)
+	}
+	if err := db.Model(&models.RotationQuotaBatch{}).Where("task_id = ?", task.ID).Update("state", models.BatchStateSucceeded).Error; err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.Reserve(PackReserveRequest{Task: task, Snapshots: first.Pending, RequestIdempotencyKey: "directory-affinity-2", SourceRoot: request.SourceRoot, DestinationPath: request.DestinationPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Batches) != 1 || second.Batches[0].QuotaAccountID != accountA.ID {
+		t.Fatalf("second=%#v", second)
 	}
 }
 

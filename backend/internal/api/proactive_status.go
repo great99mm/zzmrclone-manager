@@ -309,24 +309,33 @@ func getProactiveStatus(c *gin.Context) {
 			u, r, up := used[account.ID], reserved[account.ID], uploading[account.ID]
 			totalReserved := r + up
 			remaining := budget - u - totalReserved
+			providerBlocked := account.ProviderBlockedUntil != nil && account.ProviderBlockedUntil.After(now)
 			binding.BudgetBytes, binding.WindowSeconds, binding.Enabled = &budget, &window, &enabled
-			binding.UsedBytes, binding.ActiveReservedBytes, binding.RemainingBytes = &u, &totalReserved, &remaining
+			binding.UsedBytes, binding.ActiveReservedBytes = &u, &totalReserved
 			binding.UploadingBytes = &up
 			binding.ProviderBlockedUntil = account.ProviderBlockedUntil
 			binding.WindowStartedAt = account.WindowStartedAt
-			if account.WindowStartedAt != nil && window > 0 {
+			if providerBlocked {
+				// Provider-reported quota exhaustion overrides local ledger headroom
+				// until the provider's advertised reset time.
+				remaining = 0
+				reset := *account.ProviderBlockedUntil
+				binding.NextResetAt = &reset
+			} else if account.WindowStartedAt != nil && window > 0 {
 				reset := account.WindowStartedAt.Add(time.Duration(window) * time.Second)
 				binding.NextResetAt = &reset
-				if reset.After(now) && (earliestReset == nil || reset.Before(*earliestReset)) {
-					earliestReset = &reset
-				}
+			}
+			binding.RemainingBytes = &remaining
+			if binding.NextResetAt != nil && binding.NextResetAt.After(now) && (earliestReset == nil || binding.NextResetAt.Before(*earliestReset)) {
+				reset := *binding.NextResetAt
+				earliestReset = &reset
 			}
 			// An account is "exhausted" only when its remaining quota is
 			// zero (the user cannot reserve any more bytes today). A fresh
 			// account whose first reserve is in-flight but has not yet
 			// committed is NOT exhausted — the user just hasn't run any
 			// transfers yet, so remaining still equals the full budget.
-			exhausted := enabled && budget > 0 && remaining <= 0
+			exhausted := enabled && budget > 0 && (providerBlocked || remaining <= 0)
 			if !exhausted {
 				allExhausted = false
 			}

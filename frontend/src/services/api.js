@@ -32,7 +32,7 @@ export const createTask = (data) => api.post('/tasks', data);
 export const updateTask = (id, data) => api.put(`/tasks/${id}`, data);
 export const deleteTask = (id) => api.delete(`/tasks/${id}`);
 export const startTask = (id) => api.post(`/tasks/${id}/start`);
-export const pauseTask = (id) => api.post(`/tasks/${id}/pause`);
+export const pauseTask = (id, mode) => api.post(`/tasks/${id}/pause`, mode ? { mode } : undefined);
 export const cancelTask = (id) => api.post(`/tasks/${id}/cancel`);
 export const stopTask = (id) => api.post(`/tasks/${id}/stop`);
 export const dedupeTask = (id) => api.post(`/tasks/${id}/dedupe`);

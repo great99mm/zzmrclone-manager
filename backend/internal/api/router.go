@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -1114,6 +1115,39 @@ func pauseTask(c *gin.Context) {
 	if err := db.First(&task, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
 		return
+	}
+	if task.TaskType == "rotation" && task.RotationStrategy == "proactive_quota" {
+		var request struct {
+			Mode string `json:"mode"`
+		}
+		if err := c.ShouldBindJSON(&request); err != nil && !errors.Is(err, io.EOF) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if request.Mode == "" {
+			request.Mode = "after_current"
+		}
+		switch request.Mode {
+		case "after_current":
+			if err := taskRunner.PauseAfterCurrent(uint(id)); err != nil {
+				c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+				return
+			}
+			db.Model(&task).Updates(map[string]interface{}{"status": "pausing", "last_error": ""})
+			c.JSON(http.StatusOK, gin.H{"message": "current batches will finish before pausing"})
+			return
+		case "immediate":
+			if err := taskRunner.StopAndWait(c.Request.Context(), uint(id)); err != nil {
+				c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+				return
+			}
+			db.Model(&task).Updates(map[string]interface{}{"status": "paused", "last_error": "", "rotation_paused_until": nil})
+			c.JSON(http.StatusOK, gin.H{"message": "task paused immediately"})
+			return
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": "pause mode must be after_current or immediate"})
+			return
+		}
 	}
 	if !task.IsQuickTask {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "only quick task supports pause"})

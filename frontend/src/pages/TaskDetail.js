@@ -17,7 +17,8 @@ import {
   File,
   ShieldCheck,
   ListChecks,
-  Database
+  Database,
+  ChevronDown
 } from 'lucide-react';
 import { getTask, getTaskStatus, getProactiveStatus, resolveProactiveBatch, startTask, stopTask, pauseTask, cancelTask, dedupeTask, startProactiveManualMerge, closeProactiveUnknownMaintenance, deleteTask } from '../services/api';
 import { createWebSocket } from '../services/api';
@@ -55,6 +56,7 @@ const TaskDetail = () => {
   const [legacyRecoveryState, setLegacyRecoveryState] = useState({ loading: false, error: '' });
   const [loading, setLoading] = useState(true);
   const [fileProgresses, setFileProgresses] = useState({});
+	const [pauseMenuOpen, setPauseMenuOpen] = useState(false);
   const wsRef = useRef(null);
   const progressTimerRef = useRef(null);
 
@@ -265,12 +267,14 @@ const TaskDetail = () => {
     }
   };
 
-  const handlePause = async () => {
+  const handlePause = async (mode) => {
     try {
-      await pauseTask(id);
-      toast.success('任务已暂停');
+      await pauseTask(id, mode);
+      toast.success(mode === 'after_current' ? '当前批次完成后将暂停' : '任务已立即暂停');
+      setPauseMenuOpen(false);
       setFileProgresses({});
       setTimeout(loadStatus, 300);
+      setTimeout(loadTask, 300);
     } catch (err) {
       toast.error(err.response?.data?.error || '暂停失败');
     }
@@ -430,13 +434,40 @@ const TaskDetail = () => {
           ) : (
             <>
               {status.running ? (
-                <button
-                  onClick={handleStop}
-                  className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors font-medium text-sm md:text-base"
-                >
-                  <Square className="w-3.5 h-3.5 md:w-4 md:h-4" />
-                  <span className="hidden xs:inline">停止</span>
-                </button>
+                isProactiveQuotaTask ? (
+                  <div className="relative inline-flex">
+                    <button
+                      onClick={() => handlePause('after_current')}
+                      className="inline-flex items-center gap-1 px-3 md:px-4 py-2 bg-amber-50 text-amber-700 rounded-l-lg hover:bg-amber-100 transition-colors font-medium text-sm md:text-base"
+                    >
+                      <Pause className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                      <span className="hidden xs:inline">暂停</span>
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="选择暂停方式"
+                      aria-expanded={pauseMenuOpen}
+                      onClick={() => setPauseMenuOpen(open => !open)}
+                      className="inline-flex items-center justify-center w-9 border-l border-amber-200 bg-amber-50 text-amber-700 rounded-r-lg hover:bg-amber-100 transition-colors"
+                    >
+                      <ChevronDown className="w-4 h-4" />
+                    </button>
+                    {pauseMenuOpen && (
+                      <div className="absolute right-0 top-full z-20 mt-1 w-44 border border-gray-200 bg-white shadow-lg rounded-lg py-1">
+                        <button type="button" onClick={() => handlePause('after_current')} className="w-full px-3 py-2 text-left text-sm text-gray-700 hover:bg-gray-50">完成当前批次后暂停</button>
+                        <button type="button" onClick={() => handlePause('immediate')} className="w-full px-3 py-2 text-left text-sm text-red-700 hover:bg-red-50">立刻暂停</button>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <button
+                    onClick={handleStop}
+                    className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors font-medium text-sm md:text-base"
+                  >
+                    <Square className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                    <span className="hidden xs:inline">停止</span>
+                  </button>
+                )
               ) : (
                 <button
                   onClick={handleStart}
@@ -675,6 +706,7 @@ const StatusBadge = ({ status }) => {
     running: { text: '运行中', class: 'bg-green-100 text-green-700' },
     idle: { text: '当前空闲', class: 'bg-gray-100 text-gray-600' },
     paused: { text: '暂停', class: 'bg-amber-100 text-amber-700' },
+    pausing: { text: '暂停中', class: 'bg-amber-100 text-amber-700' },
     canceled: { text: '已停止', class: 'bg-slate-100 text-slate-600' },
     error: { text: '异常', class: 'bg-red-100 text-red-700' },
   };
