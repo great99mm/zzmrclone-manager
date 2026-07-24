@@ -947,7 +947,7 @@ func accountUsage(tx *gorm.DB, ids []uint, now time.Time) (map[uint]int64, error
 // maxBatchFiles limits the number of files in a single batch so that
 // individual batches complete faster and committed reservations update
 // sooner, giving the user real-time progress visibility.
-const maxBatchFiles = 50
+const maxBatchFiles = 5
 
 func packSnapshots(snapshots []LocalSnapshot, remotes []string, keys map[string]string, accounts []models.QuotaAccount, usage map[uint]int64, taskLimit int64, now time.Time) (map[string][]LocalSnapshot, []LocalSnapshot, error) {
 	if taskLimit < 0 {
