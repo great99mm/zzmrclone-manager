@@ -623,7 +623,54 @@ const TaskDetail = () => {
           </div>
         </div>
         <div className="p-4 md:p-6 space-y-4">
-          {Object.keys(fileProgresses).length === 0 ? (
+          {isProactiveQuotaTask && proactiveStatus ? (
+            (() => {
+              const running = (proactiveStatus.batches || []).filter(b => b.state === 'running' && b.process?.active === true);
+              if (running.length === 0) {
+                const queued = (proactiveStatus.batches || []).filter(b => b.state === 'reserved' || b.state === 'planned');
+                if (queued.length === 0) {
+                  return (
+                    <div className="text-center text-gray-400 py-4">
+                      <Upload className="w-8 h-8 mx-auto mb-2 opacity-40" />
+                      <p className="text-sm">暂无活跃批次</p>
+                      <p className="text-xs mt-1">启动任务后将按额度预留批次执行</p>
+                    </div>
+                  );
+                }
+                return (
+                  <div className="space-y-3">
+                    {queued.map(batch => (
+                      <div key={batch.id} className="border border-amber-100 bg-amber-50 rounded-lg px-3 py-2.5">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-medium text-gray-700">批次 #{batch.id} 等待启动</span>
+                          <span className="text-amber-700">{batch.account || batch.remote || '-'} · {formatBytes(batch.reserved_bytes || 0)}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                );
+              }
+              return (
+                <div className="space-y-3">
+                  {running.map(batch => (
+                    <div key={batch.id} className="border border-blue-100 bg-blue-50 rounded-lg px-3 py-2.5">
+                      <div className="flex items-center justify-between text-xs mb-1.5">
+                        <span className="font-medium text-blue-700">批次 #{batch.id} 传输中</span>
+                        <span className="text-blue-600">{batch.account || batch.remote || '-'}</span>
+                      </div>
+                      <div className="flex-1 h-2 bg-blue-100 rounded-full overflow-hidden">
+                        <div className="h-full bg-blue-500 rounded-full animate-pulse" style={{ width: '40%' }} />
+                      </div>
+                      <div className="flex justify-between text-[10px] text-gray-500 mt-1">
+                        <span>{formatBytes(batch.reserved_bytes || 0)} · {batch.transfer_mode === 'move' ? '移动' : '复制'}</span>
+                        {batch.started_at && <span>{new Date(batch.started_at).toLocaleTimeString()}</span>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              );
+            })()
+          ) : Object.keys(fileProgresses).length === 0 ? (
             <div className="text-center text-gray-400 py-4">
               <Upload className="w-8 h-8 mx-auto mb-2 opacity-40" />
               <p className="text-sm">暂无活跃传输</p>

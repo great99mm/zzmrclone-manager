@@ -55,6 +55,7 @@ func (e *Executor) RunBatch(ctx context.Context, batchID uint) error {
 		return err
 	}
 	_ = logger.WriteLog(fmt.Sprintf("task_%d.log", batch.TaskID), fmt.Sprintf("批次 #%d 开始（%d 个文件，%.0f bytes）", batchID, len(files), float64(batch.ReservedBytes)))
+	_ = e.DB.Model(&models.Task{}).Where("id = ?", batch.TaskID).Update("status", "running")
 	if !models.IsValidOwnerToken(batch.OwnerToken) {
 		return e.markUnknown(batchID, token, errors.New("invalid persisted owner token"))
 	}
@@ -464,6 +465,11 @@ func (e *Executor) finishProcess(ctx context.Context, batch models.RotationQuota
 		_ = logger.WriteLog(fmt.Sprintf("task_%d.log", batch.TaskID), fmt.Sprintf("批次 #%d 完成", batch.ID))
 	} else {
 		_ = logger.WriteLog(fmt.Sprintf("task_%d.log", batch.TaskID), fmt.Sprintf("批次 #%d 失败: %v", batch.ID, processErr))
+	}
+	// Set task back to idle when no active batches remain.
+	var active int64
+	if e.DB.Model(&models.RotationQuotaBatch{}).Where("task_id = ? AND state IN ?", batch.TaskID, []string{models.BatchStateReserved, models.BatchStatePlanned, models.BatchStateRunning, models.BatchStateReconciling, models.BatchStateUnknown}).Count(&active); active == 0 {
+		_ = e.DB.Model(&models.Task{}).Where("id = ?", batch.TaskID).Update("status", "idle")
 	}
 	return processErr
 }
