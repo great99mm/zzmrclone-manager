@@ -1075,6 +1075,10 @@ func startTask(c *gin.Context) {
 		return
 	}
 
+	if task.TaskType == "rotation" && task.RotationStrategy == "proactive_quota" {
+		db.Model(&task).Updates(map[string]interface{}{"status": "running", "last_run": gorm.Expr("CURRENT_TIMESTAMP")})
+	}
+
 	// ExecuteMove now updates status / last_run internally (covers both
 	// API-triggered and watcher/scheduler-triggered paths).
 	c.JSON(http.StatusOK, gin.H{"message": "task started"})

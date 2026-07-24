@@ -1103,11 +1103,14 @@ func (d *Dispatcher) executeGroup(ctx context.Context, taskID uint, requestKey s
 		if b.State == models.BatchStateRunning || b.State == models.BatchStateReconciling {
 			return nil
 		}
-		if models.IsTerminalBatchState(b.State) && b.State != models.BatchStateSucceeded {
+		if b.State == models.BatchStateFailed {
 			if err := d.cancelLaterHeld(batches[i+1:]); err != nil {
 				return err
 			}
 			return d.persistRetryWake(taskID)
+		}
+		if b.State == models.BatchStateCanceled || b.State == models.BatchStateExpired {
+			continue
 		}
 		if b.State != models.BatchStateReserved && b.State != models.BatchStatePlanned {
 			continue
@@ -1133,7 +1136,7 @@ func (d *Dispatcher) executeGroup(ctx context.Context, taskID uint, requestKey s
 			return nil
 		}
 		if current.State != models.BatchStateSucceeded {
-			if models.IsTerminalBatchState(current.State) {
+			if current.State == models.BatchStateFailed || current.State == models.BatchStateUnknown {
 				if err := d.cancelLaterHeld(batches[i+1:]); err != nil {
 					return err
 				}
