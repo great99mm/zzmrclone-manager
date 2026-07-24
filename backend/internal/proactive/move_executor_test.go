@@ -79,7 +79,7 @@ func makeMoveFixture(t *testing.T, db *gorm.DB, count int) moveFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	batch := models.RotationQuotaBatch{TaskID: 1, QuotaAccountID: account.ID, DestinationScope: models.DestinationScope(config, "/dest"), SourceRoot: root, SourceRootDevice: snapshots[0].RootDevice, SourceRootInode: snapshots[0].RootInode, DestinationRemote: "remote", TransferMode: models.TransferModeMove, DestinationScopeVersion: 1, RcloneConfigPath: config, RequestKey: "move-request", RequestFingerprint: "move-fingerprint", DestinationPath: "/dest", State: models.BatchStateReserved, OwnerToken: testOwner}
+	batch := models.RotationQuotaBatch{TaskID: 1, QuotaAccountID: account.ID, DestinationScope: models.DestinationScope(config, "/dest"), SourceRoot: root, SourceRootDevice: snapshots[0].RootDevice, SourceRootInode: snapshots[0].RootInode, DestinationRemote: "remote", TransferMode: models.TransferModeMove, RcloneTransfers: 16, DestinationScopeVersion: 1, RcloneConfigPath: config, RequestKey: "move-request", RequestFingerprint: "move-fingerprint", DestinationPath: "/dest", State: models.BatchStateReserved, OwnerToken: testOwner}
 	if err := db.Create(&batch).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -146,6 +146,9 @@ func TestMoveExecutorMovesOnlyManifestFilesAndUsesNoRemoteStat(t *testing.T) {
 	}
 	if !strings.Contains(runner.moveSpec.DestinationRemote+":"+runner.moveSpec.DestinationPath, "remote:/dest") {
 		t.Fatalf("unexpected move destination: %#v", runner.moveSpec)
+	}
+	if runner.moveSpec.Transfers != 16 {
+		t.Fatalf("move transfers=%d, want 16", runner.moveSpec.Transfers)
 	}
 }
 

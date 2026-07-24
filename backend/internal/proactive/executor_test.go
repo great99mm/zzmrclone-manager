@@ -108,7 +108,7 @@ func executionFixture(t *testing.T, db *gorm.DB, size int64) (models.RotationQuo
 	if err := db.Create(&account).Error; err != nil {
 		t.Fatal(err)
 	}
-	batch := models.RotationQuotaBatch{TaskID: 1, QuotaAccountID: account.ID, DestinationScope: models.DestinationScope(config, "/dest"), SourceRoot: root, SourceRootDevice: snapshot.RootDevice, SourceRootInode: snapshot.RootInode, DestinationRemote: "remote", TransferMode: models.TransferModeCopy, DestinationScopeVersion: 1, RcloneConfigPath: config, RequestKey: "request", RequestFingerprint: "fingerprint", DestinationPath: "/dest", State: models.BatchStateReserved, OwnerToken: testOwner, LeaseToken: ""}
+	batch := models.RotationQuotaBatch{TaskID: 1, QuotaAccountID: account.ID, DestinationScope: models.DestinationScope(config, "/dest"), SourceRoot: root, SourceRootDevice: snapshot.RootDevice, SourceRootInode: snapshot.RootInode, DestinationRemote: "remote", TransferMode: models.TransferModeCopy, RcloneTransfers: 16, DestinationScopeVersion: 1, RcloneConfigPath: config, RequestKey: "request", RequestFingerprint: "fingerprint", DestinationPath: "/dest", State: models.BatchStateReserved, OwnerToken: testOwner, LeaseToken: ""}
 	if err := db.Create(&batch).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func TestExecutorCopySuccessAndSpec(t *testing.T) {
 	if err := executor.RunBatch(context.Background(), batch.ID); err != nil {
 		t.Fatal(err)
 	}
-	if runner.spec.ConfigPath != config || runner.spec.ManifestPath == "" || runner.spec.DestinationRemote != "remote" || runner.spec.SourceRoot == nil {
+	if runner.spec.ConfigPath != config || runner.spec.ManifestPath == "" || runner.spec.DestinationRemote != "remote" || runner.spec.SourceRoot == nil || runner.spec.Transfers != 16 {
 		var failed models.RotationQuotaBatch
 		_ = db.First(&failed, batch.ID)
 		t.Fatalf("copy spec=%#v state=%s error=%s", runner.spec, failed.State, failed.LastError)

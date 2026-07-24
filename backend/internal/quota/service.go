@@ -361,7 +361,7 @@ func (s *Service) reserveAttempt(req PackReserveRequest, requestKey, fingerprint
 		if err != nil {
 			return err
 		}
-		selected, pending, err := packSnapshots(req.Snapshots, remotes, quotaKeys, accounts, usage, req.Task.RotationQuotaLimitBytes, transactionNow)
+		selected, pending, err := packSnapshots(req.Snapshots, remotes, quotaKeys, accounts, usage, req.Task.RotationQuotaLimitBytes, req.Task.RotationBatchFiles, transactionNow)
 		if err != nil {
 			return err
 		}
@@ -394,6 +394,7 @@ func (s *Service) reserveAttempt(req PackReserveRequest, requestKey, fingerprint
 				SourceRootInode:         req.Snapshots[0].RootInode,
 				DestinationRemote:       remote,
 				TransferMode:            req.Task.TransferMode,
+				RcloneTransfers:         req.Task.Transfers,
 				DestinationScopeVersion: 1,
 				RcloneConfigPath:        resolvedConfig,
 				RequestKey:              requestKey,
@@ -944,14 +945,14 @@ func accountUsage(tx *gorm.DB, ids []uint, now time.Time) (map[uint]int64, error
 	return usage, nil
 }
 
-// maxBatchFiles limits the number of files in a single batch so that
-// individual batches complete faster and committed reservations update
-// sooner, giving the user real-time progress visibility.
-const maxBatchFiles = 5
+const defaultBatchFiles = 5
 
-func packSnapshots(snapshots []LocalSnapshot, remotes []string, keys map[string]string, accounts []models.QuotaAccount, usage map[uint]int64, taskLimit int64, now time.Time) (map[string][]LocalSnapshot, []LocalSnapshot, error) {
+func packSnapshots(snapshots []LocalSnapshot, remotes []string, keys map[string]string, accounts []models.QuotaAccount, usage map[uint]int64, taskLimit int64, batchFiles int, now time.Time) (map[string][]LocalSnapshot, []LocalSnapshot, error) {
 	if taskLimit < 0 {
 		return nil, nil, fmt.Errorf("rotation quota limit cannot be negative")
+	}
+	if batchFiles <= 0 {
+		batchFiles = defaultBatchFiles
 	}
 	ordered := append([]LocalSnapshot(nil), snapshots...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].RelativePath < ordered[j].RelativePath })
@@ -970,7 +971,7 @@ func packSnapshots(snapshots []LocalSnapshot, remotes []string, keys map[string]
 			if !account.Enabled || (account.ProviderBlockedUntil != nil && account.ProviderBlockedUntil.After(now)) {
 				continue
 			}
-			if counts[remote] >= maxBatchFiles {
+			if counts[remote] >= batchFiles {
 				continue
 			}
 			limit := account.BudgetBytes

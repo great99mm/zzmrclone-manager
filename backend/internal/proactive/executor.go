@@ -137,7 +137,7 @@ func (e *Executor) RunBatch(ctx context.Context, batchID uint) error {
 		}
 	}
 	e.writeTaskLog(batch.TaskID, fmt.Sprintf("批次 #%d 开始复制到 %s:%s", batchID, batch.DestinationRemote, batch.DestinationPath))
-	process, err := e.Runner.StartCopy(ctx, CopySpec{ConfigPath: batch.RcloneConfigPath, ManifestPath: manifestPath, SourceRoot: stage.File(), DestinationRemote: batch.DestinationRemote, DestinationPath: batch.DestinationPath})
+	process, err := e.Runner.StartCopy(ctx, CopySpec{ConfigPath: batch.RcloneConfigPath, ManifestPath: manifestPath, SourceRoot: stage.File(), DestinationRemote: batch.DestinationRemote, DestinationPath: batch.DestinationPath, Transfers: normalizeTransfers(batch.RcloneTransfers)})
 	if err != nil {
 		var started *StartedProcessIdentityError
 		if errors.As(err, &started) {
@@ -171,6 +171,7 @@ func (e *Executor) RunBatch(ctx context.Context, batchID uint) error {
 	result, waitErr := process.Wait()
 	return e.finishProcess(ctx, batch, files, token, stage, result, waitErr, nil)
 }
+
 func (e *Executor) RunDedupe(ctx context.Context, epoch models.DestinationScopeMaintenance) error {
 	if epoch.Reason != models.MaintenanceReasonManualMerge || epoch.ID == 0 || epoch.LeaseToken == "" {
 		return ErrManualMergeConflict

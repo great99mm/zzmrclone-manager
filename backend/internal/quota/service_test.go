@@ -299,6 +299,32 @@ func TestPartialReserveRetryRebuildsPending(t *testing.T) {
 	}
 }
 
+func TestReserveRespectsConfiguredBatchFileLimit(t *testing.T) {
+	db := newQuotaTestDB(t)
+	addAccount(t, db, "key", 20)
+	service := testService(db, time.Unix(100, 0))
+	task := quotaTask([]string{"remote"}, map[string]string{"remote": "key"}, 20)
+	task.RotationBatchFiles = 2
+	task.Transfers = 16
+	result, err := service.Reserve(PackReserveRequest{
+		Task: task, Snapshots: []LocalSnapshot{snapshot("a", 3), snapshot("b", 3), snapshot("c", 3)},
+		RequestIdempotencyKey: "batch-file-limit", SourceRoot: t.TempDir(), DestinationPath: "/dest",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Batches) != 1 || len(result.Pending) != 1 || result.Pending[0].RelativePath != "c" {
+		t.Fatalf("batches=%d pending=%#v", len(result.Batches), result.Pending)
+	}
+	var files int64
+	if err := db.Model(&models.RotationQuotaBatchFile{}).Where("batch_id = ?", result.Batches[0].ID).Count(&files).Error; err != nil {
+		t.Fatal(err)
+	}
+	if files != 2 || result.Batches[0].RcloneTransfers != task.Transfers {
+		t.Fatalf("files=%d transfers=%d", files, result.Batches[0].RcloneTransfers)
+	}
+}
+
 func TestRequestIdentityFingerprintAndMissingKey(t *testing.T) {
 	db := newQuotaTestDB(t)
 	addAccount(t, db, "key", 20)
@@ -880,8 +906,6 @@ func TestReconcileAccountWindowAnchorSetsOnFirstZero(t *testing.T) {
 	}
 }
 
-
-
 func TestReconcileAccountWindowAnchorRefillClearsAnchor(t *testing.T) {
 	db := newQuotaTestDB(t)
 	account := addAccount(t, db, "key", 100)
@@ -941,7 +965,7 @@ type mutableClock struct {
 	value time.Time
 }
 
-func (c *mutableClock) now() time.Time { return c.value }
+func (c *mutableClock) now() time.Time          { return c.value }
 func (c *mutableClock) advance(d time.Duration) { c.value = c.value.Add(d) }
 
 func newClockedTestService(db *gorm.DB, clock *mutableClock) *Service {
@@ -957,8 +981,8 @@ func newClockedTestService(db *gorm.DB, clock *mutableClock) *Service {
 	}
 	configPath := configFile.Name()
 	return &Service{
-		DB: db,
-		Now: clock.now,
+		DB:             db,
+		Now:            clock.now,
 		ConfigResolver: func(string) (string, error) { return configPath, nil },
 	}
 }

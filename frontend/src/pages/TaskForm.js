@@ -36,6 +36,7 @@ const TaskForm = () => {
     rotation_strategy: 'proactive_quota',
     rotation_quota_limit_bytes: 700 * 1024 * 1024 * 1024,
     rotation_quota_keys: '{}',
+    rotation_batch_files: 5,
     rotation_current_index: 0,
     rotation_current_round: 0,
     rotation_paused_until: null,
@@ -120,6 +121,7 @@ const TaskForm = () => {
           ? 700 * 1024 * 1024 * 1024
           : res.data.rotation_quota_limit_bytes,
         rotation_quota_keys: res.data.rotation_quota_keys || '{}',
+        rotation_batch_files: res.data.rotation_batch_files || 5,
       });
     } catch (err) {
       toast.error('加载任务失败');
@@ -287,6 +289,11 @@ const TaskForm = () => {
         const maxQuotaBytes = 700 * 1024 * 1024 * 1024;
         if (!Number.isFinite(quotaLimitBytes) || quotaLimitBytes < 0 || quotaLimitBytes > maxQuotaBytes) {
           toast.error('每账号每日额度必须在 0 到 700 GiB 之间');
+          return;
+        }
+        const batchFiles = Number(submitForm.rotation_batch_files);
+        if (!Number.isInteger(batchFiles) || batchFiles < 1 || batchFiles > 128) {
+          toast.error('每批文件数必须在 1 到 128 之间');
           return;
         }
         try {
@@ -744,8 +751,8 @@ const TaskForm = () => {
                        <strong>重要：</strong>所有轮转网盘必须隶属到<b>同一个谷歌共享硬盘</b>。文件按顺序通过各服务账号上传到同一目标目录。
                      </div>
 
-                     <div>
-                      <label htmlFor="rotation-quota-limit" className="block text-xs font-medium text-gray-700 mb-1">每账号每日额度</label>
+                      <div>
+                        <label htmlFor="rotation-quota-limit" className="block text-xs font-medium text-gray-700 mb-1">每账号每日额度</label>
                       <div className="flex flex-col sm:flex-row sm:items-center gap-2 min-w-0">
                         <input
                           id="rotation-quota-limit"
@@ -763,8 +770,21 @@ const TaskForm = () => {
                         />
                         <span className="text-sm text-gray-700">GiB / 天</span>
                         <span id="quota-limit-help" className="text-xs text-gray-600">默认 700；可降低，不能超过 700 GiB。服务端会再次校验。</span>
+                        </div>
                       </div>
-                    </div>
+
+                      <div>
+                        <label htmlFor="rotation-batch-files" className="block text-xs font-medium text-gray-700 mb-1">每批文件数</label>
+                        <input
+                          id="rotation-batch-files"
+                          type="number"
+                          min="1"
+                          max="128"
+                          value={form.rotation_batch_files}
+                          onChange={(e) => handleChange('rotation_batch_files', parseInt(e.target.value, 10))}
+                          className="w-36 h-10 px-3 border border-emerald-300 bg-white rounded-lg text-sm font-medium text-gray-800 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                        />
+                      </div>
 
 
                   </div>

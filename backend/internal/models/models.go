@@ -249,6 +249,8 @@ type Task struct {
 	RotationStrategy        string `json:"rotation_strategy" gorm:"default:legacy_error"`
 	RotationQuotaLimitBytes int64  `json:"rotation_quota_limit_bytes"`
 	RotationQuotaKeys       string `json:"rotation_quota_keys" gorm:"type:text"`
+	// RotationBatchFiles caps files assigned to each proactive quota batch.
+	RotationBatchFiles int `json:"rotation_batch_files" gorm:"default:5"`
 	// RotationRemotes stores a JSON string array of rclone remote names, e.g. ["a","b","c"].
 	RotationRemotes                 string     `json:"rotation_remotes" gorm:"type:text"`
 	RotationMaxRounds               int        `json:"rotation_max_rounds" gorm:"default:3"`
@@ -427,6 +429,7 @@ type RotationQuotaBatch struct {
 	SourceRootInode            int64      `json:"source_root_inode" gorm:"not null;default:0"`
 	DestinationRemote          string     `json:"destination_remote" gorm:"uniqueIndex:uq_rotation_quota_batches_request_identity"`
 	TransferMode               string     `json:"transfer_mode" gorm:"default:''"`
+	RcloneTransfers            int        `json:"rclone_transfers" gorm:"default:4"`
 	DestinationScopeVersion    int        `json:"destination_scope_version" gorm:"default:0"`
 	RcloneConfigPath           string     `json:"rclone_config_path" gorm:"not null;default:''"`
 	RequestKey                 string     `json:"request_key" gorm:"not null;uniqueIndex:uq_rotation_quota_batches_request_identity"`

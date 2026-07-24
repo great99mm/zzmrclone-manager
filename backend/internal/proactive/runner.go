@@ -20,6 +20,7 @@ type CopySpec struct {
 	SourceRoot        *os.File
 	DestinationRemote string
 	DestinationPath   string
+	Transfers         int
 }
 
 type MoveSpec struct {
@@ -28,6 +29,7 @@ type MoveSpec struct {
 	SourceRoot        *os.File
 	DestinationRemote string
 	DestinationPath   string
+	Transfers         int
 }
 
 type DedupeSpec struct {
@@ -98,7 +100,7 @@ func (r ExecRunner) StartCopy(ctx context.Context, spec CopySpec) (ProcessHandle
 	if binary == "" {
 		binary = "rclone"
 	}
-	cmd := exec.CommandContext(ctx, binary, "--config", spec.ConfigPath, "copy", "--files-from-raw", spec.ManifestPath, "--no-traverse", "--drive-stop-on-upload-limit", "--stats-log-level", "INFO", "/proc/self/fd/3", destination)
+	cmd := exec.CommandContext(ctx, binary, "--config", spec.ConfigPath, "copy", "--transfers", strconv.Itoa(normalizeTransfers(spec.Transfers)), "--files-from-raw", spec.ManifestPath, "--no-traverse", "--drive-stop-on-upload-limit", "--stats-log-level", "INFO", "/proc/self/fd/3", destination)
 	cmd.ExtraFiles = []*os.File{spec.SourceRoot}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -135,7 +137,7 @@ func (r ExecRunner) StartMove(ctx context.Context, spec MoveSpec) (ProcessHandle
 	if binary == "" {
 		binary = "rclone"
 	}
-	cmd := exec.CommandContext(ctx, binary, "--config", spec.ConfigPath, "move", "--files-from-raw", spec.ManifestPath, "--no-traverse", "--stats-log-level", "INFO", "/proc/self/fd/3", destination)
+	cmd := exec.CommandContext(ctx, binary, "--config", spec.ConfigPath, "move", "--transfers", strconv.Itoa(normalizeTransfers(spec.Transfers)), "--files-from-raw", spec.ManifestPath, "--no-traverse", "--stats-log-level", "INFO", "/proc/self/fd/3", destination)
 	cmd.ExtraFiles = []*os.File{spec.SourceRoot}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -157,6 +159,13 @@ func (r ExecRunner) StartMove(ctx context.Context, spec MoveSpec) (ProcessHandle
 		return nil, &StartedProcessIdentityError{PID: cmd.Process.Pid, Cause: errors.New("unable to read rclone process identity"), Result: result, WaitErr: waitErr}
 	}
 	return &execProcess{cmd: cmd, stdout: &stdout, stderr: &stderr, token: token}, nil
+}
+
+func normalizeTransfers(value int) int {
+	if value <= 0 {
+		return 4
+	}
+	return value
 }
 
 func (r ExecRunner) StartDedupe(ctx context.Context, spec DedupeSpec) (ProcessHandle, error) {

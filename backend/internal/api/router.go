@@ -473,6 +473,9 @@ func normalizeTaskDefaults(task *models.Task) {
 	if task.QBPollInterval <= 0 {
 		task.QBPollInterval = 60
 	}
+	if task.RotationBatchFiles == 0 {
+		task.RotationBatchFiles = 5
+	}
 }
 
 func validateAndNormalizeTask(task *models.Task) error {
@@ -512,6 +515,9 @@ func validateAndNormalizeTask(task *models.Task) error {
 		}
 		if strings.TrimSpace(task.SourceDir) == "" || strings.TrimSpace(task.RemoteName) == "" || !filepath.IsAbs(task.SourceDir) {
 			return fmt.Errorf("proactive_quota 需要有效的本地源路径和远程名称")
+		}
+		if task.RotationBatchFiles < 1 || task.RotationBatchFiles > 128 {
+			return fmt.Errorf("每批文件数必须在 1 到 128 之间")
 		}
 		if cfgGlobal != nil {
 			if err := proactive.ValidateSourceOutsideManager(task.SourceDir, cfgGlobal.DataDir); err != nil {
@@ -977,6 +983,7 @@ func updateTaskUnsafe(c *gin.Context) {
 		"rotation_strategy":          updates.RotationStrategy,
 		"rotation_quota_limit_bytes": updates.RotationQuotaLimitBytes,
 		"rotation_quota_keys":        updates.RotationQuotaKeys,
+		"rotation_batch_files":       updates.RotationBatchFiles,
 		"rotation_remotes":           updates.RotationRemotes,
 		"rotation_max_rounds":        updates.RotationMaxRounds,
 		"rotation_resume_time":       updates.RotationResumeTime,

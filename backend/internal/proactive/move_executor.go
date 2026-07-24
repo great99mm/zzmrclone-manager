@@ -121,7 +121,7 @@ func (e *Executor) runMoveBatch(ctx context.Context, batchID uint) error {
 	if err := e.startMoveIntent(batchID, token); err != nil {
 		return e.movePreStartRestore(batch, files, token, root, quarantine, err)
 	}
-	process, err := moveRunner.StartMove(ctx, MoveSpec{ConfigPath: batch.RcloneConfigPath, ManifestPath: manifestPath, SourceRoot: quarantineFile(quarantine), DestinationRemote: batch.DestinationRemote, DestinationPath: batch.DestinationPath})
+	process, err := moveRunner.StartMove(ctx, MoveSpec{ConfigPath: batch.RcloneConfigPath, ManifestPath: manifestPath, SourceRoot: quarantineFile(quarantine), DestinationRemote: batch.DestinationRemote, DestinationPath: batch.DestinationPath, Transfers: normalizeTransfers(batch.RcloneTransfers)})
 	if err != nil {
 		var started *StartedProcessIdentityError
 		if errors.As(err, &started) {
