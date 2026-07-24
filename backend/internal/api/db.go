@@ -30,9 +30,9 @@ func InitDB(dataDir string) error {
 
 	// WAL mode + busy timeout + full sync for durable quota reservations.
 	// _pragma=journal_mode(WAL)    : write-ahead logging allows readers to proceed while a write is in progress.
-	// _pragma=busy_timeout(5000)   : wait up to 5s before returning "database is locked".
+	// _pragma=busy_timeout(30000)  : wait up to 30s before returning "database is locked" (proactive scan+reserve+dispatch creates heavy concurrent writes).
 	// _pragma=synchronous(FULL)    : flushes quota reservation commits durably before returning.
-	dsn := dbPath + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(FULL)"
+	dsn := dbPath + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(30000)&_pragma=synchronous(FULL)"
 
 	var err error
 	db, err = gorm.Open(sqlite.Open(dsn), &gorm.Config{})
@@ -49,8 +49,8 @@ func InitDB(dataDir string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get underlying sql.DB: %v", err)
 	}
-	sqlDB.SetMaxOpenConns(4)
-	sqlDB.SetMaxIdleConns(2)
+	sqlDB.SetMaxOpenConns(2)
+	sqlDB.SetMaxIdleConns(1)
 	sqlDB.SetConnMaxLifetime(time.Hour)
 
 	// Auto migrate

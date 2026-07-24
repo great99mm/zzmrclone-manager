@@ -46,26 +46,26 @@ const QuotaAccountBar = ({ account }) => {
       <div className="flex items-center justify-between gap-1.5 text-xs text-gray-700">
         <span className="font-medium truncate min-w-0">{account.remote_name || `账号`}</span>
         <span className="shrink-0 text-gray-500">
-          {formatBytes(used)} / {formatBytes(budget)}
+          已留 {(consumed > 0 && consumed >= 1e9) ? `${(consumed / (1024*1024*1024)).toFixed(0)}G` : formatBytes(consumed)} / {(budget / (1024*1024*1024)).toFixed(0)}G
         </span>
       </div>
       <div
-        className="mt-1 h-1.5 w-full rounded-full bg-gray-200 overflow-hidden"
+        className="mt-1 h-1.5 w-full rounded-full bg-gray-200 overflow-hidden flex"
         role="progressbar"
         aria-valuemin={0}
         aria-valuemax={budget}
         aria-valuenow={consumed}
         aria-label={ariaLabel}
       >
-        <div
-          className={`h-full ${tone} transition-all`}
-          style={{ width: `${percent}%` }}
-        />
+        <div className={`h-full bg-emerald-500 transition-all`} style={{ width: `${Math.min(100, budget > 0 ? (used / budget) * 100 : 0)}%` }} />
+        <div className={`h-full bg-amber-400 transition-all`} style={{ width: `${Math.min(100, budget > 0 ? (reserved / budget) * 100 : 0)}%` }} />
       </div>
       <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-gray-500">
-        <span>剩余 {formatBytes(remaining)} · 预留 {formatBytes(reserved)}</span>
+        <span className="text-emerald-700">已上传 {formatBytes(used)}</span>
+        <span className="text-amber-700">预留 {formatBytes(reserved)}</span>
+        <span>剩余 {formatBytes(Math.max(0, remaining))}</span>
         {resetText && <span aria-live="polite">{resetText} 后恢复</span>}
-        {blocked && <span className="text-red-700">Provider 阻断</span>}
+        {blocked && <span className="text-red-700">阻断</span>}
       </div>
     </div>
   );
