@@ -20,7 +20,7 @@ func TestValidateProactiveQuotaContract(t *testing.T) {
 	}
 }
 
-func TestProactiveValidationClearsQBAndHonorsMoveGate(t *testing.T) {
+func TestProactiveValidationPreservesQBAndHonorsMoveGate(t *testing.T) {
 	previousDB, previousCfg := db, cfgGlobal
 	db = proactiveStatusTestDB(t)
 	cfgGlobal = nil
@@ -33,8 +33,8 @@ func TestProactiveValidationClearsQBAndHonorsMoveGate(t *testing.T) {
 	if err := validateAndNormalizeTask(&task); err != nil {
 		t.Fatal(err)
 	}
-	if task.QBEnabled || task.QBURL != "" || task.QBUsername != "" || task.QBPassword != "" || task.QBPollInterval != 0 || task.QBDeleteFiles {
-		t.Fatalf("proactive qB config was not cleared: %#v", task)
+	if !task.QBEnabled || task.QBURL != "http://qb" || task.QBUsername != "user" || task.QBPassword != "secret" || task.QBPollInterval != 30 || !task.QBDeleteFiles {
+		t.Fatalf("proactive qB config was not preserved: %#v", task)
 	}
 
 	task.TransferMode = models.TransferModeMove

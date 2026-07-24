@@ -4,7 +4,6 @@ import {
   LayoutDashboard, 
   List, 
   FolderOpen,
-  FileText, 
   Settings, 
   LogOut,
   ChevronLeft,
@@ -29,7 +28,6 @@ const Sidebar = ({ open, setOpen }) => {
     { path: '/files', icon: FolderOpen, label: '文件浏览器' },
     { path: '/mounts', icon: Cloud, label: '云盘挂载' },
 
-    { path: '/logs', icon: FileText, label: '日志查看' },
     { path: '/settings', icon: Settings, label: '系统设置' },
   ];
 

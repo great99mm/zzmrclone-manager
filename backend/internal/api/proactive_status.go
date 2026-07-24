@@ -68,6 +68,7 @@ type proactiveBatchStatus struct {
 	CreatedAt                 time.Time                 `json:"created_at"`
 	UpdatedAt                 time.Time                 `json:"updated_at"`
 	FileCounts                map[string]proactiveBytes `json:"file_counts"`
+	FilePaths                 []string                  `json:"file_paths"`
 }
 
 type proactiveResolutionItem struct {
@@ -225,6 +226,7 @@ func getProactiveStatus(c *gin.Context) {
 		batchIDs[i] = batches[i].ID
 	}
 	fileStats := make(map[uint]map[string]proactiveBytes, len(batchIDs))
+	batchFiles := make(map[uint][]string, len(batchIDs))
 	if len(batchIDs) > 0 {
 		var aggregates []proactiveFileAggregate
 		if err := db.Model(&models.RotationQuotaBatchFile{}).
@@ -238,6 +240,17 @@ func getProactiveStatus(c *gin.Context) {
 				fileStats[aggregate.BatchID] = make(map[string]proactiveBytes)
 			}
 			fileStats[aggregate.BatchID][aggregate.State] = proactiveBytes{Count: aggregate.Count, Bytes: aggregate.Bytes}
+		}
+		var filePaths []struct {
+			BatchID      uint   `gorm:"column:batch_id"`
+			RelativePath string `gorm:"column:relative_path"`
+		}
+		if err := db.Model(&models.RotationQuotaBatchFile{}).Select("batch_id, relative_path").Where("batch_id IN ?", batchIDs).Order("batch_id, relative_path").Find(&filePaths).Error; err == nil {
+			for _, fp := range filePaths {
+				if len(batchFiles[fp.BatchID]) < 5 {
+					batchFiles[fp.BatchID] = append(batchFiles[fp.BatchID], fp.RelativePath)
+				}
+			}
 		}
 	}
 
@@ -378,7 +391,7 @@ func getProactiveStatus(c *gin.Context) {
 			stats = map[string]proactiveBytes{}
 		}
 		process := proactiveProcessStatus{Active: batch.State == models.BatchStateRunning && batch.StartedAt != nil && batch.ProcessID > 0, StartedAt: batch.StartedAt, ExitCode: batch.ExitCode}
-		resultBatch := proactiveBatchStatus{ID: batch.ID, State: batch.State, Account: accountKeyForID(accountsByKey, batch.QuotaAccountID), Remote: batch.DestinationRemote, ReservedBytes: batch.ReservedBytes, LeaseUntil: batch.LeaseUntil, Process: process, Error: redactProactiveError(batch.LastError, task, append(redactionBatches, batch)...), StartedAt: batch.StartedAt, FinishedAt: batch.FinishedAt, CreatedAt: batch.CreatedAt, UpdatedAt: batch.UpdatedAt, FileCounts: stats}
+		resultBatch := proactiveBatchStatus{ID: batch.ID, State: batch.State, Account: accountKeyForID(accountsByKey, batch.QuotaAccountID), Remote: batch.DestinationRemote, ReservedBytes: batch.ReservedBytes, LeaseUntil: batch.LeaseUntil, Process: process, Error: redactProactiveError(batch.LastError, task, append(redactionBatches, batch)...), StartedAt: batch.StartedAt, FinishedAt: batch.FinishedAt, CreatedAt: batch.CreatedAt, UpdatedAt: batch.UpdatedAt, FileCounts: stats, FilePaths: batchFiles[batch.ID]}
 		resultBatch.TransferMode = batch.TransferMode
 		resultBatch.CompletionEvidence = batch.CompletionEvidence
 		resultBatch.CompletionEvidenceVersion = batch.CompletionEvidenceVersion
@@ -417,13 +430,13 @@ func getProactiveStatus(c *gin.Context) {
 		maintenance.Blocker = "legacy_maintenance_recovery"
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"task": gin.H{"id": task.ID, "status": task.Status, "enabled": task.Enabled, "transfer_mode": task.TransferMode, "resolution_required": taskResolutionRequired, "rescan_pending": task.RotationRescanPending, "generation": task.RotationRescanGeneration, "stop_requested": task.RotationStopRequested, "wake_at": task.RotationQuotaWakeAt, "current_error": taskError, "last_error": taskError},
-		"accounts":                 bindings,
-		"batches":                  resultBatches,
-		"queue":                    queue,
-		"maintenance":              maintenance,
-		"all_accounts_exhausted":   allExhausted,
-		"next_quota_reset_at":      earliestReset,
+		"task":                   gin.H{"id": task.ID, "status": task.Status, "enabled": task.Enabled, "transfer_mode": task.TransferMode, "resolution_required": taskResolutionRequired, "rescan_pending": task.RotationRescanPending, "generation": task.RotationRescanGeneration, "stop_requested": task.RotationStopRequested, "wake_at": task.RotationQuotaWakeAt, "current_error": taskError, "last_error": taskError},
+		"accounts":               bindings,
+		"batches":                resultBatches,
+		"queue":                  queue,
+		"maintenance":            maintenance,
+		"all_accounts_exhausted": allExhausted,
+		"next_quota_reset_at":    earliestReset,
 	})
 }
 

@@ -13,14 +13,13 @@ import {
   Activity,
   Clock,
   CheckCircle2,
-  ExternalLink,
   Upload,
   File,
   ShieldCheck,
   ListChecks,
   Database
 } from 'lucide-react';
-import { getTask, getTaskStatus, getProactiveStatus, resolveProactiveBatch, getTaskLogs, startTask, stopTask, pauseTask, cancelTask, dedupeTask, startProactiveManualMerge, closeProactiveUnknownMaintenance, deleteTask } from '../services/api';
+import { getTask, getTaskStatus, getProactiveStatus, resolveProactiveBatch, startTask, stopTask, pauseTask, cancelTask, dedupeTask, startProactiveManualMerge, closeProactiveUnknownMaintenance, deleteTask } from '../services/api';
 import { createWebSocket } from '../services/api';
 import toast from 'react-hot-toast';
 import { QuotaAccountBar, QuotaExhaustedNotice } from '../components/QuotaAccountBar';
@@ -46,10 +45,7 @@ const formatTaskDest = (task) => {
 const TaskDetail = () => {
   const { id } = useParams();
   const navigate = useNavigate();
-  const [showLogs, setShowLogs] = useState(false);
-  const showLogsRef = useRef(false);
   const [task, setTask] = useState(null);
-  const [logs, setLogs] = useState([]);
   const [status, setStatus] = useState({ status: 'idle', running: false });
   const [qbStatus, setQbStatus] = useState(null);
   const [proactiveStatus, setProactiveStatus] = useState(null);
@@ -58,11 +54,9 @@ const TaskDetail = () => {
   const [resolutionState, setResolutionState] = useState({ batchId: null, action: '', loading: false, error: '', success: '' });
   const [legacyRecoveryState, setLegacyRecoveryState] = useState({ loading: false, error: '' });
   const [loading, setLoading] = useState(true);
-  const [autoScroll, setAutoScroll] = useState(true);
   const [fileProgresses, setFileProgresses] = useState({});
   const wsRef = useRef(null);
   const progressTimerRef = useRef(null);
-  const logContainerRef = useRef(null);
 
   // 从单条日志解析 transferring 进度
   const parseLogProgress = useCallback((line) => {
@@ -104,10 +98,6 @@ const TaskDetail = () => {
       return changed ? updated : prev;
     });
   }, []);
-
-  useEffect(() => {
-    showLogsRef.current = showLogs;
-  }, [showLogs]);
 
   const loadTask = useCallback(async () => {
     try {
@@ -193,15 +183,6 @@ const TaskDetail = () => {
           // 无论是否显示日志，都解析 transferring 进度（保证上传部分正常工作）
           parseLogProgress(data.content);
 
-          // 只有用户点击"获取日志"后才将日志加入 state 展示
-          if (showLogsRef.current) {
-            // 新日志插入到开头，实现倒序（最新的在上面）
-            setLogs(prev => [{
-              time: data.time,
-              content: data.content,
-              stream: data.stream,
-            }, ...prev.slice(0, 499)]);
-          }
         } else if (data.type === 'task_complete') {
           toast.success('任务执行完成');
           setFileProgresses({});
@@ -261,28 +242,6 @@ const TaskDetail = () => {
       clearTimeout(timer);
     };
   }, [task?.task_type, task?.rotation_strategy, loadProactiveStatus]);
-
-  useEffect(() => {
-    if (autoScroll && logContainerRef.current) {
-      logContainerRef.current.scrollTop = 0;
-    }
-  }, [logs, autoScroll]);
-
-  const loadLogs = async () => {
-    try {
-      const res = await getTaskLogs(id, 200);
-      const logContent = res.data.logs[0] || '';
-      const lines = logContent.split('\n').filter(l => l.trim()).map(line => ({
-        time: line.match(/\[(.*?)\]/)?.[1] || new Date().toISOString(),
-        content: line.replace(/^\[.*?\]\s*/, ''),
-        stream: 'stdout',
-      }));
-      // 倒序：最新的在前面
-      setLogs(lines.reverse());
-    } catch (err) {
-      // Ignore log load errors
-    }
-  };
 
   const handleStart = async () => {
     try {
@@ -389,16 +348,6 @@ const TaskDetail = () => {
     } catch (err) {
       toast.error('删除失败');
     }
-  };
-
-  const handleShowLogs = () => {
-    setShowLogs(true);
-    loadLogs();
-  };
-
-  const handleRefreshLogs = () => {
-    loadLogs();
-    toast.success('日志已刷新');
   };
 
   if (loading || !task) {
@@ -641,10 +590,17 @@ const TaskDetail = () => {
                   <div className="space-y-3">
                     {queued.map(batch => (
                       <div key={batch.id} className="border border-amber-100 bg-amber-50 rounded-lg px-3 py-2.5">
-                        <div className="flex items-center justify-between text-xs">
-                          <span className="font-medium text-gray-700">批次 #{batch.id} 等待启动</span>
-                          <span className="text-amber-700">{batch.account || batch.remote || '-'} · {formatBytes(batch.reserved_bytes || 0)}</span>
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-medium text-gray-700">批次 #{batch.id} 等待启动</span>
+                        <span className="text-amber-700">{batch.account || batch.remote || '-'} · {formatBytes(batch.reserved_bytes || 0)}</span>
+                      </div>
+                      {(batch.file_paths || []).length > 0 && (
+                        <div className="mt-1.5 space-y-0.5 text-[10px] text-gray-500">
+                          {batch.file_paths.map(path => (
+                            <div key={path} className="truncate" title={path}>{path.split('/').pop() || path}</div>
+                          ))}
                         </div>
+                      )}
                       </div>
                     ))}
                   </div>
@@ -656,14 +612,20 @@ const TaskDetail = () => {
                     <div key={batch.id} className="border border-blue-100 bg-blue-50 rounded-lg px-3 py-2.5">
                       <div className="flex items-center justify-between text-xs mb-1.5">
                         <span className="font-medium text-blue-700">批次 #{batch.id} 传输中</span>
-                        <span className="text-blue-600">{batch.account || batch.remote || '-'}</span>
+                        <span className="text-blue-600">{batch.account || batch.remote || '-'} · {formatBytes(batch.reserved_bytes || 0)}</span>
                       </div>
+                      {(batch.file_paths || []).length > 0 && (
+                        <div className="text-[10px] text-gray-500 mb-1.5 space-y-0.5">
+                          {(batch.file_paths || []).slice(0, 5).map((p, i) => (
+                            <div key={i} className="truncate" title={p}>{p.split('/').pop() || p}</div>
+                          ))}
+                        </div>
+                      )}
                       <div className="flex-1 h-2 bg-blue-100 rounded-full overflow-hidden">
-                        <div className="h-full bg-blue-500 rounded-full animate-pulse" style={{ width: '40%' }} />
+                        <div className="h-full bg-blue-500 rounded-full animate-pulse" style={{ width: '60%' }} />
                       </div>
                       <div className="flex justify-between text-[10px] text-gray-500 mt-1">
-                        <span>{formatBytes(batch.reserved_bytes || 0)} · {batch.transfer_mode === 'move' ? '移动' : '复制'}</span>
-                        {batch.started_at && <span>{new Date(batch.started_at).toLocaleTimeString()}</span>}
+                        <span>{batch.transfer_mode === 'move' ? '移动' : '复制'}{batch.started_at && ` · ${new Date(batch.started_at).toLocaleTimeString()}`}</span>
                       </div>
                     </div>
                   ))}
@@ -704,113 +666,6 @@ const TaskDetail = () => {
         </div>
       </div>
 
-      {/* Output Logs API URL */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 md:p-6">
-        <h2 className="text-base md:text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
-          <ExternalLink className="w-5 h-5 text-blue-500" />
-          输出日志 API
-        </h2>
-        <div className="bg-gray-50 text-gray-700 p-3 md:p-4 rounded-lg font-mono text-xs md:text-sm break-all border border-gray-200">
-          {(() => {
-            const base = window.location.origin;
-            const token = localStorage.getItem('apiToken') || '';
-            return token
-              ? `${base}/api/output-logs?task_id=${id}&token=${token}`
-              : `${base}/api/output-logs?task_id=${id}`;
-          })()}
-        </div>
-        <div className="flex items-center gap-3 mt-3">
-          <Link
-            to={`/logs?tab=records&task=${id}`}
-            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium text-sm"
-          >
-            <ExternalLink className="w-4 h-4" />
-            查看转移记录
-          </Link>
-        </div>
-      </div>
-
-      {/* Log Viewer */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Terminal className="w-5 h-5 text-gray-600" />
-            <h2 className="font-semibold text-gray-900">实时日志</h2>
-            {status.running && showLogs && (
-              <span className="px-2 py-0.5 bg-green-100 text-green-700 text-xs font-medium rounded-full animate-pulse">
-                实时接收中
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            {!showLogs ? (
-              <button
-                onClick={handleShowLogs}
-                className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium text-sm"
-              >
-                <Terminal className="w-4 h-4" />
-                获取日志
-              </button>
-            ) : (
-              <>
-                <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={autoScroll}
-                    onChange={(e) => setAutoScroll(e.target.checked)}
-                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                  />
-                  自动滚动
-                </label>
-                <button
-                  onClick={handleRefreshLogs}
-                  className="p-1.5 text-gray-500 hover:bg-gray-100 rounded-lg transition-colors"
-                  title="刷新日志"
-                >
-                  <RotateCcw className="w-4 h-4" />
-                </button>
-              </>
-            )}
-          </div>
-        </div>
-
-        <div className="log-viewer h-64 md:h-96 overflow-auto p-2 rounded-b-lg" ref={logContainerRef}>
-          {!showLogs ? (
-            <div className="flex items-center justify-center h-full text-gray-500">
-              <div className="text-center">
-                <Terminal className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                <p>日志已隐藏</p>
-                <p className="text-sm mt-1">点击上方"获取日志"按钮查看实时输出</p>
-              </div>
-            </div>
-          ) : logs.length === 0 ? (
-            <div className="flex items-center justify-center h-full text-gray-500">
-              <div className="text-center">
-                <Terminal className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                <p>暂无日志</p>
-                <p className="text-sm mt-1">启动任务后将显示实时输出</p>
-              </div>
-            </div>
-          ) : (
-            <div className="space-y-0">
-              {logs.map((log, idx) => (
-                <div
-                  key={idx}
-                  className={`log-line ${
-                    log.content.includes('ERROR') ? 'log-error' :
-                    log.content.includes('WARN') ? 'log-warn' :
-                    log.content.includes('Transferred') ? 'log-success' :
-                    'log-info'
-                  }`}
-                >
-                  <span className="text-gray-500 mr-2">[{log.time}]</span>
-                  {log.content}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
     </div>
   );
 };
