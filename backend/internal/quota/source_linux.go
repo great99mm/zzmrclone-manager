@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 
@@ -84,6 +86,83 @@ func (h *SourceRootHandle) OpenValidated(snapshot LocalSnapshot) (*os.File, erro
 		return nil, fmt.Errorf("source file changed")
 	}
 	return file, nil
+}
+
+// RemoveEmptyParents removes only empty ancestors of the supplied source files.
+// Traversal remains descriptor-relative and rejects symlinked ancestors.
+func (h *SourceRootHandle) RemoveEmptyParents(relativePaths []string) error {
+	if h == nil || h.file == nil {
+		return errors.New("source root is unavailable")
+	}
+	directories := make(map[string]struct{})
+	for _, relative := range relativePaths {
+		if err := ValidateRelativePath(relative); err != nil {
+			return err
+		}
+		for directory := path.Dir(relative); directory != "." && directory != "/"; directory = path.Dir(directory) {
+			directories[directory] = struct{}{}
+		}
+	}
+	ordered := make([]string, 0, len(directories))
+	for directory := range directories {
+		ordered = append(ordered, directory)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		if len(ordered[i]) == len(ordered[j]) {
+			return ordered[i] < ordered[j]
+		}
+		return len(ordered[i]) > len(ordered[j])
+	})
+	for _, directory := range ordered {
+		if err := h.removeEmptyDirectory(directory); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *SourceRootHandle) removeEmptyDirectory(relative string) error {
+	if err := ValidateRelativePath(relative); err != nil {
+		return err
+	}
+	parts := strings.Split(relative, "/")
+	fd, err := unix.Dup(int(h.file.Fd()))
+	if err != nil {
+		return err
+	}
+	parent := os.NewFile(uintptr(fd), "source-empty-parent")
+	if parent == nil {
+		_ = unix.Close(fd)
+		return errors.New("open source empty parent")
+	}
+	defer parent.Close()
+	for _, part := range parts[:len(parts)-1] {
+		nextFD, openErr := unix.Openat(int(parent.Fd()), part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if openErr != nil {
+			if errors.Is(openErr, syscall.ENOENT) || errors.Is(openErr, syscall.ENOTDIR) {
+				return nil
+			}
+			return openErr
+		}
+		next := os.NewFile(uintptr(nextFD), "source-empty-parent")
+		if next == nil {
+			_ = unix.Close(nextFD)
+			return errors.New("open source empty parent")
+		}
+		if err := parent.Close(); err != nil {
+			_ = next.Close()
+			return err
+		}
+		parent = next
+	}
+	err = unix.Unlinkat(int(parent.Fd()), parts[len(parts)-1], unix.AT_REMOVEDIR)
+	if err != nil {
+		if errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.ENOTEMPTY) || errors.Is(err, syscall.EEXIST) {
+			return nil
+		}
+		return err
+	}
+	return unix.Fsync(int(parent.Fd()))
 }
 
 type StageHandle struct {

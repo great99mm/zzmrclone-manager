@@ -22,6 +22,9 @@ func (h *SourceRootHandle) Validate(LocalSnapshot) (bool, error) {
 func (h *SourceRootHandle) OpenValidated(LocalSnapshot) (*os.File, error) {
 	return nil, errors.New("descriptor-relative source validation is unsupported on this platform")
 }
+func (h *SourceRootHandle) RemoveEmptyParents([]string) error {
+	return errors.New("descriptor-relative source validation is unsupported on this platform")
+}
 func PrepareStage(string, uint, string, string) (*StageHandle, error) {
 	return nil, errors.New("descriptor-relative staging is unsupported on this platform")
 }

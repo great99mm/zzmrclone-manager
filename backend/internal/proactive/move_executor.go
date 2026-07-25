@@ -329,7 +329,28 @@ func (e *Executor) finishMoveProcess(ctx context.Context, batch models.RotationQ
 	if err := e.reconcileMove(batch, files, token, quarantine); err != nil {
 		return e.moveUnknown(batch.ID, token, err)
 	}
+	e.cleanupCompletedMoveSourceDirs(batch, files)
 	return processErr
+}
+
+func (e *Executor) cleanupCompletedMoveSourceDirs(batch models.RotationQuotaBatch, files []models.RotationQuotaBatchFile) {
+	var current models.RotationQuotaBatch
+	if err := e.DB.Select("state").First(&current, batch.ID).Error; err != nil || current.State != models.BatchStateSucceeded {
+		return
+	}
+	root, err := quota.OpenSourceRoot(batch.SourceRoot)
+	if err != nil {
+		return
+	}
+	defer root.Close()
+	if root.Device != batch.SourceRootDevice || root.Inode != batch.SourceRootInode {
+		return
+	}
+	relativePaths := make([]string, 0, len(files))
+	for _, file := range files {
+		relativePaths = append(relativePaths, file.RelativePath)
+	}
+	_ = root.RemoveEmptyParents(relativePaths)
 }
 
 func (e *Executor) reconcileMove(batch models.RotationQuotaBatch, files []models.RotationQuotaBatchFile, token string, quarantine *quota.MoveQuarantine) error {
@@ -510,7 +531,11 @@ func (e *Executor) recoverMoveBatch(ctx context.Context, batchID uint) error {
 			return ErrLeaseConflict
 		}
 	}
-	return e.reconcileMove(batch, files, batch.LeaseToken, quarantine)
+	if err := e.reconcileMove(batch, files, batch.LeaseToken, quarantine); err != nil {
+		return err
+	}
+	e.cleanupCompletedMoveSourceDirs(batch, files)
+	return nil
 }
 
 func (e *Executor) freezeMoveResolution(batchID, fileID uint, cause error) error {

@@ -137,6 +137,9 @@ func TestMoveExecutorMovesOnlyManifestFilesAndUsesNoRemoteStat(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(fixture.root, "unselected.bin")); err != nil {
 		t.Fatalf("unselected source was changed: %v", err)
 	}
+	if _, err := os.Stat(filepath.Join(fixture.root, "nested")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("empty source directory remains: %v", err)
+	}
 	var stored models.RotationQuotaBatch
 	if err := db.First(&stored, fixture.batch.ID).Error; err != nil {
 		t.Fatal(err)
