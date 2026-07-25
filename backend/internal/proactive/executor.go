@@ -261,10 +261,14 @@ func (e *Executor) RunDedupe(ctx context.Context, epoch models.DestinationScopeM
 	if state == models.MaintenanceStateFailed {
 		dedupeState = models.DedupeStateFailed
 	}
-	if manual {
-		return completeManualMaintenance(e.DB, epoch, dedupeState, dedupeState, output.ExitCode, output.Stderr, e.now(), e.ConfigResolver)
+	message := output.Stderr
+	if state == models.MaintenanceStateSucceeded {
+		message = ""
 	}
-	if err := e.DB.Model(&models.DestinationScopeMaintenance{}).Where("id = ? AND state = ? AND dedupe_state = ? AND lease_token = ?", epoch.ID, models.MaintenanceStateExhausted, models.DedupeStateRunning, epoch.LeaseToken).Updates(map[string]interface{}{"dedupe_state": dedupeState, "result": dedupeState, "exit_code": output.ExitCode, "finished_at": e.now(), "last_error": redactMaintenanceError(output.Stderr, epoch), "revision": gorm.Expr("revision + 1")}).Error; err != nil {
+	if manual {
+		return completeManualMaintenance(e.DB, epoch, dedupeState, dedupeState, output.ExitCode, message, e.now(), e.ConfigResolver)
+	}
+	if err := e.DB.Model(&models.DestinationScopeMaintenance{}).Where("id = ? AND state = ? AND dedupe_state = ? AND lease_token = ?", epoch.ID, models.MaintenanceStateExhausted, models.DedupeStateRunning, epoch.LeaseToken).Updates(map[string]interface{}{"dedupe_state": dedupeState, "result": dedupeState, "exit_code": output.ExitCode, "finished_at": e.now(), "last_error": redactMaintenanceError(message, epoch), "revision": gorm.Expr("revision + 1")}).Error; err != nil {
 		return err
 	}
 	return waitErr

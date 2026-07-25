@@ -743,6 +743,40 @@ func TestManualIdentityPersistenceFailureAfterWaitErrorIsKnownFailure(t *testing
 	}
 }
 
+func TestManualDedupeSuccessDoesNotPersistRcloneOutputAsError(t *testing.T) {
+	db := executionDB(t)
+	if err := db.AutoMigrate(&models.DestinationScopeMaintenance{}, &models.DestinationScopeCoordinator{}, &models.Task{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.Task{ID: 1, Enabled: true, TaskType: "rotation", RotationStrategy: "proactive_quota", RcloneConfig: "/config", RemoteDir: "/dest"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	leaseUntil := time.Unix(200, 0)
+	epoch := models.DestinationScopeMaintenance{DestinationScope: models.DestinationScope("/config", "/dest"), Epoch: 1, OwnerTaskID: 1, FirstRemote: "remote", RemoteDir: "/dest", ResolvedConfigPath: "/config", ResolvedConfigIdentity: "/config", State: models.MaintenanceStateExhausted, DedupeState: models.DedupeStateClaimed, Reason: models.MaintenanceReasonManualMerge, LeaseToken: "manual-owner", LeaseUntil: &leaseUntil, Revision: 1}
+	if err := db.Create(&epoch).Error; err != nil {
+		t.Fatal(err)
+	}
+	process := &fakeProcess{result: ProcessResult{ExitCode: 0, Stderr: "INFO : merged duplicate directory", PID: 78, ProcessStartToken: "78:1"}}
+	e := &Executor{DB: db, Runner: &fakeDedupeRunner{process: process}, Now: func() time.Time { return time.Unix(100, 0) }}
+	if err := e.RunDedupe(context.Background(), epoch); err != nil {
+		t.Fatal(err)
+	}
+	var storedEpoch models.DestinationScopeMaintenance
+	if err := db.First(&storedEpoch, epoch.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if storedEpoch.State != models.MaintenanceStateClosed || storedEpoch.DedupeState != models.DedupeStateSucceeded || storedEpoch.LastError != "" {
+		t.Fatalf("successful manual dedupe retained output as error: %#v", storedEpoch)
+	}
+	var storedTask models.Task
+	if err := db.First(&storedTask, 1).Error; err != nil {
+		t.Fatal(err)
+	}
+	if storedTask.LastError != "" {
+		t.Fatalf("successful manual dedupe retained task error: %#v", storedTask)
+	}
+}
+
 func TestExecutorRejectsLegacyQuotaDedupeExecution(t *testing.T) {
 	db := executionDB(t)
 	if err := db.AutoMigrate(&models.DestinationScopeMaintenance{}); err != nil {

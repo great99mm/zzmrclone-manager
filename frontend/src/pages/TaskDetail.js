@@ -926,6 +926,8 @@ const ProactiveQuotaPanel = ({ status, loading, error, onRetry, resolutionState,
   const maintenance = status.maintenance || {};
   const legacyRecovery = maintenance.legacy_recovery;
   const manualMergeStatus = getManualMergeStatus(maintenance);
+  const manualMergeResult = MANUAL_MERGE_RESULT_LABELS[maintenance.result];
+  const manualMergeError = maintenance.result === 'succeeded' ? '' : maintenance.error;
   const taskStatus = status.task?.status || 'idle';
   const queueCount = (queue.pending?.count || 0) + (queue.planned?.count || 0) + (queue.executing?.count || 0);
   const resolvedAccounts = accounts.filter(account => account.budget_bytes != null && account.remaining_bytes != null);
@@ -976,10 +978,10 @@ const ProactiveQuotaPanel = ({ status, loading, error, onRetry, resolutionState,
                   ? '合并正在处理，请等待状态更新。'
                   : '仅在你明确操作时执行合并。'}
           </div>
-          {(MANUAL_MERGE_RESULT_LABELS[maintenance.result] || maintenance.error) && (
-            <div className={`text-xs mt-1 ${maintenance.result === 'failed' || maintenance.error ? 'text-red-700' : 'text-emerald-700'}`}>
-              {MANUAL_MERGE_RESULT_LABELS[maintenance.result] || '最近一次合并状态'}
-              {maintenance.error ? `：${maintenance.error}` : ''}
+          {(manualMergeResult || manualMergeError) && (
+            <div className={`text-xs mt-1 ${maintenance.result === 'failed' || manualMergeError ? 'text-red-700' : 'text-emerald-700'}`}>
+              {manualMergeResult || '最近一次合并状态'}
+              {manualMergeError ? `：${manualMergeError.slice(0, 240)}` : ''}
             </div>
           )}
         </div>
