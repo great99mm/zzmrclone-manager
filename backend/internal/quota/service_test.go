@@ -64,6 +64,31 @@ func TestReserveZeroTaskQuotaRetainsZeroCapacity(t *testing.T) {
 	}
 }
 
+func TestReserveBlocksExhaustedRecoveryAfterLegacyProviderBlockExpires(t *testing.T) {
+	db := newQuotaTestDB(t)
+	account := addAccount(t, db, "recovery-key", 100)
+	now := time.Unix(100, 0)
+	past := now.Add(-time.Minute)
+	if err := db.Model(&models.QuotaAccount{}).Where("id = ?", account.ID).Updates(map[string]interface{}{
+		"provider_blocked_until": past,
+		"recovery_state":         models.QuotaRecoveryStateExhausted,
+		"recovery_generation":    1,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	service := testService(db, now)
+	result, err := service.Reserve(PackReserveRequest{
+		Task:      quotaTask([]string{"remote"}, map[string]string{"remote": account.QuotaKey}, 100),
+		Snapshots: []LocalSnapshot{snapshot("file", 1)}, SourceRoot: "/source", DestinationPath: "/dest",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Classification != models.ReserveClassProviderBlocked || len(result.Batches) != 0 || len(result.Pending) != 1 {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
 func TestReserveClassifiesOtherScopeAccountBlockerBeforeBudgetExhaustion(t *testing.T) {
 	db := newQuotaTestDB(t)
 	account := addAccount(t, db, "key", 1)

@@ -403,7 +403,7 @@ func (e *Executor) startIntent(batchID uint, token string) error {
 			return err
 		}
 		now := e.now()
-		if !account.Enabled || (account.ProviderBlockedUntil != nil && account.ProviderBlockedUntil.After(now)) {
+		if models.IsUnavailableForProactiveTransfers(account, now) {
 			return ErrAccountBlocked
 		}
 		var reservations []models.QuotaReservation
@@ -454,21 +454,30 @@ func (e *Executor) persistProcess(batchID uint, token string, process ProcessHan
 }
 
 func (e *Executor) toReconciling(batchID uint, token string, result ProcessResult, waitErr error) error {
-	message := result.Stderr
-	if message == "" {
-		message = result.Stdout
-	}
-	if waitErr != nil {
-		message = message + ": " + waitErr.Error()
-	}
-	update := e.DB.Model(&models.RotationQuotaBatch{}).Where("id = ? AND lease_token = ? AND state = ?", batchID, token, models.BatchStateRunning).Updates(map[string]interface{}{"state": models.BatchStateReconciling, "exit_code": result.ExitCode, "last_error": message})
-	if update.Error != nil {
-		return update.Error
-	}
-	if update.RowsAffected != 1 {
-		return ErrLeaseConflict
-	}
-	return nil
+	marker := DetectUploadLimit(result.Stdout + "\n" + result.Stderr)
+	now := e.now()
+	return e.retrySQLite(func() error {
+		return e.DB.Transaction(func(tx *gorm.DB) error {
+			message := result.Stderr
+			if message == "" {
+				message = result.Stdout
+			}
+			if waitErr != nil {
+				message = message + ": " + waitErr.Error()
+			}
+			update := tx.Model(&models.RotationQuotaBatch{}).Where("id = ? AND lease_token = ? AND state = ?", batchID, token, models.BatchStateRunning).Updates(map[string]interface{}{"state": models.BatchStateReconciling, "exit_code": result.ExitCode, "last_error": message})
+			if update.Error != nil {
+				return update.Error
+			}
+			if update.RowsAffected != 1 {
+				return ErrLeaseConflict
+			}
+			if marker.Detected {
+				return e.freezeMarkerTx(tx, batchID, token, marker, now)
+			}
+			return nil
+		})
+	})
 }
 
 func (e *Executor) finishProcess(ctx context.Context, batch models.RotationQuotaBatch, files []models.RotationQuotaBatchFile, token string, stage *quota.StageHandle, result ProcessResult, waitErr error, processErr error) error {
@@ -476,12 +485,6 @@ func (e *Executor) finishProcess(ctx context.Context, batch models.RotationQuota
 		_ = stage.Close()
 		e.recordStageRetention(batch.ID, token, "process stopped but reconciliation transition failed")
 		e.writeTaskLog(batch.TaskID, fmt.Sprintf("批次 #%d 对账失败: %v", batch.ID, err))
-		return err
-	}
-	if err := e.freezeOnMarker(batch.ID, token, result); err != nil {
-		_ = stage.Close()
-		e.recordStageRetention(batch.ID, token, "process stopped but marker handling failed")
-		e.writeTaskLog(batch.TaskID, fmt.Sprintf("批次 #%d marker 处理失败: %v", batch.ID, err))
 		return err
 	}
 	if err := e.reconcile(ctx, batch, token, files); err != nil {
@@ -654,31 +657,55 @@ func (e *Executor) freezeOnMarker(batchID uint, token string, result ProcessResu
 		return nil
 	}
 	now := e.now()
-	return e.DB.Transaction(func(tx *gorm.DB) error {
-		var batch models.RotationQuotaBatch
-		if err := tx.First(&batch, batchID).Error; err != nil {
-			return err
-		}
-		if batch.LeaseToken != token || batch.State != models.BatchStateReconciling {
-			return ErrLeaseConflict
-		}
-		var account models.QuotaAccount
-		if err := tx.First(&account, batch.QuotaAccountID).Error; err != nil {
-			return err
-		}
-		until := now.Add(24 * time.Hour)
-		if account.ProviderBlockedUntil == nil || account.ProviderBlockedUntil.Before(until) {
-			account.ProviderBlockedUntil = &until
-		}
-		update := tx.Model(&models.RotationQuotaBatch{}).Where("id = ? AND lease_token = ? AND state = ?", batchID, token, models.BatchStateReconciling).Updates(map[string]interface{}{"limit_marker": marker.Text, "marker_detected_at": now})
-		if update.Error != nil {
-			return update.Error
-		}
-		if update.RowsAffected != 1 {
-			return ErrLeaseConflict
-		}
-		return tx.Save(&account).Error
+	return e.retrySQLite(func() error {
+		return e.DB.Transaction(func(tx *gorm.DB) error {
+			return e.freezeMarkerTx(tx, batchID, token, marker, now)
+		})
 	})
+}
+
+func (e *Executor) freezeMarkerTx(tx *gorm.DB, batchID uint, token string, marker UploadLimitMarker, now time.Time) error {
+	var batch models.RotationQuotaBatch
+	if err := tx.First(&batch, batchID).Error; err != nil {
+		return err
+	}
+	if batch.LeaseToken != token || batch.State != models.BatchStateReconciling {
+		return ErrLeaseConflict
+	}
+	var account models.QuotaAccount
+	if err := tx.First(&account, batch.QuotaAccountID).Error; err != nil {
+		return err
+	}
+	until := now.Add(24 * time.Hour)
+	if account.RecoveryState != models.QuotaRecoveryStateExhausted {
+		transition := tx.Model(&models.QuotaAccount{}).
+			Where("id = ? AND (recovery_state IS NULL OR recovery_state <> ?)", account.ID, models.QuotaRecoveryStateExhausted).
+			Updates(map[string]interface{}{
+				"recovery_state":      models.QuotaRecoveryStateExhausted,
+				"first_exhausted_at":  now,
+				"recovery_generation": gorm.Expr("recovery_generation + 1"),
+				"next_probe_at":       now.Add(models.DefaultQuotaRecoveryProbeDelay),
+				"probe_claim_token":   "",
+				"probe_claim_until":   nil,
+			})
+		if transition.Error != nil {
+			return transition.Error
+		}
+	}
+	legacyBlock := tx.Model(&models.QuotaAccount{}).
+		Where("id = ?", account.ID).
+		Update("provider_blocked_until", gorm.Expr("CASE WHEN provider_blocked_until IS NULL OR provider_blocked_until < ? THEN ? ELSE provider_blocked_until END", until, until))
+	if legacyBlock.Error != nil {
+		return legacyBlock.Error
+	}
+	update := tx.Model(&models.RotationQuotaBatch{}).Where("id = ? AND lease_token = ? AND state = ?", batchID, token, models.BatchStateReconciling).Updates(map[string]interface{}{"limit_marker": marker.Text, "marker_detected_at": now})
+	if update.Error != nil {
+		return update.Error
+	}
+	if update.RowsAffected != 1 {
+		return ErrLeaseConflict
+	}
+	return nil
 }
 
 func (e *Executor) reconcile(ctx context.Context, batch models.RotationQuotaBatch, token string, files []models.RotationQuotaBatchFile) error {
@@ -743,7 +770,7 @@ func (e *Executor) reconcile(ctx context.Context, batch models.RotationQuotaBatc
 			}
 		}
 		state := models.BatchStateUnknown
-		if allVerified && current.LimitMarker == "" {
+		if allVerified {
 			state = models.BatchStateSucceeded
 		}
 		result := tx.Model(&models.RotationQuotaBatch{}).Where("id = ? AND lease_token = ? AND state = ?", current.ID, token, models.BatchStateReconciling).Update("state", state)

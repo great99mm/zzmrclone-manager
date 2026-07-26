@@ -20,6 +20,7 @@ type moveTestRunner struct {
 	remove    func(string, *os.File) error
 	statCalls int
 	moveSpec  MoveSpec
+	result    ProcessResult
 }
 
 func (r *moveTestRunner) StartCopy(context.Context, CopySpec) (ProcessHandle, error) {
@@ -41,7 +42,11 @@ func (r *moveTestRunner) StartMove(_ context.Context, spec MoveSpec) (ProcessHan
 			return nil, err
 		}
 	}
-	return &fakeProcess{result: ProcessResult{PID: 77, ProcessStartToken: "77:1"}}, nil
+	result := r.result
+	if result.PID == 0 {
+		result = ProcessResult{PID: 77, ProcessStartToken: "77:1"}
+	}
+	return &fakeProcess{result: result}, nil
 }
 
 type moveFixture struct {
@@ -181,6 +186,49 @@ func TestMoveExecutorStartFailureRestoresAndReleases(t *testing.T) {
 	}
 	if reservation.State != models.ReservationStateReleased {
 		t.Fatalf("reservation state = %s, want released", reservation.State)
+	}
+}
+
+func TestMoveExecutorMarkerFreezesAccount(t *testing.T) {
+	db := executionDB(t)
+	fixture := makeMoveFixture(t, db, 1)
+	runner := &moveTestRunner{result: ProcessResult{PID: 78, ProcessStartToken: "78:1", Stderr: "drive upload limit exceeded"}}
+	executor := &Executor{DB: db, ManifestDir: t.TempDir(), Runner: runner, Manifest: ManifestWriter{}, MoveEnabled: func() bool { return true }, Now: func() time.Time { return time.Unix(100, 0) }}
+	if err := executor.RunBatch(context.Background(), fixture.batch.ID); err != nil {
+		t.Fatal(err)
+	}
+	var stored models.RotationQuotaBatch
+	if err := db.First(&stored, fixture.batch.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.LimitMarker == "" || stored.MarkerDetectedAt == nil {
+		t.Fatalf("move marker metadata missing: %#v", stored)
+	}
+	var account models.QuotaAccount
+	if err := db.First(&account, fixture.batch.QuotaAccountID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if account.RecoveryState != models.QuotaRecoveryStateExhausted || account.RecoveryGeneration != 1 || account.NextProbeAt == nil || !account.NextProbeAt.Equal(time.Unix(100, 0).Add(models.DefaultQuotaRecoveryProbeDelay)) {
+		t.Fatalf("move recovery transition = %#v", account)
+	}
+}
+
+func TestMoveStartHonorsExhaustedRecoveryAfterLegacyBlockExpires(t *testing.T) {
+	db := executionDB(t)
+	fixture := makeMoveFixture(t, db, 1)
+	past := time.Unix(90, 0)
+	if err := db.Model(&models.QuotaAccount{}).Where("id = ?", fixture.batch.QuotaAccountID).Updates(map[string]interface{}{
+		"provider_blocked_until": past,
+		"recovery_state":         models.QuotaRecoveryStateExhausted,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&models.RotationQuotaBatch{}).Where("id = ?", fixture.batch.ID).Updates(map[string]interface{}{"state": models.BatchStatePlanned, "lease_token": testOwner}).Error; err != nil {
+		t.Fatal(err)
+	}
+	e := &Executor{DB: db, Now: func() time.Time { return time.Unix(100, 0) }}
+	if err := e.startMoveIntent(fixture.batch.ID, testOwner); !errors.Is(err, ErrAccountBlocked) {
+		t.Fatalf("move start error = %v", err)
 	}
 }
 

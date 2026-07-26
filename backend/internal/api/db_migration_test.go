@@ -35,6 +35,7 @@ func TestRotationQuotaSchemaMigration(t *testing.T) {
 	for _, model := range []interface{}{
 		&models.Task{},
 		&models.QuotaAccount{},
+		&models.QuotaProbeAttempt{},
 		&models.RotationQuotaDirectoryAssignment{},
 		&models.RotationQuotaBatch{},
 		&models.RotationQuotaBatchFile{},
@@ -42,6 +43,16 @@ func TestRotationQuotaSchemaMigration(t *testing.T) {
 	} {
 		if !db.Migrator().HasTable(model) {
 			t.Fatalf("migrated table for %T is missing", model)
+		}
+	}
+	for _, column := range []string{"recovery_state", "first_exhausted_at", "recovery_generation", "next_probe_at", "probe_claim_token", "probe_claim_until"} {
+		if !db.Migrator().HasColumn(&models.QuotaAccount{}, column) {
+			t.Fatalf("quota account recovery column %q is missing", column)
+		}
+	}
+	for _, column := range []string{"quota_account_id", "recovery_generation", "scheduled_slot", "attempt_key", "contract_version", "phase", "object_path", "expected_bytes", "quota_key", "config_identity", "remote_name", "state", "due_at", "started_at", "finished_at", "lease_token", "lease_until", "process_id", "process_start_token", "exit_code", "verification_state", "verification_evidence", "verified_at", "cleanup_state", "cleanup_evidence", "cleaned_at", "last_error", "error_evidence"} {
+		if !db.Migrator().HasColumn(&models.QuotaProbeAttempt{}, column) {
+			t.Fatalf("quota probe attempt column %q is missing", column)
 		}
 	}
 	for _, column := range []string{"rotation_quota_limit_bytes", "rotation_quota_keys", "rotation_rescan_pending", "rotation_last_scan_at", "rotation_quota_wake_at"} {
@@ -72,13 +83,49 @@ func TestRotationQuotaSchemaMigration(t *testing.T) {
 	assertMigrationIndex(t, &models.QuotaReservation{}, "idx_quota_reservations_account_state_expiry")
 	assertMigrationIndex(t, &models.QuotaReservation{}, "idx_quota_reservations_batch_state")
 	assertMigrationIndex(t, &models.QuotaReservation{}, "idx_quota_reservations_batch_file")
+	assertMigrationIndex(t, &models.QuotaProbeAttempt{}, quotaProbeAttemptGenerationSlotIndex)
+	assertMigrationIndex(t, &models.QuotaProbeAttempt{}, quotaProbeAttemptKeyIndex)
+	assertMigrationIndex(t, &models.QuotaProbeAttempt{}, quotaProbeAttemptObjectPathIndex)
+	assertMigrationIndex(t, &models.QuotaProbeAttempt{}, quotaProbeAttemptAccountPollIndex)
+	assertMigrationIndex(t, &models.QuotaProbeAttempt{}, quotaProbeAttemptStateDueIndex)
+	assertNoMigrationIndex(t, &models.QuotaProbeAttempt{}, quotaProbeAttemptLegacyGenerationIndex)
+	assertMigrationIndexColumns(t, quotaProbeAttemptGenerationSlotIndex, []string{"quota_account_id", "recovery_generation", "scheduled_slot"})
+	assertMigrationIndexColumns(t, quotaProbeAttemptAccountPollIndex, []string{"quota_account_id", "recovery_generation", "state", "due_at"})
+	assertMigrationIndexColumns(t, quotaProbeAttemptStateDueIndex, []string{"state", "due_at"})
 
 	account := models.QuotaAccount{QuotaKey: "quota-key-1", RemoteName: "remote-1"}
 	if err := db.Create(&account).Error; err != nil {
 		t.Fatalf("create quota account: %v", err)
 	}
-	if account.BudgetBytes != models.DefaultRotationQuotaLimitBytes || !account.Enabled || account.WindowSeconds != 86400 {
-		t.Fatalf("quota account defaults = budget %d enabled %t window %d", account.BudgetBytes, account.Enabled, account.WindowSeconds)
+	if account.BudgetBytes != models.DefaultRotationQuotaLimitBytes || !account.Enabled || account.WindowSeconds != 86400 || account.RecoveryState != models.QuotaRecoveryStateAvailable || account.RecoveryGeneration != 0 {
+		t.Fatalf("quota account defaults = budget %d enabled %t window %d recovery %q generation %d", account.BudgetBytes, account.Enabled, account.WindowSeconds, account.RecoveryState, account.RecoveryGeneration)
+	}
+	due := time.Now().Add(time.Hour)
+	attempt := models.QuotaProbeAttempt{QuotaAccountID: account.ID, RecoveryGeneration: account.RecoveryGeneration, ScheduledSlot: 0, AttemptKey: models.QuotaProbeAttemptKey(account.ID, account.RecoveryGeneration, 0), ContractVersion: models.ProbeContractVersion, Phase: models.ProbePhaseClaimed, ObjectPath: ".probe-test-0", ExpectedBytes: models.ProbeExpectedBytes, QuotaKey: account.QuotaKey, ConfigIdentity: "/tmp/rclone.conf", RemoteName: account.RemoteName, DueAt: due}
+	if err := db.Create(&attempt).Error; err != nil {
+		t.Fatalf("create quota probe attempt: %v", err)
+	}
+	if attempt.State != models.ProbeAttemptStatePending || attempt.VerificationState != models.ProbeVerificationStatePending || attempt.CleanupState != models.ProbeCleanupStatePending {
+		t.Fatalf("quota probe attempt defaults = state %q verification %q cleanup %q", attempt.State, attempt.VerificationState, attempt.CleanupState)
+	}
+	slotOneKey := models.QuotaProbeAttemptKey(account.ID, account.RecoveryGeneration, 1)
+	if err := db.Create(&models.QuotaProbeAttempt{QuotaAccountID: account.ID, RecoveryGeneration: account.RecoveryGeneration, ScheduledSlot: 1, AttemptKey: slotOneKey, ContractVersion: models.ProbeContractVersion, Phase: models.ProbePhaseClaimed, ObjectPath: ".probe-test-1", ExpectedBytes: models.ProbeExpectedBytes, QuotaKey: account.QuotaKey, ConfigIdentity: "/tmp/rclone.conf", RemoteName: account.RemoteName, DueAt: due}).Error; err != nil {
+		t.Fatalf("different scheduled slot was rejected: %v", err)
+	}
+	if err := db.Create(&models.QuotaProbeAttempt{QuotaAccountID: account.ID, RecoveryGeneration: account.RecoveryGeneration, ScheduledSlot: 0, AttemptKey: "duplicate-slot", ContractVersion: models.ProbeContractVersion, Phase: models.ProbePhaseClaimed, ObjectPath: ".probe-test-duplicate-slot", ExpectedBytes: models.ProbeExpectedBytes, QuotaKey: account.QuotaKey, ConfigIdentity: "/tmp/rclone.conf", RemoteName: account.RemoteName, DueAt: due}).Error; err == nil {
+		t.Fatal("duplicate account-generation-slot probe attempt was accepted")
+	}
+	if err := db.Create(&models.QuotaProbeAttempt{QuotaAccountID: account.ID, RecoveryGeneration: account.RecoveryGeneration + 1, ScheduledSlot: 0, AttemptKey: models.QuotaProbeAttemptKey(account.ID, account.RecoveryGeneration+1, 0), ContractVersion: models.ProbeContractVersion, Phase: models.ProbePhaseClaimed, ObjectPath: ".probe-test-generation-1", ExpectedBytes: models.ProbeExpectedBytes, QuotaKey: account.QuotaKey, ConfigIdentity: "/tmp/rclone.conf", RemoteName: account.RemoteName, DueAt: due}).Error; err != nil {
+		t.Fatalf("matching slot in a different generation was rejected: %v", err)
+	}
+	if slotOneKey != models.QuotaProbeAttemptKey(account.ID, account.RecoveryGeneration, 1) {
+		t.Fatal("scheduled-slot attempt key was not deterministic")
+	}
+	if err := db.Create(&models.QuotaProbeAttempt{QuotaAccountID: account.ID, RecoveryGeneration: account.RecoveryGeneration + 2, ScheduledSlot: 2, AttemptKey: slotOneKey, ContractVersion: models.ProbeContractVersion, Phase: models.ProbePhaseClaimed, ObjectPath: ".probe-test-duplicate-key", ExpectedBytes: models.ProbeExpectedBytes, QuotaKey: account.QuotaKey, ConfigIdentity: "/tmp/rclone.conf", RemoteName: account.RemoteName, DueAt: due}).Error; err == nil {
+		t.Fatal("duplicate probe attempt key was accepted")
+	}
+	if err := db.Create(&models.QuotaProbeAttempt{QuotaAccountID: account.ID, RecoveryGeneration: account.RecoveryGeneration + 3, ScheduledSlot: 0, AttemptKey: "invalid-state", ContractVersion: models.ProbeContractVersion, Phase: models.ProbePhaseClaimed, ObjectPath: ".probe-test-invalid-state", ExpectedBytes: models.ProbeExpectedBytes, QuotaKey: account.QuotaKey, ConfigIdentity: "/tmp/rclone.conf", RemoteName: account.RemoteName, DueAt: due, State: "invalid"}).Error; err == nil {
+		t.Fatal("invalid quota probe attempt state was accepted")
 	}
 	if err := db.Create(&models.QuotaAccount{QuotaKey: "quota-key-1"}).Error; err == nil {
 		t.Fatal("duplicate quota key was accepted")
@@ -143,6 +190,239 @@ func TestRotationQuotaSchemaMigration(t *testing.T) {
 	}
 	if err := db.Create(&models.QuotaReservation{BatchFileID: 1000, IdempotencyKey: "reservation-negative-bytes", State: models.ReservationStateHeld, Bytes: -1}).Error; err == nil {
 		t.Fatal("negative reservation bytes were accepted")
+	}
+}
+
+func TestQuotaRecoveryBackfillsCurrentlyProviderBlockedAccounts(t *testing.T) {
+	dir := t.TempDir()
+	legacyDB, err := openMigrationTestDB(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacyDB.AutoMigrate(&models.QuotaAccount{}); err != nil {
+		t.Fatal(err)
+	}
+	blockedUntil := time.Now().Add(24 * time.Hour)
+	account := models.QuotaAccount{QuotaKey: "legacy-blocked", ProviderBlockedUntil: &blockedUntil}
+	if err := legacyDB.Create(&account).Error; err != nil {
+		t.Fatal(err)
+	}
+	legacySQL, _ := legacyDB.DB()
+	_ = legacySQL.Close()
+
+	before := time.Now()
+	if err := InitDB(dir); err != nil {
+		t.Fatalf("migrate legacy blocked account: %v", err)
+	}
+	stopMaintenance := maintenanceStop
+	t.Cleanup(func() {
+		if stopMaintenance != nil {
+			close(stopMaintenance)
+			if maintenanceStop == stopMaintenance {
+				maintenanceStop = nil
+			}
+		}
+		if db != nil {
+			if sqlDB, err := db.DB(); err == nil {
+				_ = sqlDB.Close()
+			}
+			db = nil
+		}
+	})
+
+	var migrated models.QuotaAccount
+	if err := db.Where("quota_key = ?", account.QuotaKey).First(&migrated).Error; err != nil {
+		t.Fatal(err)
+	}
+	if migrated.RecoveryState != models.QuotaRecoveryStateExhausted || migrated.RecoveryGeneration != 1 {
+		t.Fatalf("backfilled recovery state = %q generation %d", migrated.RecoveryState, migrated.RecoveryGeneration)
+	}
+	if migrated.FirstExhaustedAt == nil || migrated.FirstExhaustedAt.Before(before) || migrated.FirstExhaustedAt.After(time.Now()) {
+		t.Fatalf("backfilled first exhaustion = %v", migrated.FirstExhaustedAt)
+	}
+	if migrated.NextProbeAt == nil || migrated.NextProbeAt.Before(before) || migrated.NextProbeAt.After(time.Now()) || !migrated.NextProbeAt.Before(blockedUntil) {
+		t.Fatalf("backfilled next probe = %v, block until %v", migrated.NextProbeAt, blockedUntil)
+	}
+	firstExhaustedAt := *migrated.FirstExhaustedAt
+	firstProbeAt := *migrated.NextProbeAt
+	if err := backfillQuotaRecoveryState(db, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(&migrated, account.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if migrated.RecoveryGeneration != 1 || migrated.FirstExhaustedAt == nil || !migrated.FirstExhaustedAt.Equal(firstExhaustedAt) || migrated.NextProbeAt == nil || !migrated.NextProbeAt.Equal(firstProbeAt) {
+		t.Fatalf("backfill was not idempotent: %#v", migrated)
+	}
+
+	knownAt := time.Unix(123, 0)
+	repair := models.QuotaAccount{QuotaKey: "repair-missing-probe", RecoveryState: models.QuotaRecoveryStateExhausted, RecoveryGeneration: 7, FirstExhaustedAt: &knownAt}
+	if err := db.Create(&repair).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := backfillQuotaRecoveryState(db, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var repaired models.QuotaAccount
+	if err := db.First(&repaired, repair.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if repaired.RecoveryGeneration != 7 || repaired.FirstExhaustedAt == nil || !repaired.FirstExhaustedAt.Equal(knownAt) || repaired.NextProbeAt == nil || repaired.NextProbeAt.Before(time.Now().Add(-time.Second)) {
+		t.Fatalf("missing probe repair changed known recovery data: %#v", repaired)
+	}
+}
+
+type oldQuotaAccount struct {
+	ID                   uint   `gorm:"primaryKey"`
+	QuotaKey             string `gorm:"uniqueIndex"`
+	RemoteName           string
+	BudgetBytes          int64
+	WindowSeconds        int
+	ProviderBlockedUntil *time.Time
+	Enabled              bool
+}
+
+func (oldQuotaAccount) TableName() string { return "quota_accounts" }
+
+type oldQuotaProbeAttempt struct {
+	ID                   uint      `gorm:"primaryKey"`
+	QuotaAccountID       uint      `gorm:"not null;uniqueIndex:uq_quota_probe_attempts_account_generation"`
+	RecoveryGeneration   int64     `gorm:"not null;default:0;uniqueIndex:uq_quota_probe_attempts_account_generation"`
+	AttemptKey           string    `gorm:"not null;uniqueIndex:uq_quota_probe_attempts_attempt_key"`
+	QuotaKey             string    `gorm:"not null"`
+	ConfigIdentity       string    `gorm:"not null"`
+	RemoteName           string    `gorm:"not null"`
+	State                string    `gorm:"not null;default:'pending'"`
+	DueAt                time.Time `gorm:"not null"`
+	StartedAt            *time.Time
+	FinishedAt           *time.Time
+	LeaseToken           string
+	LeaseUntil           *time.Time
+	ProcessID            int
+	ProcessStartToken    string
+	ExitCode             *int
+	VerificationState    string `gorm:"not null;default:'pending'"`
+	VerificationEvidence string `gorm:"type:text"`
+	VerifiedAt           *time.Time
+	CleanupState         string `gorm:"not null;default:'pending'"`
+	CleanupEvidence      string `gorm:"type:text"`
+	CleanedAt            *time.Time
+	LastError            string `gorm:"type:text"`
+	ErrorEvidence        string `gorm:"type:text"`
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+}
+
+func (oldQuotaProbeAttempt) TableName() string { return "quota_probe_attempts" }
+
+func TestQuotaProbeAttemptUpgradesLegacyGenerationIndex(t *testing.T) {
+	dir := t.TempDir()
+	legacyDB, err := openMigrationTestDB(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacyDB.AutoMigrate(&oldQuotaProbeAttempt{}); err != nil {
+		t.Fatal(err)
+	}
+	due := time.Now().Add(time.Hour)
+	legacy := oldQuotaProbeAttempt{
+		QuotaAccountID: 7, RecoveryGeneration: 2, AttemptKey: "quota-probe:7:2", QuotaKey: "legacy-key",
+		ConfigIdentity: "/tmp/rclone.conf", RemoteName: "remote", DueAt: due,
+	}
+	if err := legacyDB.Create(&legacy).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !legacyDB.Migrator().HasIndex(&oldQuotaProbeAttempt{}, quotaProbeAttemptLegacyGenerationIndex) {
+		t.Fatal("legacy generation index was not created")
+	}
+	legacySQL, _ := legacyDB.DB()
+	_ = legacySQL.Close()
+
+	if err := InitDB(dir); err != nil {
+		t.Fatalf("upgrade legacy probe-attempt schema: %v", err)
+	}
+	stopMaintenance := maintenanceStop
+	t.Cleanup(func() {
+		if stopMaintenance != nil {
+			close(stopMaintenance)
+			if maintenanceStop == stopMaintenance {
+				maintenanceStop = nil
+			}
+		}
+		if db != nil {
+			if sqlDB, err := db.DB(); err == nil {
+				_ = sqlDB.Close()
+			}
+			db = nil
+		}
+	})
+
+	var upgraded models.QuotaProbeAttempt
+	if err := db.First(&upgraded, legacy.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if upgraded.ScheduledSlot != 0 || upgraded.AttemptKey != models.QuotaProbeAttemptKey(7, 2, 0) {
+		t.Fatalf("legacy attempt identity was not upgraded: %#v", upgraded)
+	}
+	assertNoMigrationIndex(t, &models.QuotaProbeAttempt{}, quotaProbeAttemptLegacyGenerationIndex)
+	assertMigrationIndex(t, &models.QuotaProbeAttempt{}, quotaProbeAttemptGenerationSlotIndex)
+
+	next := models.QuotaProbeAttempt{QuotaAccountID: 7, RecoveryGeneration: 2, ScheduledSlot: 1, AttemptKey: models.QuotaProbeAttemptKey(7, 2, 1), ContractVersion: models.ProbeContractVersion, Phase: models.ProbePhaseClaimed, ObjectPath: ".probe-upgrade-next", ExpectedBytes: models.ProbeExpectedBytes, QuotaKey: "legacy-key", ConfigIdentity: "/tmp/rclone.conf", RemoteName: "remote", DueAt: due}
+	if err := db.Create(&next).Error; err != nil {
+		t.Fatalf("different slot was rejected after upgrade: %v", err)
+	}
+	if err := prepareQuotaProbeAttemptMigration(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureQuotaProbeAttemptIndexes(db); err != nil {
+		t.Fatal(err)
+	}
+	assertNoMigrationIndex(t, &models.QuotaProbeAttempt{}, quotaProbeAttemptLegacyGenerationIndex)
+}
+
+func TestQuotaRecoveryMigratesExpiredLegacyAccount(t *testing.T) {
+	dir := t.TempDir()
+	legacyDB, err := openMigrationTestDB(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacyDB.AutoMigrate(&oldQuotaAccount{}); err != nil {
+		t.Fatal(err)
+	}
+	blockedUntil := time.Unix(100, 0)
+	legacy := oldQuotaAccount{QuotaKey: "expired-legacy", RemoteName: "remote", BudgetBytes: 100, WindowSeconds: 86400, ProviderBlockedUntil: &blockedUntil, Enabled: true}
+	if err := legacyDB.Create(&legacy).Error; err != nil {
+		t.Fatal(err)
+	}
+	legacySQL, _ := legacyDB.DB()
+	_ = legacySQL.Close()
+
+	before := time.Now()
+	if err := InitDB(dir); err != nil {
+		t.Fatalf("migrate expired legacy account: %v", err)
+	}
+	stopMaintenance := maintenanceStop
+	t.Cleanup(func() {
+		if stopMaintenance != nil {
+			close(stopMaintenance)
+			if maintenanceStop == stopMaintenance {
+				maintenanceStop = nil
+			}
+		}
+		if db != nil {
+			if sqlDB, err := db.DB(); err == nil {
+				_ = sqlDB.Close()
+			}
+			db = nil
+		}
+	})
+
+	var migrated models.QuotaAccount
+	if err := db.Where("quota_key = ?", legacy.QuotaKey).First(&migrated).Error; err != nil {
+		t.Fatal(err)
+	}
+	if migrated.RecoveryState != models.QuotaRecoveryStateExhausted || migrated.RecoveryGeneration != 1 || migrated.NextProbeAt == nil || migrated.NextProbeAt.Before(before) || migrated.NextProbeAt.After(time.Now()) {
+		t.Fatalf("expired legacy recovery state = %#v", migrated)
 	}
 }
 
@@ -491,5 +771,32 @@ func assertMigrationIndex(t *testing.T, model interface{}, name string) {
 	t.Helper()
 	if !db.Migrator().HasIndex(model, name) {
 		t.Fatalf("index %q is missing on %T", name, model)
+	}
+}
+
+func assertNoMigrationIndex(t *testing.T, model interface{}, name string) {
+	t.Helper()
+	if db.Migrator().HasIndex(model, name) {
+		t.Fatalf("obsolete index %q remains on %T", name, model)
+	}
+}
+
+func assertMigrationIndexColumns(t *testing.T, name string, want []string) {
+	t.Helper()
+	type indexColumn struct {
+		Seq  int    `gorm:"column:seqno"`
+		Name string `gorm:"column:name"`
+	}
+	var columns []indexColumn
+	if err := db.Raw("PRAGMA index_info(" + name + ")").Scan(&columns).Error; err != nil {
+		t.Fatalf("read index %q: %v", name, err)
+	}
+	if len(columns) != len(want) {
+		t.Fatalf("index %q columns = %#v, want %#v", name, columns, want)
+	}
+	for i, column := range columns {
+		if column.Seq != i || column.Name != want[i] {
+			t.Fatalf("index %q columns = %#v, want %#v", name, columns, want)
+		}
 	}
 }

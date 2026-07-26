@@ -477,6 +477,61 @@ func TestDispatcherUpsertsDefaultAndExplicitQuotaKeys(t *testing.T) {
 	}
 }
 
+func TestBlockedAccountCancelsOnlyUnstartedHeldWork(t *testing.T) {
+	db := dispatcherDB(t)
+	task, snapshot, config := dispatcherFixture(t, db, `["r1"]`)
+	account := models.QuotaAccount{QuotaKey: defaultQuotaKey(config, "r1"), RemoteName: "r1", ConfigIdentity: config, BudgetBytes: 100, WindowSeconds: 3600, Enabled: true}
+	if err := db.Create(&account).Error; err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Unix(1000, 0)
+	batch := models.RotationQuotaBatch{TaskID: task.ID, QuotaAccountID: account.ID, DestinationScope: models.DestinationScope(config, task.RemoteDir), DestinationRemote: "r1", TransferMode: models.TransferModeCopy, DestinationScopeVersion: 1, RcloneConfigPath: config, RequestKey: "blocked-held", RequestFingerprint: "blocked-held", DestinationPath: task.RemoteDir, State: models.BatchStateReserved, OwnerToken: testOwner, ReservedBytes: snapshot.SizeBytes}
+	if err := db.Create(&batch).Error; err != nil {
+		t.Fatal(err)
+	}
+	file := models.RotationQuotaBatchFile{BatchID: batch.ID, RelativePath: snapshot.RelativePath, SnapshotKey: snapshot.SnapshotKey, SizeBytes: snapshot.SizeBytes, State: models.BatchFileStateHeld}
+	if err := db.Create(&file).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.QuotaReservation{QuotaAccountID: account.ID, BatchID: batch.ID, BatchFileID: file.ID, Bytes: snapshot.SizeBytes, State: models.ReservationStateHeld, IdempotencyKey: "blocked-held", ExpiresAt: &expires}).Error; err != nil {
+		t.Fatal(err)
+	}
+	d := newDispatcher(db, &dispatchFakeExecutor{DB: db}, fixedScanner{})
+	if err := d.cancelBlockedHeld(batch.ID); err != nil {
+		t.Fatal(err)
+	}
+	var canceled models.RotationQuotaBatch
+	if err := db.First(&canceled, batch.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if canceled.State != models.BatchStateCanceled {
+		t.Fatalf("held batch state=%s", canceled.State)
+	}
+	var released models.QuotaReservation
+	if err := db.First(&released, "batch_id = ?", batch.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if released.State != models.ReservationStateReleased {
+		t.Fatalf("held reservation state=%s", released.State)
+	}
+
+	started := time.Unix(90, 0)
+	activeBatch := models.RotationQuotaBatch{TaskID: task.ID, QuotaAccountID: account.ID, DestinationScope: models.DestinationScope(config, "/active"), DestinationRemote: "r1", TransferMode: models.TransferModeCopy, DestinationScopeVersion: 1, RcloneConfigPath: config, RequestKey: "blocked-active", RequestFingerprint: "blocked-active", DestinationPath: "/active", State: models.BatchStateRunning, OwnerToken: strings.Repeat("b", 48), StartedAt: &started, ProcessID: 123}
+	if err := db.Create(&activeBatch).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := d.cancelBlockedHeld(activeBatch.ID); err != nil {
+		t.Fatal(err)
+	}
+	var retained models.RotationQuotaBatch
+	if err := db.First(&retained, activeBatch.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if retained.State != models.BatchStateRunning {
+		t.Fatalf("active batch was released: %s", retained.State)
+	}
+}
+
 func TestBudgetExhaustionLeavesPendingWakeWithoutMaintenanceOrDedupe(t *testing.T) {
 	db := dispatcherDB(t)
 	if err := db.AutoMigrate(&models.DestinationScopeMaintenance{}, &models.DestinationScopeCoordinator{}); err != nil {

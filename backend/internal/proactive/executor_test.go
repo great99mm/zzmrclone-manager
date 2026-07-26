@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -232,7 +233,7 @@ func TestExecRunnerTokenFailureUsesWaitAndReconcilesMarker(t *testing.T) {
 	if err := db.First(&stored, batch.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if stored.State != models.BatchStateUnknown || stored.LimitMarker == "" || stored.MarkerDetectedAt == nil {
+	if stored.State != models.BatchStateSucceeded || stored.LimitMarker == "" || stored.MarkerDetectedAt == nil {
 		t.Fatalf("batch=%#v", stored)
 	}
 	var account models.QuotaAccount
@@ -459,6 +460,58 @@ func TestBlockedAccountRetainsPlannedBatch(t *testing.T) {
 	}
 }
 
+func TestExhaustedRecoveryRetainsPlannedBatchAfterLegacyBlockExpires(t *testing.T) {
+	db := executionDB(t)
+	batch, _, _ := executionFixture(t, db, 8)
+	past := time.Unix(90, 0)
+	if err := db.Model(&models.QuotaAccount{}).Where("id = ?", batch.QuotaAccountID).Updates(map[string]interface{}{
+		"provider_blocked_until": past,
+		"recovery_state":         models.QuotaRecoveryStateExhausted,
+		"recovery_generation":    1,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{process: &fakeProcess{result: ProcessResult{PID: 46, ProcessStartToken: "46:1"}}}
+	err := (&Executor{DB: db, ManifestDir: t.TempDir(), Runner: runner, Now: func() time.Time { return time.Unix(100, 0) }}).RunBatch(context.Background(), batch.ID)
+	if !errors.Is(err, ErrAccountBlocked) {
+		t.Fatalf("exhausted account start error = %v", err)
+	}
+	var stored models.RotationQuotaBatch
+	if err := db.First(&stored, batch.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.State != models.BatchStatePlanned || runner.spec.SourceRoot != nil {
+		t.Fatalf("batch=%s runner=%#v", stored.State, runner.spec)
+	}
+}
+
+func TestToReconcilingPersistsMarkerAndExhaustionTogether(t *testing.T) {
+	db := executionDB(t)
+	batch, _, _ := executionFixture(t, db, 8)
+	lease := "atomic-marker-lease"
+	if err := db.Model(&models.RotationQuotaBatch{}).Where("id = ?", batch.ID).Updates(map[string]interface{}{"state": models.BatchStateRunning, "lease_token": lease}).Error; err != nil {
+		t.Fatal(err)
+	}
+	e := &Executor{DB: db, Now: func() time.Time { return time.Unix(100, 0) }}
+	if err := e.toReconciling(batch.ID, lease, ProcessResult{ExitCode: 1, Stderr: "drive upload limit exceeded"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var stored models.RotationQuotaBatch
+	if err := db.First(&stored, batch.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.State != models.BatchStateReconciling || stored.LimitMarker == "" || stored.MarkerDetectedAt == nil {
+		t.Fatalf("reconciling marker outcome = %#v", stored)
+	}
+	var account models.QuotaAccount
+	if err := db.First(&account, batch.QuotaAccountID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if account.RecoveryState != models.QuotaRecoveryStateExhausted || account.RecoveryGeneration != 1 || account.NextProbeAt == nil || !account.NextProbeAt.Equal(time.Unix(100, 0).Add(models.DefaultQuotaRecoveryProbeDelay)) {
+		t.Fatalf("atomic marker recovery outcome = %#v", account)
+	}
+}
+
 func TestUnknownSiblingBlocksSameDestinationScope(t *testing.T) {
 	db := executionDB(t)
 	batch, _, config := executionFixture(t, db, 8)
@@ -472,7 +525,7 @@ func TestUnknownSiblingBlocksSameDestinationScope(t *testing.T) {
 	}
 }
 
-func TestExecutorMismatchBecomesUnknownAndMarkerFreezesAccount(t *testing.T) {
+func TestExecutorVerifiedMarkerBatchBecomesTerminalAndFreezesAccount(t *testing.T) {
 	db := executionDB(t)
 	batch, file, _ := executionFixture(t, db, 8)
 	runner := &fakeRunner{process: &fakeProcess{result: ProcessResult{ExitCode: 1, PID: 43, ProcessStartToken: "43:1", Stderr: "drive upload limit exceeded"}}, object: RemoteObject{Path: file.RelativePath, Size: file.SizeBytes}}
@@ -484,7 +537,7 @@ func TestExecutorMismatchBecomesUnknownAndMarkerFreezesAccount(t *testing.T) {
 	if err := db.First(&stored, batch.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if stored.State != models.BatchStateUnknown {
+	if stored.State != models.BatchStateSucceeded {
 		t.Fatalf("batch state=%q", stored.State)
 	}
 	var storedFile models.RotationQuotaBatchFile
@@ -568,6 +621,49 @@ func TestMarkerDoesNotShortenLongerAccountBlock(t *testing.T) {
 	}
 	if !account.ProviderBlockedUntil.Equal(until) {
 		t.Fatalf("block shortened to %v", account.ProviderBlockedUntil)
+	}
+	if account.RecoveryState != models.QuotaRecoveryStateExhausted || account.RecoveryGeneration != 1 || account.FirstExhaustedAt == nil || !account.FirstExhaustedAt.Equal(time.Unix(100, 0)) {
+		t.Fatalf("recovery transition = state %q generation %d first %v", account.RecoveryState, account.RecoveryGeneration, account.FirstExhaustedAt)
+	}
+	if account.NextProbeAt == nil {
+		t.Fatal("first probe was not scheduled")
+	}
+	firstProbe := *account.NextProbeAt
+	if !firstProbe.Equal(time.Unix(100, 0).Add(models.DefaultQuotaRecoveryProbeDelay)) {
+		t.Fatalf("first probe = %v", account.NextProbeAt)
+	}
+	if err := e.freezeOnMarker(batch.ID, lease, ProcessResult{Stderr: "upload limit exceeded again"}); err != nil {
+		t.Fatal(err)
+	}
+	var repeated models.QuotaAccount
+	if err := db.First(&repeated, batch.QuotaAccountID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if repeated.RecoveryGeneration != 1 || repeated.FirstExhaustedAt == nil || !repeated.FirstExhaustedAt.Equal(*account.FirstExhaustedAt) || repeated.NextProbeAt == nil || !repeated.NextProbeAt.Equal(firstProbe) {
+		t.Fatalf("repeated marker changed recovery timing = %#v", repeated)
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 4)
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- e.freezeOnMarker(batch.ID, lease, ProcessResult{Stderr: "upload limit exceeded concurrently"})
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var concurrent models.QuotaAccount
+	if err := db.First(&concurrent, batch.QuotaAccountID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if concurrent.RecoveryGeneration != 1 || concurrent.NextProbeAt == nil || !concurrent.NextProbeAt.Equal(firstProbe) {
+		t.Fatalf("concurrent markers changed recovery timing = %#v", concurrent)
 	}
 }
 
@@ -653,7 +749,7 @@ func TestPersistProcessFailureStillRunsMarkerReconcile(t *testing.T) {
 	if err := db.First(&stored, batch.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if stored.State != models.BatchStateUnknown || stored.LimitMarker == "" {
+	if stored.State != models.BatchStateSucceeded || stored.LimitMarker == "" {
 		t.Fatalf("marker result=%#v", stored)
 	}
 	var committed models.RotationQuotaBatchFile
@@ -678,7 +774,7 @@ func TestPersistFailureProcessDoneStillFreezesMarker(t *testing.T) {
 	if err := db.First(&stored, batch.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if stored.State != models.BatchStateUnknown || stored.LimitMarker == "" {
+	if stored.State != models.BatchStateSucceeded || stored.LimitMarker == "" {
 		t.Fatalf("batch=%#v", stored)
 	}
 	var account models.QuotaAccount

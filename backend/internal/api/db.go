@@ -23,6 +23,15 @@ var (
 	maintenanceStop chan struct{}
 )
 
+const (
+	quotaProbeAttemptLegacyGenerationIndex = "uq_quota_probe_attempts_account_generation"
+	quotaProbeAttemptGenerationSlotIndex   = "uq_quota_probe_attempts_account_generation_slot"
+	quotaProbeAttemptKeyIndex              = "uq_quota_probe_attempts_attempt_key"
+	quotaProbeAttemptObjectPathIndex       = "uq_quota_probe_attempts_object_path"
+	quotaProbeAttemptAccountPollIndex      = "idx_quota_probe_attempts_account_state_due"
+	quotaProbeAttemptStateDueIndex         = "idx_quota_probe_attempts_state_due"
+)
+
 func InitDB(dataDir string) error {
 	os.MkdirAll(dataDir, 0755)
 
@@ -52,6 +61,9 @@ func InitDB(dataDir string) error {
 	sqlDB.SetMaxOpenConns(2)
 	sqlDB.SetMaxIdleConns(1)
 	sqlDB.SetConnMaxLifetime(time.Hour)
+	if err := prepareQuotaProbeAttemptMigration(db); err != nil {
+		return fmt.Errorf("failed to prepare quota probe attempt migration: %v", err)
+	}
 
 	// Auto migrate
 	err = db.AutoMigrate(
@@ -63,6 +75,7 @@ func InitDB(dataDir string) error {
 		&models.OpenlistConfig{},
 		&models.MountConfig{},
 		&models.QuotaAccount{},
+		&models.QuotaProbeAttempt{},
 		&models.RotationQuotaOversize{},
 		&models.RotationQuotaDirectoryAssignment{},
 		&models.RotationQuotaBatch{},
@@ -73,6 +86,12 @@ func InitDB(dataDir string) error {
 	)
 	if err != nil {
 		return fmt.Errorf("failed to migrate database: %v", err)
+	}
+	if err := ensureQuotaProbeAttemptIndexes(db); err != nil {
+		return fmt.Errorf("failed to upgrade quota probe attempt indexes: %v", err)
+	}
+	if err := backfillQuotaRecoveryState(db, time.Now()); err != nil {
+		return fmt.Errorf("failed to backfill quota recovery state: %v", err)
 	}
 	if err := validateQuotaLedgerMigration(db); err != nil {
 		return fmt.Errorf("quota ledger migration audit failed: %v", err)
@@ -143,6 +162,100 @@ func InitDB(dataDir string) error {
 	}()
 
 	return nil
+}
+
+// prepareQuotaProbeAttemptMigration upgrades the immediately preceding Phase
+// 1 table before AutoMigrate applies the non-null slot/key schema. SQLite
+// cannot add a non-null column to a populated table without a default.
+func prepareQuotaProbeAttemptMigration(database *gorm.DB) error {
+	if !database.Migrator().HasTable(&models.QuotaProbeAttempt{}) {
+		return nil
+	}
+	return database.Transaction(func(tx *gorm.DB) error {
+		columns := map[string]string{
+			"scheduled_slot":   "integer NOT NULL DEFAULT 0",
+			"attempt_key":      "text NOT NULL DEFAULT ''",
+			"contract_version": "integer NOT NULL DEFAULT 1",
+			"phase":            "text NOT NULL DEFAULT 'claimed'",
+			"object_path":      "text NOT NULL DEFAULT ''",
+			"expected_bytes":   "integer NOT NULL DEFAULT 1073741824",
+		}
+		for name, definition := range columns {
+			exists, err := sqliteColumnExists(tx, "quota_probe_attempts", name)
+			if err != nil {
+				return err
+			}
+			if !exists {
+				if err := tx.Exec(fmt.Sprintf("ALTER TABLE quota_probe_attempts ADD COLUMN %s %s", name, definition)).Error; err != nil {
+					return err
+				}
+			}
+		}
+
+		type legacyAttempt struct {
+			ID                 uint
+			QuotaAccountID     uint
+			RecoveryGeneration int64
+			ScheduledSlot      int64
+			ObjectPath         string
+		}
+		var attempts []legacyAttempt
+		if err := tx.Table("quota_probe_attempts").Select("id, quota_account_id, recovery_generation, scheduled_slot, object_path").Find(&attempts).Error; err != nil {
+			return err
+		}
+		for _, attempt := range attempts {
+			key := models.QuotaProbeAttemptKey(attempt.QuotaAccountID, attempt.RecoveryGeneration, attempt.ScheduledSlot)
+			updates := map[string]interface{}{"attempt_key": key}
+			if strings.TrimSpace(attempt.ObjectPath) == "" {
+				updates["object_path"] = fmt.Sprintf(".rclone-manager-probe-migrated-%d-%d-%d", attempt.QuotaAccountID, attempt.RecoveryGeneration, attempt.ScheduledSlot)
+			}
+			if err := tx.Table("quota_probe_attempts").Where("id = ?", attempt.ID).Updates(updates).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func ensureQuotaProbeAttemptIndexes(database *gorm.DB) error {
+	if !database.Migrator().HasTable(&models.QuotaProbeAttempt{}) {
+		return nil
+	}
+	if err := database.Exec("DROP INDEX IF EXISTS " + quotaProbeAttemptLegacyGenerationIndex).Error; err != nil {
+		return err
+	}
+	for _, name := range []string{quotaProbeAttemptGenerationSlotIndex, quotaProbeAttemptKeyIndex, quotaProbeAttemptObjectPathIndex, quotaProbeAttemptAccountPollIndex, quotaProbeAttemptStateDueIndex} {
+		if database.Migrator().HasIndex(&models.QuotaProbeAttempt{}, name) {
+			continue
+		}
+		if err := database.Migrator().CreateIndex(&models.QuotaProbeAttempt{}, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// backfillQuotaRecoveryState carries legacy provider blocks into the durable
+// recovery state. It is deliberately idempotent: only the available-to-
+// exhausted transition increments the generation, and the first probe is due
+// immediately rather than at the legacy block expiry.
+func backfillQuotaRecoveryState(database *gorm.DB, now time.Time) error {
+	result := database.Model(&models.QuotaAccount{}).
+		Where("provider_blocked_until IS NOT NULL AND (recovery_state IS NULL OR recovery_state <> ?)", models.QuotaRecoveryStateExhausted).
+		Updates(map[string]interface{}{
+			"recovery_state":      models.QuotaRecoveryStateExhausted,
+			"first_exhausted_at":  gorm.Expr("COALESCE(first_exhausted_at, ?)", now),
+			"recovery_generation": gorm.Expr("recovery_generation + 1"),
+			"next_probe_at":       now,
+			"probe_claim_token":   "",
+			"probe_claim_until":   nil,
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	return database.Model(&models.QuotaAccount{}).
+		Where("recovery_state = ? AND next_probe_at IS NULL", models.QuotaRecoveryStateExhausted).
+		Update("next_probe_at", now).Error
 }
 
 func disableLegacyAutoDedupe(database *gorm.DB) error {

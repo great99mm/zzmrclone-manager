@@ -197,7 +197,7 @@ func (e *Executor) startMoveIntent(batchID uint, token string) error {
 		if err := tx.First(&account, batch.QuotaAccountID).Error; err != nil {
 			return err
 		}
-		if !account.Enabled || (account.ProviderBlockedUntil != nil && account.ProviderBlockedUntil.After(e.now())) {
+		if models.IsUnavailableForProactiveTransfers(account, e.now()) {
 			return ErrAccountBlocked
 		}
 		var reservations []models.QuotaReservation
@@ -314,16 +314,7 @@ func (e *Executor) releaseMoveBeforeStart(batchID uint, token string, cause erro
 }
 
 func (e *Executor) finishMoveProcess(ctx context.Context, batch models.RotationQuotaBatch, files []models.RotationQuotaBatchFile, token string, quarantine *quota.MoveQuarantine, result ProcessResult, waitErr error, processErr error) error {
-	message := result.Stderr
-	if message == "" {
-		message = result.Stdout
-	}
-	if waitErr != nil {
-		message = message + ": " + waitErr.Error()
-	}
-	if err := e.retrySQLite(func() error {
-		return e.DB.Model(&models.RotationQuotaBatch{}).Where("id = ? AND lease_token = ? AND state = ?", batch.ID, token, models.BatchStateRunning).Updates(map[string]interface{}{"state": models.BatchStateReconciling, "exit_code": result.ExitCode, "last_error": message}).Error
-	}); err != nil {
+	if err := e.toReconciling(batch.ID, token, result, waitErr); err != nil {
 		return err
 	}
 	if err := e.reconcileMove(batch, files, token, quarantine); err != nil {

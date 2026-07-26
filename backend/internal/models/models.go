@@ -29,70 +29,96 @@ func IsValidLeaseToken(value string) bool { return IsValidOwnerToken(value) }
 const (
 	DefaultRotationQuotaLimitBytes int64 = 700 * 1024 * 1024 * 1024
 	DefaultRcloneConfigPath              = "/root/.config/rclone/rclone.conf"
+	DefaultQuotaRecoveryProbeDelay       = 30 * time.Minute
+	DefaultQuotaRecoveryClaimLease       = 5 * time.Minute
 
-	BatchStatePlanned                = "planned"
-	BatchStateReserved               = "reserved"
-	BatchStateRunning                = "running"
-	BatchStateUnknown                = "unknown"
-	BatchStateReconciling            = "reconciling"
-	BatchStateSucceeded              = "succeeded"
-	BatchStateFailed                 = "failed"
-	BatchStateCanceled               = "canceled"
-	BatchStateExpired                = "expired"
-	ReservationStateHeld             = "held"
-	ReservationStateActive           = "active"
-	ReservationStateCommitted        = "committed"
-	ReservationStateUnknown          = "unknown"
-	ReservationStateReleased         = "released"
-	ReservationStateExpired          = "expired"
-	BatchFileStateHeld               = "held"
-	BatchFileStateActive             = "active"
-	BatchFileStateVerified           = "verified"
-	BatchFileStateUnknown            = "unknown"
-	BatchFileStateFailed             = "failed"
-	BatchFileStateCommitted          = "committed"
-	TransferModeCopy                 = "copy"
-	TransferModeMove                 = "move"
-	CompletionEvidenceRemote         = "remote_verified"
-	CompletionEvidenceLocal          = "local_move"
-	ProactiveMoveSettingKey          = "proactive_move_enabled"
-	ProactiveMoveSettingMigrationKey = "proactive_move_enabled_phase3_initialized"
-	MoveHandoffVersion               = 1
-	MoveHandoffReady                 = "ready"
-	MoveHandoffQuarantined           = "quarantined"
-	MoveHandoffRestored              = "restored"
-	MoveHandoffMoved                 = "moved"
-	MoveHandoffUnknown               = "unknown"
-	MoveCompletionEvidenceVersion    = 1
-	MoveResolutionResolving          = "resolving"
-	MoveResolutionFrozen             = "frozen"
-	ReserveClassNoFiles              = "no_files"
-	ReserveClassReserved             = "reserved"
-	ReserveClassBudgetExhausted      = "budget_exhausted"
-	ReserveClassProviderBlocked      = "provider_blocked"
-	ReserveClassDisabled             = "disabled"
-	ReserveClassTaskCeiling          = "task_ceiling"
-	ReserveClassOversize             = "oversize"
-	ReserveClassNoFit                = "no_fit"
-	ReserveClassActive               = "active"
-	ReserveClassAccountBlocked       = "account_blocked"
-	ReserveClassUnknown              = "unknown"
-	ReserveClassFailed               = "failed"
-	MaintenanceStateExhausted        = "exhausted"
-	MaintenanceStateClaimed          = "claimed"
-	MaintenanceStateRunning          = "running"
-	MaintenanceStateSucceeded        = "succeeded"
-	MaintenanceStateFailed           = "failed"
-	MaintenanceStateUnknown          = "unknown"
-	MaintenanceStateClosed           = "closed"
-	MaintenanceReasonQuotaExhaustion = "quota_exhaustion"
-	MaintenanceReasonManualMerge     = "manual_merge"
-	DedupeStatePending               = "pending"
-	DedupeStateRunning               = "running"
-	DedupeStateSucceeded             = "succeeded"
-	DedupeStateFailed                = "failed"
-	DedupeStateUnknown               = "unknown"
-	DedupeStateClaimed               = "claimed"
+	BatchStatePlanned                      = "planned"
+	BatchStateReserved                     = "reserved"
+	BatchStateRunning                      = "running"
+	BatchStateUnknown                      = "unknown"
+	BatchStateReconciling                  = "reconciling"
+	BatchStateSucceeded                    = "succeeded"
+	BatchStateFailed                       = "failed"
+	BatchStateCanceled                     = "canceled"
+	BatchStateExpired                      = "expired"
+	ReservationStateHeld                   = "held"
+	ReservationStateActive                 = "active"
+	ReservationStateCommitted              = "committed"
+	ReservationStateUnknown                = "unknown"
+	ReservationStateReleased               = "released"
+	ReservationStateExpired                = "expired"
+	BatchFileStateHeld                     = "held"
+	BatchFileStateActive                   = "active"
+	BatchFileStateVerified                 = "verified"
+	BatchFileStateUnknown                  = "unknown"
+	BatchFileStateFailed                   = "failed"
+	BatchFileStateCommitted                = "committed"
+	TransferModeCopy                       = "copy"
+	TransferModeMove                       = "move"
+	CompletionEvidenceRemote               = "remote_verified"
+	CompletionEvidenceLocal                = "local_move"
+	ProactiveMoveSettingKey                = "proactive_move_enabled"
+	ProactiveMoveSettingMigrationKey       = "proactive_move_enabled_phase3_initialized"
+	MoveHandoffVersion                     = 1
+	MoveHandoffReady                       = "ready"
+	MoveHandoffQuarantined                 = "quarantined"
+	MoveHandoffRestored                    = "restored"
+	MoveHandoffMoved                       = "moved"
+	MoveHandoffUnknown                     = "unknown"
+	MoveCompletionEvidenceVersion          = 1
+	MoveResolutionResolving                = "resolving"
+	MoveResolutionFrozen                   = "frozen"
+	ReserveClassNoFiles                    = "no_files"
+	ReserveClassReserved                   = "reserved"
+	ReserveClassBudgetExhausted            = "budget_exhausted"
+	ReserveClassProviderBlocked            = "provider_blocked"
+	ReserveClassDisabled                   = "disabled"
+	ReserveClassTaskCeiling                = "task_ceiling"
+	ReserveClassOversize                   = "oversize"
+	ReserveClassNoFit                      = "no_fit"
+	ReserveClassActive                     = "active"
+	ReserveClassAccountBlocked             = "account_blocked"
+	ReserveClassUnknown                    = "unknown"
+	ReserveClassFailed                     = "failed"
+	MaintenanceStateExhausted              = "exhausted"
+	MaintenanceStateClaimed                = "claimed"
+	MaintenanceStateRunning                = "running"
+	MaintenanceStateSucceeded              = "succeeded"
+	MaintenanceStateFailed                 = "failed"
+	MaintenanceStateUnknown                = "unknown"
+	MaintenanceStateClosed                 = "closed"
+	MaintenanceReasonQuotaExhaustion       = "quota_exhaustion"
+	MaintenanceReasonManualMerge           = "manual_merge"
+	DedupeStatePending                     = "pending"
+	DedupeStateRunning                     = "running"
+	DedupeStateSucceeded                   = "succeeded"
+	DedupeStateFailed                      = "failed"
+	DedupeStateUnknown                     = "unknown"
+	DedupeStateClaimed                     = "claimed"
+	QuotaRecoveryStateAvailable            = "available"
+	QuotaRecoveryStateExhausted            = "exhausted"
+	ProbeAttemptStatePending               = "pending"
+	ProbeAttemptStateClaimed               = "claimed"
+	ProbeAttemptStateRunning               = "running"
+	ProbeAttemptStateSucceeded             = "succeeded"
+	ProbeAttemptStateFailed                = "failed"
+	ProbeAttemptStateUnknown               = "unknown"
+	ProbeAttemptStateCanceled              = "canceled"
+	ProbeVerificationStatePending          = "pending"
+	ProbeVerificationStateSucceeded        = "succeeded"
+	ProbeVerificationStateFailed           = "failed"
+	ProbeVerificationStateUnknown          = "unknown"
+	ProbeCleanupStatePending               = "pending"
+	ProbeCleanupStateSucceeded             = "succeeded"
+	ProbeCleanupStateFailed                = "failed"
+	ProbeCleanupStateUnknown               = "unknown"
+	ProbeContractVersion                   = 1
+	ProbePhaseClaimed                      = "claimed"
+	ProbePhaseUpload                       = "upload"
+	ProbePhaseVerify                       = "verify"
+	ProbePhaseCleanup                      = "cleanup"
+	ProbePhaseFinished                     = "finished"
+	ProbeExpectedBytes               int64 = 1 << 30
 )
 
 type DestinationScopeMaintenance struct {
@@ -398,6 +424,12 @@ type QuotaAccount struct {
 	BudgetBytes          int64      `json:"budget_bytes" gorm:"not null;default:751619276800;check:quota_account_budget_nonnegative,budget_bytes >= 0"`
 	WindowSeconds        int        `json:"window_seconds" gorm:"default:86400"`
 	ProviderBlockedUntil *time.Time `json:"provider_blocked_until"`
+	RecoveryState        string     `json:"recovery_state" gorm:"not null;default:'available';check:quota_account_recovery_state_valid,recovery_state IN ('available','exhausted')"`
+	FirstExhaustedAt     *time.Time `json:"first_exhausted_at"`
+	RecoveryGeneration   int64      `json:"recovery_generation" gorm:"not null;default:0;check:quota_account_recovery_generation_nonnegative,recovery_generation >= 0"`
+	NextProbeAt          *time.Time `json:"next_probe_at" gorm:"index"`
+	ProbeClaimToken      string     `json:"-"`
+	ProbeClaimUntil      *time.Time `json:"-" gorm:"index"`
 	Enabled              bool       `json:"enabled" gorm:"not null;default:true"`
 	// WindowStartedAt is anchored to the first moment the account's
 	// reservation usage reached zero. While non-nil, the next quota reset
@@ -406,6 +438,58 @@ type QuotaAccount struct {
 	WindowStartedAt *time.Time `json:"window_started_at"`
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+// IsUnavailableForProactiveTransfers is the single account-level gate for
+// proactive reservation and execution. ProviderBlockedUntil remains a legacy
+// temporary block, while exhausted recovery state is durable until a later
+// recovery probe clears it.
+func IsUnavailableForProactiveTransfers(account QuotaAccount, now time.Time) bool {
+	return !account.Enabled || account.RecoveryState == QuotaRecoveryStateExhausted ||
+		(account.ProviderBlockedUntil != nil && account.ProviderBlockedUntil.After(now))
+}
+
+// QuotaProbeAttemptKey returns the deterministic identity used by a future
+// probe creator to make account-generation creation idempotent.
+func QuotaProbeAttemptKey(accountID uint, generation, scheduledSlot int64) string {
+	return fmt.Sprintf("quota-probe:%d:%d:%d", accountID, generation, scheduledSlot)
+}
+
+// QuotaProbeAttempt is a durable future recovery-probe attempt. Its identity
+// fields are snapshots so later polling does not depend on mutable account or
+// task configuration.
+type QuotaProbeAttempt struct {
+	ID                   uint       `json:"id" gorm:"primaryKey"`
+	QuotaAccountID       uint       `json:"quota_account_id" gorm:"not null;uniqueIndex:uq_quota_probe_attempts_account_generation_slot,priority:1;index:idx_quota_probe_attempts_account_state_due,priority:1"`
+	RecoveryGeneration   int64      `json:"recovery_generation" gorm:"not null;default:0;check:quota_probe_attempt_generation_nonnegative,recovery_generation >= 0;uniqueIndex:uq_quota_probe_attempts_account_generation_slot,priority:2;index:idx_quota_probe_attempts_account_state_due,priority:2"`
+	ScheduledSlot        int64      `json:"scheduled_slot" gorm:"not null;default:0;check:quota_probe_attempt_scheduled_slot_nonnegative,scheduled_slot >= 0;uniqueIndex:uq_quota_probe_attempts_account_generation_slot,priority:3"`
+	AttemptKey           string     `json:"attempt_key" gorm:"not null;uniqueIndex:uq_quota_probe_attempts_attempt_key"`
+	ContractVersion      int        `json:"contract_version" gorm:"not null;default:1;check:quota_probe_attempt_contract_version_valid,contract_version = 1"`
+	Phase                string     `json:"phase" gorm:"not null;default:'claimed';check:quota_probe_attempt_phase_valid,phase IN ('claimed','upload','verify','cleanup','finished')"`
+	ObjectPath           string     `json:"object_path" gorm:"not null;uniqueIndex:uq_quota_probe_attempts_object_path;check:quota_probe_attempt_object_path_nonempty,object_path <> ''"`
+	ExpectedBytes        int64      `json:"expected_bytes" gorm:"not null;default:1073741824;check:quota_probe_attempt_expected_bytes_valid,expected_bytes = 1073741824"`
+	QuotaKey             string     `json:"quota_key" gorm:"not null"`
+	ConfigIdentity       string     `json:"config_identity" gorm:"not null"`
+	RemoteName           string     `json:"remote_name" gorm:"not null"`
+	State                string     `json:"state" gorm:"not null;default:'pending';check:quota_probe_attempt_state_valid,state IN ('pending','claimed','running','succeeded','failed','unknown','canceled');index:idx_quota_probe_attempts_account_state_due,priority:3;index:idx_quota_probe_attempts_state_due,priority:1"`
+	DueAt                time.Time  `json:"due_at" gorm:"not null;index:idx_quota_probe_attempts_account_state_due,priority:4;index:idx_quota_probe_attempts_state_due,priority:2"`
+	StartedAt            *time.Time `json:"started_at"`
+	FinishedAt           *time.Time `json:"finished_at"`
+	LeaseToken           string     `json:"-"`
+	LeaseUntil           *time.Time `json:"-" gorm:"index"`
+	ProcessID            int        `json:"-"`
+	ProcessStartToken    string     `json:"-"`
+	ExitCode             *int       `json:"-"`
+	VerificationState    string     `json:"verification_state" gorm:"not null;default:'pending';check:quota_probe_verification_state_valid,verification_state IN ('pending','succeeded','failed','unknown')"`
+	VerificationEvidence string     `json:"verification_evidence" gorm:"type:text"`
+	VerifiedAt           *time.Time `json:"verified_at"`
+	CleanupState         string     `json:"cleanup_state" gorm:"not null;default:'pending';check:quota_probe_cleanup_state_valid,cleanup_state IN ('pending','succeeded','failed','unknown')"`
+	CleanupEvidence      string     `json:"cleanup_evidence" gorm:"type:text"`
+	CleanedAt            *time.Time `json:"cleaned_at"`
+	LastError            string     `json:"last_error" gorm:"type:text"`
+	ErrorEvidence        string     `json:"error_evidence" gorm:"type:text"`
+	CreatedAt            time.Time  `json:"created_at"`
+	UpdatedAt            time.Time  `json:"updated_at"`
 }
 
 type RotationQuotaOversize struct {

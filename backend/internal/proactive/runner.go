@@ -137,7 +137,7 @@ func (r ExecRunner) StartMove(ctx context.Context, spec MoveSpec) (ProcessHandle
 	if binary == "" {
 		binary = "rclone"
 	}
-	cmd := exec.CommandContext(ctx, binary, "--config", spec.ConfigPath, "move", "--transfers", strconv.Itoa(normalizeTransfers(spec.Transfers)), "--files-from-raw", spec.ManifestPath, "--no-traverse", "--stats-log-level", "INFO", "/proc/self/fd/3", destination)
+	cmd := exec.CommandContext(ctx, binary, "--config", spec.ConfigPath, "move", "--transfers", strconv.Itoa(normalizeTransfers(spec.Transfers)), "--files-from-raw", spec.ManifestPath, "--no-traverse", "--drive-stop-on-upload-limit", "--stats-log-level", "INFO", "/proc/self/fd/3", destination)
 	cmd.ExtraFiles = []*os.File{spec.SourceRoot}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr

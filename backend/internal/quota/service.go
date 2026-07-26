@@ -23,6 +23,7 @@ var (
 	ErrIdempotencyConflict    = errors.New("request idempotency key was reused with a different fingerprint")
 	ErrDestinationScopePaused = errors.New("destination scope is paused for maintenance")
 	ErrCoordinatorConflict    = errors.New("destination scope coordinator is owned")
+	ErrHeldBatchNotSafe       = errors.New("quota batch is not fully held and unstarted")
 )
 
 type ConfigResolver func(raw string) (string, error)
@@ -514,7 +515,7 @@ func classifyReserveOutcome(pending []LocalSnapshot, selected map[string][]Local
 				continue
 			}
 			enabled++
-			if account.ProviderBlockedUntil != nil && account.ProviderBlockedUntil.After(now) {
+			if models.IsUnavailableForProactiveTransfers(account, now) {
 				blocked++
 				continue
 			}
@@ -537,7 +538,7 @@ func classifyReserveOutcome(pending []LocalSnapshot, selected map[string][]Local
 		for _, snapshot := range pending {
 			fits := false
 			for _, account := range accounts {
-				if account.Enabled && (account.ProviderBlockedUntil == nil || !account.ProviderBlockedUntil.After(now)) && snapshot.SizeBytes <= account.BudgetBytes && snapshot.SizeBytes <= taskLimit {
+				if !models.IsUnavailableForProactiveTransfers(account, now) && snapshot.SizeBytes <= account.BudgetBytes && snapshot.SizeBytes <= taskLimit {
 					fits = true
 				}
 			}
@@ -642,74 +643,120 @@ func (s *Service) ReleaseHeldBatch(batchID uint) error {
 }
 
 func (s *Service) releaseHeldAttempt(batchID uint) error {
-	now := time.Now
+	now := time.Now()
 	if s.Now != nil {
-		now = s.Now
+		now = s.Now()
 	}
 	return s.DB.Transaction(func(tx *gorm.DB) error {
-		var batch models.RotationQuotaBatch
-		if err := tx.First(&batch, batchID).Error; err != nil {
-			return err
-		}
-		if batch.StartedAt != nil || batch.ProcessID != 0 || (batch.State != models.BatchStateReserved && batch.State != models.BatchStatePlanned) {
-			return fmt.Errorf("batch %d is not an unstarted held batch", batchID)
-		}
-		var account models.QuotaAccount
-		if err := tx.First(&account, batch.QuotaAccountID).Error; err != nil {
-			return err
-		}
-		if err := validateAccounts([]models.QuotaAccount{account}); err != nil {
-			return err
-		}
-		result := tx.Model(&models.QuotaAccount{}).Where("id = ?", account.ID).UpdateColumn("updated_at", gorm.Expr("updated_at"))
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != 1 {
-			return fmt.Errorf("quota account %d disappeared while acquiring writer lock", account.ID)
-		}
-		if err := tx.First(&account, batch.QuotaAccountID).Error; err != nil {
-			return err
-		}
-		if err := validateAccounts([]models.QuotaAccount{account}); err != nil {
-			return err
-		}
-		var reservations []models.QuotaReservation
-		if err := tx.Where("batch_id = ?", batchID).Find(&reservations).Error; err != nil {
-			return err
-		}
-		if len(reservations) == 0 {
-			return fmt.Errorf("batch %d has no reservations", batchID)
-		}
-		for _, reservation := range reservations {
-			if reservation.State != models.ReservationStateHeld || reservation.QuotaAccountID != batch.QuotaAccountID {
-				return fmt.Errorf("batch %d has a non-held reservation", batchID)
-			}
-		}
-		transactionNow := now()
-		result = tx.Model(&models.QuotaReservation{}).Where("batch_id = ? AND state = ?", batchID, models.ReservationStateHeld).Updates(map[string]interface{}{
-			"state": models.ReservationStateReleased, "released_at": transactionNow,
-		})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != int64(len(reservations)) {
-			return fmt.Errorf("batch %d reservations changed while releasing", batchID)
-		}
-		result = tx.Model(&models.RotationQuotaBatch{}).Where("id = ? AND state IN ? AND started_at IS NULL AND process_id = 0", batchID, []string{models.BatchStatePlanned, models.BatchStateReserved}).Updates(map[string]interface{}{
-			"state": models.BatchStateCanceled, "finished_at": transactionNow,
-		})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != 1 {
-			return fmt.Errorf("batch %d changed while releasing", batchID)
-		}
-		if err := ReconcileAccountWindowAnchor(tx, batch.QuotaAccountID, transactionNow); err != nil {
-			return err
-		}
-		return nil
+		return releaseHeldBatchTx(tx, batchID, now)
 	})
+}
+
+// ReleaseHeldBatchesForAccount releases only batches that are provably safe
+// to discard before a recovery probe. It intentionally leaves started,
+// unknown, or inconsistent work untouched so the caller can keep the account
+// blocked after its final recheck.
+func ReleaseHeldBatchesForAccount(tx *gorm.DB, accountID uint, now time.Time) error {
+	if tx == nil {
+		return errors.New("quota transaction is required")
+	}
+	var batches []models.RotationQuotaBatch
+	if err := tx.Where("quota_account_id = ? AND state IN ?", accountID, []string{models.BatchStateReserved, models.BatchStatePlanned}).Order("id ASC").Find(&batches).Error; err != nil {
+		return err
+	}
+	for _, batch := range batches {
+		err := releaseHeldBatchTx(tx, batch.ID, now)
+		if errors.Is(err, ErrHeldBatchNotSafe) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func releaseHeldBatchTx(tx *gorm.DB, batchID uint, now time.Time) error {
+	var batch models.RotationQuotaBatch
+	if err := tx.First(&batch, batchID).Error; err != nil {
+		return err
+	}
+	if batch.StartedAt != nil || batch.ProcessID != 0 || (batch.State != models.BatchStateReserved && batch.State != models.BatchStatePlanned) {
+		return fmt.Errorf("batch %d: %w", batchID, ErrHeldBatchNotSafe)
+	}
+	var account models.QuotaAccount
+	if err := tx.First(&account, batch.QuotaAccountID).Error; err != nil {
+		return err
+	}
+	if err := validateAccounts([]models.QuotaAccount{account}); err != nil {
+		return err
+	}
+	result := tx.Model(&models.QuotaAccount{}).Where("id = ?", account.ID).UpdateColumn("updated_at", gorm.Expr("updated_at"))
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("quota account %d disappeared while acquiring writer lock", account.ID)
+	}
+	var files []models.RotationQuotaBatchFile
+	if err := tx.Where("batch_id = ?", batchID).Find(&files).Error; err != nil {
+		return err
+	}
+	var reservations []models.QuotaReservation
+	if err := tx.Where("batch_id = ?", batchID).Find(&reservations).Error; err != nil {
+		return err
+	}
+	if len(files) == 0 || len(reservations) == 0 || len(files) != len(reservations) {
+		return fmt.Errorf("batch %d: %w", batchID, ErrHeldBatchNotSafe)
+	}
+	fileIDs := make(map[uint]struct{}, len(files))
+	for _, file := range files {
+		if file.State != models.BatchFileStateHeld {
+			return fmt.Errorf("batch %d: %w", batchID, ErrHeldBatchNotSafe)
+		}
+		fileIDs[file.ID] = struct{}{}
+	}
+	reservationFileIDs := make(map[uint]struct{}, len(reservations))
+	for _, reservation := range reservations {
+		if reservation.State != models.ReservationStateHeld || reservation.QuotaAccountID != batch.QuotaAccountID {
+			return fmt.Errorf("batch %d: %w", batchID, ErrHeldBatchNotSafe)
+		}
+		if _, ok := fileIDs[reservation.BatchFileID]; !ok {
+			return fmt.Errorf("batch %d: %w", batchID, ErrHeldBatchNotSafe)
+		}
+		if _, duplicate := reservationFileIDs[reservation.BatchFileID]; duplicate {
+			return fmt.Errorf("batch %d: %w", batchID, ErrHeldBatchNotSafe)
+		}
+		reservationFileIDs[reservation.BatchFileID] = struct{}{}
+	}
+	result = tx.Model(&models.QuotaReservation{}).Where("batch_id = ? AND state = ?", batchID, models.ReservationStateHeld).Updates(map[string]interface{}{
+		"state": models.ReservationStateReleased, "released_at": now,
+	})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != int64(len(reservations)) {
+		return fmt.Errorf("batch %d reservations changed while releasing", batchID)
+	}
+	result = tx.Model(&models.RotationQuotaBatchFile{}).Where("batch_id = ? AND state = ?", batchID, models.BatchFileStateHeld).Updates(map[string]interface{}{
+		"state": models.BatchFileStateFailed, "last_error": "released before start by quota recovery probe",
+	})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != int64(len(files)) {
+		return fmt.Errorf("batch %d files changed while releasing", batchID)
+	}
+	result = tx.Model(&models.RotationQuotaBatch{}).Where("id = ? AND state IN ? AND started_at IS NULL AND process_id = 0", batchID, []string{models.BatchStatePlanned, models.BatchStateReserved}).Updates(map[string]interface{}{
+		"state": models.BatchStateCanceled, "finished_at": now,
+	})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("batch %d changed while releasing", batchID)
+	}
+	return ReconcileAccountWindowAnchor(tx, batch.QuotaAccountID, now)
 }
 
 func (s *Service) generateToken() string {
@@ -1003,7 +1050,7 @@ func packSnapshots(snapshots []LocalSnapshot, remotes []string, keys map[string]
 		}
 		for _, remote := range candidateRemotes {
 			account := byKey[keys[remote]]
-			if !account.Enabled || (account.ProviderBlockedUntil != nil && account.ProviderBlockedUntil.After(now)) {
+			if models.IsUnavailableForProactiveTransfers(account, now) {
 				continue
 			}
 			if counts[remote] >= batchFiles {
@@ -1101,4 +1148,15 @@ func ReconcileAccountWindowAnchor(tx *gorm.DB, accountID uint, now time.Time) er
 	default:
 		return nil
 	}
+}
+
+// EffectiveAccountUsage returns current ledger usage for one account. It is
+// exported for durable recovery transactions that must prove a logical reset
+// left no active quota usage before reopening an account.
+func EffectiveAccountUsage(tx *gorm.DB, accountID uint, now time.Time) (int64, error) {
+	usage, err := accountUsage(tx, []uint{accountID}, now)
+	if err != nil {
+		return 0, err
+	}
+	return usage[accountID], nil
 }

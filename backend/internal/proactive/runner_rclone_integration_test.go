@@ -94,6 +94,9 @@ func TestExecRunnerMoveLocalAliasNestedManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	commandLog := strings.ToLower(string(log))
+	if !strings.Contains(commandLog, "--drive-stop-on-upload-limit") {
+		t.Fatalf("move did not include upload-limit stop flag: %s", commandLog)
+	}
 	for _, forbidden := range []string{"lsjson", "list", "lsf", "hash", "size"} {
 		if strings.Contains(commandLog, forbidden) {
 			t.Fatalf("move invoked forbidden remote observation %q: %s", forbidden, commandLog)

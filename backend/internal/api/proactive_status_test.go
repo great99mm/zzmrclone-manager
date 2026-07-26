@@ -653,3 +653,29 @@ func TestProactiveStatusTreatsProviderBlockAsExhaustedUntilReset(t *testing.T) {
 		t.Fatalf("blocked account did not project empty quota and provider reset: %#v", accountStatus)
 	}
 }
+
+func TestProactiveStatusKeepsRecoveryExhaustionAfterLegacyBlockExpires(t *testing.T) {
+	database := proactiveStatusTestDB(t)
+	task := models.Task{ID: 1, Enabled: true, TaskType: "rotation", RotationStrategy: "proactive_quota", RotationRemotes: `["remote"]`, RotationQuotaKeys: `{"remote":"recovery-key"}`}
+	if err := database.Create(&task).Error; err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-time.Hour)
+	nextProbe := time.Now().Add(30 * time.Minute)
+	account := models.QuotaAccount{QuotaKey: "recovery-key", RemoteName: "remote", BudgetBytes: 100, WindowSeconds: 86400, Enabled: true, ProviderBlockedUntil: &past, RecoveryState: models.QuotaRecoveryStateExhausted, RecoveryGeneration: 3, FirstExhaustedAt: &past, NextProbeAt: &nextProbe}
+	if err := database.Create(&account).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	code, body := callProactiveStatus(t, database, 1)
+	if code != http.StatusOK {
+		t.Fatalf("status failed: %d %#v", code, body)
+	}
+	if body["all_accounts_exhausted"] != true || body["next_quota_reset_at"] == nil {
+		t.Fatalf("recovery-exhausted account was not projected as blocked: %#v", body)
+	}
+	accountStatus := body["accounts"].([]interface{})[0].(map[string]interface{})
+	if accountStatus["recovery_state"] != models.QuotaRecoveryStateExhausted || accountStatus["remaining_bytes"] != float64(0) || accountStatus["next_probe_at"] == nil || accountStatus["next_reset_at"] == nil {
+		t.Fatalf("recovery exhaustion projection contradicted gates: %#v", accountStatus)
+	}
+}

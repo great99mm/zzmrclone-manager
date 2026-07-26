@@ -37,6 +37,10 @@ type proactiveAccountStatus struct {
 	RemainingBytes       *int64     `json:"remaining_bytes"`
 	UploadingBytes       *int64     `json:"uploading_bytes"`
 	ProviderBlockedUntil *time.Time `json:"provider_blocked_until"`
+	RecoveryState        string     `json:"recovery_state"`
+	RecoveryGeneration   *int64     `json:"recovery_generation"`
+	FirstExhaustedAt     *time.Time `json:"first_exhausted_at"`
+	NextProbeAt          *time.Time `json:"next_probe_at"`
 	Enabled              *bool      `json:"enabled"`
 	// WindowStartedAt is the first moment the account's reservation usage
 	// hit zero. While non-nil, the next quota reset is WindowStartedAt +
@@ -310,17 +314,28 @@ func getProactiveStatus(c *gin.Context) {
 			totalReserved := r + up
 			remaining := budget - u - totalReserved
 			providerBlocked := account.ProviderBlockedUntil != nil && account.ProviderBlockedUntil.After(now)
+			recoveryExhausted := account.RecoveryState == models.QuotaRecoveryStateExhausted
 			binding.BudgetBytes, binding.WindowSeconds, binding.Enabled = &budget, &window, &enabled
 			binding.UsedBytes, binding.ActiveReservedBytes = &u, &totalReserved
 			binding.UploadingBytes = &up
 			binding.ProviderBlockedUntil = account.ProviderBlockedUntil
+			binding.RecoveryState = account.RecoveryState
+			binding.RecoveryGeneration = &account.RecoveryGeneration
+			binding.FirstExhaustedAt = account.FirstExhaustedAt
+			binding.NextProbeAt = account.NextProbeAt
 			binding.WindowStartedAt = account.WindowStartedAt
-			if providerBlocked {
+			if recoveryExhausted || providerBlocked {
 				// Provider-reported quota exhaustion overrides local ledger headroom
-				// until the provider's advertised reset time.
+				// until recovery state is cleared by a later probe or the provider's
+				// advertised reset time.
 				remaining = 0
-				reset := *account.ProviderBlockedUntil
-				binding.NextResetAt = &reset
+				if recoveryExhausted && account.NextProbeAt != nil && account.NextProbeAt.After(now) {
+					reset := *account.NextProbeAt
+					binding.NextResetAt = &reset
+				} else if providerBlocked {
+					reset := *account.ProviderBlockedUntil
+					binding.NextResetAt = &reset
+				}
 			} else if account.WindowStartedAt != nil && window > 0 {
 				reset := account.WindowStartedAt.Add(time.Duration(window) * time.Second)
 				binding.NextResetAt = &reset
@@ -335,7 +350,7 @@ func getProactiveStatus(c *gin.Context) {
 			// account whose first reserve is in-flight but has not yet
 			// committed is NOT exhausted — the user just hasn't run any
 			// transfers yet, so remaining still equals the full budget.
-			exhausted := enabled && budget > 0 && (providerBlocked || remaining <= 0)
+			exhausted := enabled && budget > 0 && (recoveryExhausted || providerBlocked || remaining <= 0)
 			if !exhausted {
 				allExhausted = false
 			}

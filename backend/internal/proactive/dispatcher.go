@@ -1136,21 +1136,31 @@ func (d *Dispatcher) executeGroup(ctx context.Context, taskID uint, requestKey s
 			return nil
 		}
 
-		errs := make(chan error, len(candidates))
+		type batchExecutionResult struct {
+			batchID uint
+			err     error
+		}
+		results := make(chan batchExecutionResult, len(candidates))
 		var wg sync.WaitGroup
 		for _, batch := range candidates {
 			wg.Add(1)
 			go func(batchID uint) {
 				defer wg.Done()
-				errs <- d.Executor.RunBatch(ctx, batchID)
+				results <- batchExecutionResult{batchID: batchID, err: d.Executor.RunBatch(ctx, batchID)}
 			}(batch.ID)
 		}
 		wg.Wait()
-		close(errs)
-		for err := range errs {
-			if err != nil {
-				return err
+		close(results)
+		for result := range results {
+			if result.err == nil {
+				continue
 			}
+			if errors.Is(result.err, ErrAccountBlocked) {
+				if err := d.cancelBlockedHeld(result.batchID); err != nil {
+					return errors.Join(result.err, err)
+				}
+			}
+			return result.err
 		}
 		for _, batch := range candidates {
 			var current models.RotationQuotaBatch
@@ -1169,6 +1179,17 @@ func (d *Dispatcher) executeGroup(ctx context.Context, taskID uint, requestKey s
 			return nil
 		}
 	}
+}
+
+// cancelBlockedHeld releases only work that has not crossed the durable start
+// intent. ReleaseHeldBatch rechecks the same pre-start predicates in its
+// transaction, so active or unknown work is never released by this path.
+func (d *Dispatcher) cancelBlockedHeld(batchID uint) error {
+	err := d.Quota.ReleaseHeldBatch(batchID)
+	if err == nil || errors.Is(err, quota.ErrHeldBatchNotSafe) || strings.Contains(strings.ToLower(err.Error()), "not an unstarted held batch") {
+		return nil
+	}
+	return err
 }
 
 func (d *Dispatcher) finishPauseIfRequested(taskID uint) {

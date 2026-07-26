@@ -37,6 +37,7 @@ import (
 var (
 	executor            *rclone.Executor
 	proactiveDispatcher *proactive.Dispatcher
+	probeService        *proactive.ProbeService
 	taskRunner          *taskdispatch.TaskDispatcher
 	wakeConsumer        *taskdispatch.WakeConsumer
 	sched               *scheduler.Scheduler
@@ -91,6 +92,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	quotaService := &quota.Service{DB: db, MoveEnabled: proactiveMoveEnabled}
 	proactiveExecutor := &proactive.Executor{DB: db, ManifestDir: filepath.Join(cfg.DataDir, "manifests"), Runner: proactive.ExecRunner{}, Manifest: proactive.ManifestWriter{}, MoveEnabled: proactiveMoveEnabled, ConfigResolver: quotaService.ResolveConfigPath}
 	proactiveDispatcher = &proactive.Dispatcher{DB: db, Quota: quotaService, Executor: proactiveExecutor, Inspector: proactive.LinuxProcessInspector{}, ManagerDataDir: cfg.DataDir, MoveEnabled: proactiveMoveEnabled, ConfigResolver: quotaService.ResolveConfigPath}
+	probeService = &proactive.ProbeService{DB: db, Runner: proactive.ExecRunner{}, Inspector: proactive.LinuxProcessInspector{}, ConfigResolver: quotaService.ResolveConfigPath}
 	taskRunner = taskdispatch.New(db, executor, proactiveDispatcher)
 	if err := proactiveDispatcher.Recover(context.Background()); err != nil {
 		panic(err)
@@ -100,6 +102,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	}
 	wakeConsumer = &taskdispatch.WakeConsumer{DB: db, Runner: taskRunner}
 	wakeConsumer.Start()
+	probeService.Start()
 
 	// Scheduler and watcher register only after migration and recovery succeed.
 	sched = scheduler.NewScheduler(taskRunner)
@@ -237,6 +240,20 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	router.GET("/ws", hub.HandleWebSocket)
 
 	return router
+}
+
+// ShutdownBackgroundServices stops durable consumers before the HTTP server
+// exits, allowing an in-flight quota probe to cancel its child process.
+func ShutdownBackgroundServices() {
+	if wakeConsumer != nil {
+		wakeConsumer.Stop()
+	}
+	if probeService != nil {
+		probeService.Stop()
+	}
+	if sched != nil {
+		sched.Stop()
+	}
 }
 
 // requireStrictTokenOrSession protects mutation endpoints even when the
