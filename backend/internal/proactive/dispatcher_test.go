@@ -629,7 +629,9 @@ func TestBudgetExhaustionLeavesPendingWakeWithoutMaintenanceOrDedupe(t *testing.
 	if err := db.First(&stored, task.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if !stored.RotationRescanPending || stored.RotationQuotaWakeAt == nil || !stored.RotationQuotaWakeAt.Equal(time.Unix(100, 0).Add(24*time.Hour)) {
+	// Legacy v1 expiry remains the upper bound for the migrated rolling row.
+	wantWake := expires
+	if !stored.RotationRescanPending || stored.RotationQuotaWakeAt == nil || !stored.RotationQuotaWakeAt.Equal(wantWake) {
 		t.Fatalf("budget exhaustion did not preserve pending ledger wake: %#v", stored)
 	}
 }
@@ -792,12 +794,12 @@ type recordingWake struct {
 
 func (w *recordingWake) ScheduleWake(id uint, at time.Time) { w.taskID = id; w.at = at }
 
-func TestDispatcherTemporaryNoFitPersistsSharedWindowWake(t *testing.T) {
+func TestDispatcherTemporaryNoFitPersistsRollingProviderWake(t *testing.T) {
 	db := dispatcherDB(t)
 	task, snapshot, config := dispatcherFixture(t, db, "[\"r1\"]")
-	anchor := time.Unix(100, 0)
-	wakeAt := anchor.Add(24 * time.Hour)
-	account := models.QuotaAccount{QuotaKey: defaultQuotaKey(config, "r1"), BudgetBytes: 100, WindowSeconds: 86400, Enabled: true, WindowStartedAt: &anchor, ProviderBlockedUntil: &wakeAt}
+	wakeAt := time.Unix(100, 0).Add(24 * time.Hour)
+	account := models.QuotaAccount{QuotaKey: defaultQuotaKey(config, "r1"), BudgetBytes: 100, WindowSeconds: models.DefaultQuotaWindowSeconds, Enabled: true, QuotaPolicyVersion: models.RollingQuotaPolicyVersion, ProviderBlockedUntil: &wakeAt}
+	account.ProviderBlockedUntil = &wakeAt
 	if err := db.Create(&account).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -812,18 +814,16 @@ func TestDispatcherTemporaryNoFitPersistsSharedWindowWake(t *testing.T) {
 	if err := db.First(&stored, task.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	want := anchor.Add(24 * time.Hour)
-	if stored.RotationQuotaWakeAt == nil || !stored.RotationQuotaWakeAt.Equal(want) || !wake.at.Equal(want) {
+	if stored.RotationQuotaWakeAt == nil || !stored.RotationQuotaWakeAt.Equal(wakeAt) || !wake.at.Equal(wakeAt) {
 		t.Fatalf("task=%#v wake=%#v", stored, wake)
 	}
 }
 
-func TestDispatcherWakeUsesSharedWindowForHeldReservations(t *testing.T) {
+func TestDispatcherWakeUsesHeldReservationRecoveryExpiry(t *testing.T) {
 	db := dispatcherDB(t)
 	task, snapshot, config := dispatcherFixture(t, db, "[\"r1\"]")
-	anchor := time.Unix(100, 0)
-	wakeAt := anchor.Add(24 * time.Hour)
-	account := models.QuotaAccount{QuotaKey: defaultQuotaKey(config, "r1"), BudgetBytes: 100, WindowSeconds: 86400, Enabled: true, WindowStartedAt: &anchor}
+	wakeAt := time.Unix(100, 0).Add(time.Hour)
+	account := models.QuotaAccount{QuotaKey: defaultQuotaKey(config, "r1"), BudgetBytes: 100, WindowSeconds: models.DefaultQuotaWindowSeconds, Enabled: true, QuotaPolicyVersion: models.RollingQuotaPolicyVersion}
 	if err := db.Create(&account).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -1121,17 +1121,17 @@ func TestRecoveryInspectorFailureMarksStartedBatchUnknownWithoutReconcile(t *tes
 	}
 }
 
-func TestComputeWakeUsesSharedAccountWindowBoundary(t *testing.T) {
+func TestComputeWakeUsesEarliestRollingAccountRecovery(t *testing.T) {
 	db := dispatcherDB(t)
 	if err := db.AutoMigrate(&models.QuotaAccount{}); err != nil {
 		t.Fatal(err)
 	}
-	exhaustedAt := time.Unix(500, 0)
-	anchor := models.QuotaAccount{QuotaKey: "drive", RemoteName: "drive", BudgetBytes: models.DefaultRotationQuotaLimitBytes, WindowSeconds: 86400, Enabled: true, WindowStartedAt: &exhaustedAt}
+	wakeAt := time.Unix(1100, 0)
+	anchor := models.QuotaAccount{QuotaKey: "drive", RemoteName: "drive", BudgetBytes: models.DefaultRotationQuotaLimitBytes, WindowSeconds: models.DefaultQuotaWindowSeconds, Enabled: true, QuotaPolicyVersion: models.RollingQuotaPolicyVersion, CampaignCooldownUntil: &wakeAt}
 	if err := db.Create(&anchor).Error; err != nil {
 		t.Fatal(err)
 	}
-	other := models.QuotaAccount{QuotaKey: "team-1", RemoteName: "team-1", BudgetBytes: models.DefaultRotationQuotaLimitBytes, WindowSeconds: 86400, Enabled: true, WindowStartedAt: &exhaustedAt}
+	other := models.QuotaAccount{QuotaKey: "team-1", RemoteName: "team-1", BudgetBytes: models.DefaultRotationQuotaLimitBytes, WindowSeconds: models.DefaultQuotaWindowSeconds, Enabled: true, QuotaPolicyVersion: models.RollingQuotaPolicyVersion}
 	if err := db.Create(&other).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -1143,13 +1143,12 @@ func TestComputeWakeUsesSharedAccountWindowBoundary(t *testing.T) {
 	if wake == nil {
 		t.Fatal("expected wake anchored to first exhaustion")
 	}
-	expected := exhaustedAt.Add(24 * time.Hour)
-	if !wake.Equal(expected) {
-		t.Fatalf("wake = %v, want %v", wake.UTC(), expected.UTC())
+	if !wake.Equal(wakeAt) {
+		t.Fatalf("wake = %v, want %v", wake.UTC(), wakeAt.UTC())
 	}
 }
 
-func TestComputeWakeRejectsMissingAccountBoundary(t *testing.T) {
+func TestComputeWakeAllowsMissingLegacyCalendarBoundary(t *testing.T) {
 	db := dispatcherDB(t)
 	if err := db.AutoMigrate(&models.QuotaAccount{}); err != nil {
 		t.Fatal(err)
@@ -1162,10 +1161,43 @@ func TestComputeWakeRejectsMissingAccountBoundary(t *testing.T) {
 	}
 	d := &Dispatcher{DB: db, Now: func() time.Time { return time.Unix(1000, 0) }}
 	wake, err := d.computeWake(map[string]string{"drive": "drive", "team-1": "team-1"}, time.Unix(1000, 0))
-	if !errors.Is(err, quota.ErrQuotaWindowUninitialized) {
-		t.Fatalf("missing boundary error = %v", err)
+	if err != nil {
+		t.Fatalf("missing legacy boundary error = %v", err)
 	}
 	if wake != nil {
-		t.Fatalf("missing boundary returned wake %v", wake)
+		t.Fatalf("missing rolling recovery returned wake %v", wake)
+	}
+}
+
+func TestWakeQuotaAccountsSkipsUnrelatedInvalidConfigsAndWakesSharedTasks(t *testing.T) {
+	db := dispatcherDB(t)
+	shared := models.QuotaAccount{QuotaKey: "shared-wake", RemoteName: "remote", ConfigIdentity: "/valid/config", BudgetBytes: 100, WindowSeconds: models.DefaultQuotaWindowSeconds, Enabled: true, QuotaPolicyVersion: models.RollingQuotaPolicyVersion}
+	if err := db.Create(&shared).Error; err != nil {
+		t.Fatal(err)
+	}
+	invalid := models.Task{ID: 1, Name: "invalid-unrelated", Enabled: true, TaskType: "rotation", RotationStrategy: "proactive_quota", RcloneConfig: "invalid", RotationRemotes: `["remote"]`, RotationQuotaKeys: `{"remote":"other-key"}`}
+	matching := models.Task{ID: 2, Name: "matching", Enabled: true, TaskType: "rotation", RotationStrategy: "proactive_quota", RcloneConfig: "valid", RotationRemotes: `["remote"]`, RotationQuotaKeys: `{"remote":"shared-wake"}`}
+	if err := db.Create(&invalid).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&matching).Error; err != nil {
+		t.Fatal(err)
+	}
+	service := &quota.Service{DB: db, ConfigResolver: func(raw string) (string, error) {
+		if raw == "invalid" {
+			return "", errors.New("invalid config")
+		}
+		return raw, nil
+	}}
+	d := &Dispatcher{DB: db, Quota: service, Now: func() time.Time { return time.Unix(500, 0) }}
+	if err := d.WakeQuotaAccounts([]uint{shared.ID}); err != nil {
+		t.Fatal(err)
+	}
+	var stored models.Task
+	if err := db.First(&stored, matching.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.RotationQuotaWakeAt == nil || !stored.RotationQuotaWakeAt.Equal(time.Unix(500, 0)) {
+		t.Fatalf("matching task was not woken: %#v", stored)
 	}
 }

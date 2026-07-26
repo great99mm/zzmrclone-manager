@@ -419,10 +419,6 @@ const FileBrowser = () => {
       setDestRemote('');
       setDestRemotePath('/');
       setDestNewFolderName('');
-      setOpenlistEnabled(false);
-      setOpenlistConfigId('');
-      setOpenlistRefreshDir('');
-      setOpenlistMapping('');
     } catch (err) {
       toast.error(err.response?.data?.error || '创建任务失败');
     } finally {

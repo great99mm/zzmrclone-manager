@@ -278,15 +278,16 @@ func canonicalRemotePath(value string) string {
 }
 
 type UploadLimitMarker struct {
-	Detected bool
-	Text     string
+	Detected    bool
+	Provider403 bool
+	Text        string
 }
 
 func DetectUploadLimit(output string) UploadLimitMarker {
 	lower := strings.ToLower(output)
 	for _, marker := range []string{"upload limit", "uploadlimit", "drive upload limit", "rate limit exceeded"} {
 		if strings.Contains(lower, marker) {
-			return UploadLimitMarker{Detected: true, Text: marker}
+			return UploadLimitMarker{Detected: true, Provider403: strings.Contains(lower, "403"), Text: marker}
 		}
 	}
 	return UploadLimitMarker{}

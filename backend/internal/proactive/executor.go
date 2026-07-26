@@ -418,9 +418,8 @@ func (e *Executor) startIntent(batchID uint, token string) error {
 		if len(reservations) == 0 {
 			return errors.New("batch has no reservations")
 		}
-		windowEnd := quota.AccountWindowEnd(account)
 		for _, reservation := range reservations {
-			if reservation.State != models.ReservationStateHeld || reservation.ExpiresAt == nil || !reservation.ExpiresAt.After(now) || !reservation.ExpiresAt.Equal(windowEnd) {
+			if reservation.State != models.ReservationStateHeld {
 				return errors.New("batch reservation is not held and unexpired")
 			}
 		}
@@ -687,26 +686,21 @@ func (e *Executor) freezeMarkerTx(tx *gorm.DB, batchID uint, token string, marke
 		return err
 	}
 	account = advanced
-	until := quota.AccountWindowEnd(account)
-	if account.RecoveryState != models.QuotaRecoveryStateExhausted {
-		transition := tx.Model(&models.QuotaAccount{}).
-			Where("id = ? AND (recovery_state IS NULL OR recovery_state <> ?)", account.ID, models.QuotaRecoveryStateExhausted).
-			Updates(map[string]interface{}{
-				"recovery_state":      models.QuotaRecoveryStateExhausted,
-				"first_exhausted_at":  gorm.Expr("COALESCE(first_exhausted_at, ?)", now),
-				"recovery_generation": gorm.Expr("recovery_generation + 1"),
-				"probe_claim_token":   "",
-				"probe_claim_until":   nil,
-			})
-		if transition.Error != nil {
-			return transition.Error
+	if marker.Provider403 {
+		until := now.Add(24 * time.Hour)
+		if account.ProviderBlockedUntil != nil && account.ProviderBlockedUntil.After(until) {
+			until = *account.ProviderBlockedUntil
 		}
-	}
-	legacyBlock := tx.Model(&models.QuotaAccount{}).
-		Where("id = ?", account.ID).
-		Update("provider_blocked_until", until)
-	if legacyBlock.Error != nil {
-		return legacyBlock.Error
+		if err := tx.Model(&models.QuotaAccount{}).Where("id = ?", account.ID).Updates(map[string]interface{}{
+			"provider_blocked_until": until,
+			"recovery_state":         models.QuotaRecoveryStateAvailable,
+			"first_exhausted_at":     nil,
+			"next_probe_at":          nil,
+			"probe_claim_token":      "",
+			"probe_claim_until":      nil,
+		}).Error; err != nil {
+			return err
+		}
 	}
 	update := tx.Model(&models.RotationQuotaBatch{}).Where("id = ? AND lease_token = ? AND state = ?", batchID, token, models.BatchStateReconciling).Updates(map[string]interface{}{"limit_marker": marker.Text, "marker_detected_at": now})
 	if update.Error != nil {
@@ -734,6 +728,7 @@ func (e *Executor) reconcile(ctx context.Context, batch models.RotationQuotaBatc
 		}
 		observations = append(observations, observation{file: file, object: object, verified: verified})
 	}
+	commitAt := e.now()
 	return e.DB.Transaction(func(tx *gorm.DB) error {
 		var current models.RotationQuotaBatch
 		if err := tx.First(&current, batch.ID).Error; err != nil {
@@ -748,14 +743,14 @@ func (e *Executor) reconcile(ctx context.Context, batch models.RotationQuotaBatc
 		}
 		for _, item := range observations {
 			if item.verified {
-				result := tx.Model(&models.RotationQuotaBatchFile{}).Where("id = ? AND batch_id = ? AND state IN ?", item.file.ID, current.ID, []string{models.BatchFileStateActive, models.BatchFileStateUnknown}).Updates(map[string]interface{}{"state": models.BatchFileStateCommitted, "remote_path": item.object.Path, "remote_size": item.object.Size, "verified_at": e.now()})
+				result := tx.Model(&models.RotationQuotaBatchFile{}).Where("id = ? AND batch_id = ? AND state IN ?", item.file.ID, current.ID, []string{models.BatchFileStateActive, models.BatchFileStateUnknown}).Updates(map[string]interface{}{"state": models.BatchFileStateCommitted, "remote_path": item.object.Path, "remote_size": item.object.Size, "verified_at": commitAt})
 				if result.Error != nil {
 					return result.Error
 				}
 				if result.RowsAffected != 1 {
 					return ErrLeaseConflict
 				}
-				result = tx.Model(&models.QuotaReservation{}).Where("batch_file_id = ? AND batch_id = ? AND state IN ?", item.file.ID, current.ID, []string{models.ReservationStateActive, models.ReservationStateUnknown}).Update("state", models.ReservationStateCommitted)
+				result = tx.Model(&models.QuotaReservation{}).Where("batch_file_id = ? AND batch_id = ? AND state IN ?", item.file.ID, current.ID, []string{models.ReservationStateActive, models.ReservationStateUnknown}).Updates(map[string]interface{}{"state": models.ReservationStateCommitted, "committed_at": commitAt})
 				if result.Error != nil {
 					return result.Error
 				}
@@ -780,15 +775,31 @@ func (e *Executor) reconcile(ctx context.Context, batch models.RotationQuotaBatc
 			}
 		}
 		state := models.BatchStateUnknown
+		committed := false
+		for _, item := range observations {
+			if item.verified {
+				committed = true
+				break
+			}
+		}
 		if allVerified {
 			state = models.BatchStateSucceeded
 		}
-		result := tx.Model(&models.RotationQuotaBatch{}).Where("id = ? AND lease_token = ? AND state = ?", current.ID, token, models.BatchStateReconciling).Update("state", state)
+		batchUpdates := map[string]interface{}{"state": state}
+		if allVerified {
+			batchUpdates["finished_at"] = commitAt
+		}
+		result := tx.Model(&models.RotationQuotaBatch{}).Where("id = ? AND lease_token = ? AND state = ?", current.ID, token, models.BatchStateReconciling).Updates(batchUpdates)
 		if result.Error != nil {
 			return result.Error
 		}
 		if result.RowsAffected != 1 {
 			return ErrLeaseConflict
+		}
+		if committed {
+			if err := quota.ApplyCommittedQuotaTx(tx, current.QuotaAccountID, commitAt); err != nil {
+				return err
+			}
 		}
 		return nil
 	})

@@ -62,7 +62,7 @@ func makeMoveFixture(t *testing.T, db *gorm.DB, count int) moveFixture {
 	if err := os.WriteFile(config, []byte("[test]\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	account := models.QuotaAccount{QuotaKey: "move-key", BudgetBytes: 1000, Enabled: true, WindowSeconds: 3600}
+	account := models.QuotaAccount{QuotaKey: "move-key", BudgetBytes: 1000, Enabled: true, WindowSeconds: models.DefaultQuotaWindowSeconds, FixedWindowMigrationVersion: models.FixedWindowMigrationVersion}
 	if err := db.Create(&account).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestMoveExecutorStartFailureRestoresAndReleases(t *testing.T) {
 func TestMoveExecutorMarkerFreezesAccount(t *testing.T) {
 	db := executionDB(t)
 	fixture := makeMoveFixture(t, db, 1)
-	runner := &moveTestRunner{result: ProcessResult{PID: 78, ProcessStartToken: "78:1", Stderr: "drive upload limit exceeded"}}
+	runner := &moveTestRunner{result: ProcessResult{PID: 78, ProcessStartToken: "78:1", Stderr: "Google API 403: drive upload limit exceeded"}}
 	executor := &Executor{DB: db, ManifestDir: t.TempDir(), Runner: runner, Manifest: ManifestWriter{}, MoveEnabled: func() bool { return true }, Now: func() time.Time { return time.Unix(100, 0) }}
 	if err := executor.RunBatch(context.Background(), fixture.batch.ID); err != nil {
 		t.Fatal(err)
@@ -208,7 +208,8 @@ func TestMoveExecutorMarkerFreezesAccount(t *testing.T) {
 	if err := db.First(&account, fixture.batch.QuotaAccountID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if account.RecoveryState != models.QuotaRecoveryStateExhausted || account.RecoveryGeneration != 1 || account.NextProbeAt != nil || account.ProviderBlockedUntil == nil || !account.ProviderBlockedUntil.Equal(time.Unix(100, 0).Add(24*time.Hour)) {
+	wantBlock := time.Unix(100, 0).Add(24 * time.Hour)
+	if account.RecoveryState != models.QuotaRecoveryStateAvailable || account.RecoveryGeneration != 0 || account.NextProbeAt != nil || account.ProviderBlockedUntil == nil || !account.ProviderBlockedUntil.Equal(wantBlock) {
 		t.Fatalf("move recovery transition = %#v", account)
 	}
 }
@@ -216,11 +217,10 @@ func TestMoveExecutorMarkerFreezesAccount(t *testing.T) {
 func TestMoveStartHonorsExhaustedRecoveryAfterLegacyBlockExpires(t *testing.T) {
 	db := executionDB(t)
 	fixture := makeMoveFixture(t, db, 1)
-	past := time.Unix(90, 0)
+	future := time.Unix(100, 0).Add(time.Hour)
 	if err := db.Model(&models.QuotaAccount{}).Where("id = ?", fixture.batch.QuotaAccountID).Updates(map[string]interface{}{
-		"provider_blocked_until": past,
-		"recovery_state":         models.QuotaRecoveryStateExhausted,
-		"window_started_at":      time.Unix(100, 0),
+		"provider_blocked_until": future,
+		"recovery_state":         models.QuotaRecoveryStateAvailable,
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -471,7 +471,7 @@ func TestMoveClaimAllowsDistinctAccountsFromSameTaskWithinLimit(t *testing.T) {
 	if err := db.Model(&models.RotationQuotaBatch{}).Where("id = ?", fixture.batch.ID).Update("rotation_concurrent_batches", 2).Error; err != nil {
 		t.Fatal(err)
 	}
-	secondAccount := models.QuotaAccount{QuotaKey: "second", BudgetBytes: 100, Enabled: true, WindowSeconds: 3600}
+	secondAccount := models.QuotaAccount{QuotaKey: "second", BudgetBytes: 100, Enabled: true, WindowSeconds: models.DefaultQuotaWindowSeconds, FixedWindowMigrationVersion: models.FixedWindowMigrationVersion}
 	if err := db.Create(&secondAccount).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -507,7 +507,7 @@ func TestMoveClaimsRetrySQLiteContentionForDistinctAccounts(t *testing.T) {
 	}
 	batchIDs := []uint{fixture.batch.ID}
 	for i := 2; i <= 4; i++ {
-		account := models.QuotaAccount{QuotaKey: fmt.Sprintf("account-%d", i), BudgetBytes: 100, Enabled: true, WindowSeconds: 3600}
+		account := models.QuotaAccount{QuotaKey: fmt.Sprintf("account-%d", i), BudgetBytes: 100, Enabled: true, WindowSeconds: models.DefaultQuotaWindowSeconds, FixedWindowMigrationVersion: models.FixedWindowMigrationVersion}
 		if err := db.Create(&account).Error; err != nil {
 			t.Fatal(err)
 		}

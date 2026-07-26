@@ -13,6 +13,7 @@ import (
 	"rclone-manager/internal/models"
 	"rclone-manager/internal/proactive"
 	"rclone-manager/internal/quota"
+	"rclone-manager/internal/telemetry"
 )
 
 const proactiveStatusMaxBatches = 100
@@ -28,22 +29,32 @@ type proactiveBytes struct {
 }
 
 type proactiveAccountStatus struct {
-	RemoteName           string     `json:"remote_name"`
-	QuotaKey             string     `json:"quota_key"`
-	BudgetBytes          *int64     `json:"budget_bytes"`
-	WindowSeconds        *int       `json:"window_seconds"`
-	UsedBytes            *int64     `json:"used_bytes"`
-	ActiveReservedBytes  *int64     `json:"active_reserved_bytes"`
-	RemainingBytes       *int64     `json:"remaining_bytes"`
-	UploadingBytes       *int64     `json:"uploading_bytes"`
-	ProviderBlockedUntil *time.Time `json:"provider_blocked_until"`
-	RecoveryState        string     `json:"recovery_state"`
-	RecoveryGeneration   *int64     `json:"recovery_generation"`
-	FirstExhaustedAt     *time.Time `json:"first_exhausted_at"`
-	Enabled              *bool      `json:"enabled"`
-	// WindowStartedAt is the durable start of the fixed account window.
+	AccountID             uint       `json:"account_id"`
+	RemoteName            string     `json:"remote_name"`
+	QuotaKey              string     `json:"quota_key"`
+	BudgetBytes           *int64     `json:"budget_bytes"`
+	WindowSeconds         *int       `json:"window_seconds"`
+	UsedBytes             *int64     `json:"used_bytes"`
+	RollingUsageBytes     *int64     `json:"rolling_usage_bytes"`
+	UnresolvedBytes       *int64     `json:"unresolved_bytes"`
+	ActiveReservedBytes   *int64     `json:"active_reserved_bytes"`
+	RemainingBytes        *int64     `json:"remaining_bytes"`
+	UploadingBytes        *int64     `json:"uploading_bytes"`
+	ProviderBlockedUntil  *time.Time `json:"provider_blocked_until"`
+	CampaignCooldownUntil *time.Time `json:"campaign_cooldown_until"`
+	CooldownUntil         *time.Time `json:"cooldown_until"`
+	NextRecoveryAt        *time.Time `json:"next_recovery_at"`
+	Forecast3HBytes       *int64     `json:"forecast_3h_bytes"`
+	Primary               bool       `json:"primary"`
+	Preferred             bool       `json:"preferred"`
+	RecoveryState         string     `json:"recovery_state"`
+	AvailabilityState     string     `json:"availability_state"`
+	RecoveryGeneration    *int64     `json:"recovery_generation"`
+	FirstExhaustedAt      *time.Time `json:"first_exhausted_at"`
+	Enabled               *bool      `json:"enabled"`
+	// WindowStartedAt is retained for old clients and databases only.
 	WindowStartedAt *time.Time `json:"window_started_at"`
-	// NextResetAt is the absolute end of the shared account window.
+	// NextResetAt is retained as an alias for the rolling next recovery point.
 	NextResetAt *time.Time `json:"next_reset_at"`
 }
 
@@ -131,6 +142,7 @@ type proactiveReservationAggregate struct {
 	QuotaAccountID uint
 	State          string
 	Bytes          int64
+	CommittedAt    *time.Time
 	ExpiresAt      *time.Time
 }
 
@@ -198,6 +210,7 @@ func getProactiveStatus(c *gin.Context) {
 		}
 	}
 	now := time.Now()
+	_ = telemetry.Capture(db, now)
 	accountIDsForWindow := make([]uint, 0, len(accounts))
 	for _, account := range accounts {
 		accountIDsForWindow = append(accountIDsForWindow, account.ID)
@@ -272,12 +285,7 @@ func getProactiveStatus(c *gin.Context) {
 	uploading := make(map[uint]int64)
 	if len(accountIDs) > 0 {
 		var rows []proactiveReservationAggregate
-		reservationQuery := db.Model(&models.QuotaReservation{}).Select("quota_account_id, state, bytes, expires_at").Where("quota_account_id IN ?", accountIDs)
-		if summary {
-			// Match quota.accountUsage without scanning historical releases:
-			// committed usage is released only by account-window rollover.
-			reservationQuery = reservationQuery.Where("state IN ?", []string{models.ReservationStateHeld, models.ReservationStateActive, models.ReservationStateUnknown, models.ReservationStateCommitted})
-		}
+		reservationQuery := db.Model(&models.QuotaReservation{}).Select("quota_account_id, state, bytes, committed_at, expires_at").Where("quota_account_id IN ?", accountIDs)
 		if err := reservationQuery.Find(&rows).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load quota ledger"})
 			return
@@ -289,7 +297,9 @@ func getProactiveStatus(c *gin.Context) {
 			}
 			switch row.State {
 			case models.ReservationStateCommitted:
-				used[row.QuotaAccountID] += row.Bytes
+				if row.CommittedAt == nil || row.CommittedAt.After(now.Add(-24*time.Hour)) {
+					used[row.QuotaAccountID] += row.Bytes
+				}
 			case models.ReservationStateActive:
 				uploading[row.QuotaAccountID] += row.Bytes
 			case models.ReservationStateHeld, models.ReservationStateUnknown:
@@ -306,6 +316,7 @@ func getProactiveStatus(c *gin.Context) {
 	allExhausted := len(remotes) > 0
 	allInitialized := true
 	var earliestReset *time.Time
+	preferredSet := false
 	for _, remote := range remotes {
 		key := quotaKeys[remote]
 		binding := proactiveAccountStatus{RemoteName: remote, QuotaKey: key}
@@ -313,27 +324,54 @@ func getProactiveStatus(c *gin.Context) {
 			budget, window, enabled := models.DefaultRotationQuotaLimitBytes, models.DefaultQuotaWindowSeconds, account.Enabled
 			u, r, up := used[account.ID], reserved[account.ID], uploading[account.ID]
 			totalReserved := r + up
-			remaining := budget - u - totalReserved
+			unresolved := totalReserved
+			remaining := budget - u - unresolved
 			providerBlocked := account.ProviderBlockedUntil != nil && account.ProviderBlockedUntil.After(now)
-			recoveryExhausted := account.RecoveryState == models.QuotaRecoveryStateExhausted
+			cooldown := account.CampaignCooldownUntil != nil && account.CampaignCooldownUntil.After(now)
+			forecast, forecastErr := quota.Forecast3HBytes(db, account.ID, now)
+			if forecastErr != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load quota forecast"})
+				return
+			}
+			nextRecovery, recoveryErr := quota.NextAccountRecovery(db, account.ID, now)
+			if recoveryErr != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load quota recovery"})
+				return
+			}
+			binding.AccountID = account.ID
 			binding.BudgetBytes, binding.WindowSeconds, binding.Enabled = &budget, &window, &enabled
 			binding.UsedBytes, binding.ActiveReservedBytes = &u, &totalReserved
+			binding.RollingUsageBytes, binding.UnresolvedBytes = &u, &unresolved
 			binding.UploadingBytes = &up
 			binding.ProviderBlockedUntil = account.ProviderBlockedUntil
+			binding.CampaignCooldownUntil = account.CampaignCooldownUntil
+			binding.CooldownUntil = account.CampaignCooldownUntil
+			binding.NextRecoveryAt = nextRecovery
+			binding.Forecast3HBytes = &forecast
+			binding.Primary = len(bindings) == 0
+			if !preferredSet && enabled && !models.IsUnavailableForProactiveTransfers(account, now) && remaining > 0 {
+				binding.Preferred = true
+				preferredSet = true
+			}
 			binding.RecoveryState = account.RecoveryState
 			binding.RecoveryGeneration = &account.RecoveryGeneration
 			binding.FirstExhaustedAt = account.FirstExhaustedAt
 			binding.WindowStartedAt = account.WindowStartedAt
-			if recoveryExhausted || providerBlocked {
+			binding.AvailabilityState = models.QuotaAvailabilityStateAvailable
+			if !enabled {
+				binding.AvailabilityState = models.QuotaAvailabilityStateDisabled
+			} else if providerBlocked {
+				binding.AvailabilityState = models.QuotaAvailabilityStateProviderBlocked
+			} else if cooldown {
+				binding.AvailabilityState = models.QuotaAvailabilityStateCampaignCooldown
+			}
+			if providerBlocked || cooldown {
 				remaining = 0
 			}
-			if account.WindowStartedAt != nil {
-				reset := quota.AccountWindowEnd(account)
-				binding.NextResetAt = &reset
-			}
+			binding.NextResetAt = nextRecovery
 			binding.RemainingBytes = &remaining
-			if binding.NextResetAt != nil && binding.NextResetAt.After(now) && (earliestReset == nil || binding.NextResetAt.Before(*earliestReset)) {
-				reset := *binding.NextResetAt
+			if nextRecovery != nil && nextRecovery.After(now) && (earliestReset == nil || nextRecovery.Before(*earliestReset)) {
+				reset := *nextRecovery
 				earliestReset = &reset
 			}
 			// An account is "exhausted" only when its remaining quota is
@@ -341,7 +379,7 @@ func getProactiveStatus(c *gin.Context) {
 			// account whose first reserve is in-flight but has not yet
 			// committed is NOT exhausted — the user just hasn't run any
 			// transfers yet, so remaining still equals the full budget.
-			exhausted := enabled && budget > 0 && (recoveryExhausted || providerBlocked || remaining <= 0)
+			exhausted := enabled && budget > 0 && (providerBlocked || cooldown || remaining <= 0)
 			if !exhausted {
 				allExhausted = false
 			}
@@ -352,6 +390,21 @@ func getProactiveStatus(c *gin.Context) {
 		bindings = append(bindings, binding)
 	}
 	_ = allInitialized
+	network, telemetryErr := telemetry.RollingReport(db, now)
+	if telemetryErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load network telemetry"})
+		return
+	}
+	ledgerCommitted, ledgerErr := quota.RollingCommittedBytes(db, now)
+	if ledgerErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load rolling quota ledger"})
+		return
+	}
+	network.LedgerCommittedBytes = ledgerCommitted
+	if network.Rolling24hTxBytes != nil {
+		difference := *network.Rolling24hTxBytes - ledgerCommitted
+		network.DifferenceBytes = &difference
+	}
 
 	// Queue categories are mutually exclusive batch-lifecycle buckets. A
 	// reserved/held file is pending, a planned/held file is planned, and the
@@ -452,6 +505,7 @@ func getProactiveStatus(c *gin.Context) {
 		"maintenance":            maintenance,
 		"all_accounts_exhausted": allExhausted,
 		"next_quota_reset_at":    earliestReset,
+		"network_telemetry":      network,
 	})
 }
 

@@ -106,7 +106,7 @@ func (s *Service) Reserve(req PackReserveRequest) (PackReserveResult, error) {
 
 	maxRetries := s.MaxRetries
 	if maxRetries <= 0 {
-		maxRetries = 3
+		maxRetries = 8
 	}
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		result, err := s.reserveAttempt(req, requestKey, fingerprint, resolvedConfig, destinationPath, remotes, quotaKeys)
@@ -366,6 +366,10 @@ func (s *Service) reserveAttempt(req PackReserveRequest, requestKey, fingerprint
 		if err != nil {
 			return err
 		}
+		forecast3h, err := accountForecasts(tx, accountIDs(accounts), transactionNow)
+		if err != nil {
+			return err
+		}
 		var persistedAssignments []models.RotationQuotaDirectoryAssignment
 		if err := tx.Where("task_id = ?", req.Task.ID).Find(&persistedAssignments).Error; err != nil {
 			return err
@@ -374,7 +378,7 @@ func (s *Service) reserveAttempt(req PackReserveRequest, requestKey, fingerprint
 		for _, assignment := range persistedAssignments {
 			directoryAccounts[assignment.Directory] = assignment.QuotaAccountID
 		}
-		selected, pending, newAssignments, err := packSnapshots(req.Snapshots, remotes, quotaKeys, accounts, usage, req.Task.RotationQuotaLimitBytes, req.Task.RotationBatchFiles, directoryAccounts, transactionNow)
+		selected, pending, newAssignments, err := packSnapshotsWithForecast(req.Snapshots, remotes, quotaKeys, accounts, usage, forecast3h, req.Task.RotationQuotaLimitBytes, req.Task.RotationBatchFiles, directoryAccounts, transactionNow)
 		if err != nil {
 			return err
 		}
@@ -428,7 +432,6 @@ func (s *Service) reserveAttempt(req PackReserveRequest, requestKey, fingerprint
 			if err := tx.Create(&batch).Error; err != nil {
 				return err
 			}
-			expires := AccountWindowEnd(account)
 			for _, snapshot := range files {
 				batchFile := models.RotationQuotaBatchFile{
 					BatchID: batch.ID, RelativePath: snapshot.RelativePath, SnapshotKey: snapshot.SnapshotKey,
@@ -441,7 +444,7 @@ func (s *Service) reserveAttempt(req PackReserveRequest, requestKey, fingerprint
 				reservation := models.QuotaReservation{
 					QuotaAccountID: account.ID, BatchID: batch.ID, BatchFileID: batchFile.ID,
 					Bytes: snapshot.SizeBytes, State: models.ReservationStateHeld, IdempotencyKey: ownerToken + ":" + snapshot.SnapshotKey,
-					ReservedAt: &transactionNow, ExpiresAt: &expires,
+					ReservedAt: &transactionNow,
 				}
 				if err := tx.Create(&reservation).Error; err != nil {
 					return err
@@ -578,9 +581,12 @@ func accountWideBlocker(tx *gorm.DB, accountIDs []uint, scope string, now time.T
 		return false, time.Time{}, err
 	}
 	for _, account := range accounts {
-		boundary := AccountWindowEnd(account)
-		if boundary.After(now) && (wake.IsZero() || boundary.Before(wake)) {
-			wake = boundary
+		candidate, err := nextAccountRecoveryTx(tx, account, now)
+		if err != nil {
+			return false, time.Time{}, err
+		}
+		if candidate != nil && candidate.After(now) && (wake.IsZero() || candidate.Before(wake)) {
+			wake = *candidate
 		}
 	}
 	var batches []models.RotationQuotaBatch
@@ -608,7 +614,7 @@ func accountWideBlocker(tx *gorm.DB, accountIDs []uint, scope string, now time.T
 		addWake(reservation.ExpiresAt)
 	}
 	if wake.IsZero() {
-		wake = now.Add(time.Duration(models.DefaultQuotaWindowSeconds) * time.Second)
+		wake = now.Add(time.Minute)
 	}
 	return blocked, wake, nil
 }
@@ -941,7 +947,7 @@ func checkBatchScopeStates(tx *gorm.DB, condition string, value interface{}) err
 	return nil
 }
 
-func accountUsage(tx *gorm.DB, ids []uint, _ time.Time) (map[uint]int64, error) {
+func accountUsage(tx *gorm.DB, ids []uint, now time.Time) (map[uint]int64, error) {
 	var reservations []models.QuotaReservation
 	if err := tx.Where("quota_account_id IN ?", ids).Find(&reservations).Error; err != nil {
 		return nil, err
@@ -955,9 +961,11 @@ func accountUsage(tx *gorm.DB, ids []uint, _ time.Time) (map[uint]int64, error) 
 		case models.ReservationStateReleased, models.ReservationStateExpired:
 			continue
 		case models.ReservationStateCommitted:
-			// Committed usage is released only by AdvanceAccountWindowTx at
-			// the account boundary. Legacy per-reservation expiry is not a
-			// second quota clock.
+			// A missing timestamp is historical uncertainty and remains charged
+			// until an idempotent migration supplies a conservative timestamp.
+			if reservation.CommittedAt != nil && !reservation.CommittedAt.After(now.Add(-24*time.Hour)) {
+				continue
+			}
 		case models.ReservationStateHeld, models.ReservationStateActive, models.ReservationStateUnknown:
 		default:
 			return nil, fmt.Errorf("quota ledger corruption: reservation %d has invalid state %q", reservation.ID, reservation.State)
@@ -974,11 +982,18 @@ func accountUsage(tx *gorm.DB, ids []uint, _ time.Time) (map[uint]int64, error) 
 const defaultBatchFiles = 5
 
 func packSnapshots(snapshots []LocalSnapshot, remotes []string, keys map[string]string, accounts []models.QuotaAccount, usage map[uint]int64, taskLimit int64, batchFiles int, directoryAccounts map[string]uint, now time.Time) (map[string][]LocalSnapshot, []LocalSnapshot, map[string]uint, error) {
+	return packSnapshotsWithForecast(snapshots, remotes, keys, accounts, usage, nil, taskLimit, batchFiles, directoryAccounts, now)
+}
+
+func packSnapshotsWithForecast(snapshots []LocalSnapshot, remotes []string, keys map[string]string, accounts []models.QuotaAccount, usage map[uint]int64, forecast3h map[uint]int64, taskLimit int64, batchFiles int, directoryAccounts map[string]uint, now time.Time) (map[string][]LocalSnapshot, []LocalSnapshot, map[string]uint, error) {
 	if taskLimit < 0 {
 		return nil, nil, nil, fmt.Errorf("rotation quota limit cannot be negative")
 	}
 	if batchFiles <= 0 {
 		batchFiles = defaultBatchFiles
+	}
+	if directoryAccounts == nil {
+		directoryAccounts = make(map[string]uint)
 	}
 	ordered := append([]LocalSnapshot(nil), snapshots...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].RelativePath < ordered[j].RelativePath })
@@ -1013,19 +1028,86 @@ func packSnapshots(snapshots []LocalSnapshot, remotes []string, keys map[string]
 			}
 			candidateRemotes = []string{remote}
 		}
-		for _, remote := range candidateRemotes {
+		preferred := -1
+		for i, remote := range candidateRemotes {
 			account := byKey[keys[remote]]
 			if models.IsUnavailableForProactiveTransfers(account, now) {
 				continue
 			}
-			if counts[remote] >= batchFiles {
-				continue
-			}
 			limit := account.BudgetBytes
+			if limit > models.DefaultRotationQuotaLimitBytes {
+				limit = models.DefaultRotationQuotaLimitBytes
+			}
 			if taskLimit < limit {
 				limit = taskLimit
 			}
 			if used[account.ID] <= limit && snapshot.SizeBytes <= limit-used[account.ID] {
+				preferred = i
+				break
+			}
+		}
+		if preferred >= 0 {
+			remote := candidateRemotes[preferred]
+			account := byKey[keys[remote]]
+			spill := false
+			if forecast3h != nil {
+				limit := account.BudgetBytes
+				if limit > models.DefaultRotationQuotaLimitBytes {
+					limit = models.DefaultRotationQuotaLimitBytes
+				}
+				if taskLimit < limit {
+					limit = taskLimit
+				}
+				remaining := limit - used[account.ID]
+				spill = forecast3h[account.ID] >= remaining
+			}
+			if preferred == 0 && spill && len(candidateRemotes) > 1 {
+				for i := 1; i < len(candidateRemotes); i++ {
+					candidate := candidateRemotes[i]
+					candidateAccount := byKey[keys[candidate]]
+					if models.IsUnavailableForProactiveTransfers(candidateAccount, now) || counts[candidate] >= batchFiles {
+						continue
+					}
+					limit := candidateAccount.BudgetBytes
+					if limit > models.DefaultRotationQuotaLimitBytes {
+						limit = models.DefaultRotationQuotaLimitBytes
+					}
+					if taskLimit < limit {
+						limit = taskLimit
+					}
+					if used[candidateAccount.ID] <= limit && snapshot.SizeBytes <= limit-used[candidateAccount.ID] {
+						remote, account = candidate, candidateAccount
+						preferred = i
+						break
+					}
+				}
+			}
+			if preferred == 0 && counts[remote] >= batchFiles {
+				if assignedAccountID != 0 {
+					preferred = -1
+				} else {
+					for i := 1; i < len(candidateRemotes); i++ {
+						candidate := candidateRemotes[i]
+						candidateAccount := byKey[keys[candidate]]
+						if models.IsUnavailableForProactiveTransfers(candidateAccount, now) || counts[candidate] >= batchFiles {
+							continue
+						}
+						limit := candidateAccount.BudgetBytes
+						if limit > models.DefaultRotationQuotaLimitBytes {
+							limit = models.DefaultRotationQuotaLimitBytes
+						}
+						if taskLimit < limit {
+							limit = taskLimit
+						}
+						if used[candidateAccount.ID] <= limit && snapshot.SizeBytes <= limit-used[candidateAccount.ID] {
+							remote, account = candidate, candidateAccount
+							preferred = i
+							break
+						}
+					}
+				}
+			}
+			if preferred >= 0 && counts[remote] < batchFiles {
 				selected[remote] = append(selected[remote], snapshot)
 				counts[remote]++
 				updated, err := safeAdd(used[account.ID], snapshot.SizeBytes)
@@ -1038,7 +1120,6 @@ func packSnapshots(snapshots []LocalSnapshot, remotes []string, keys map[string]
 					newAssignments[directory] = account.ID
 				}
 				placed = true
-				break
 			}
 		}
 		if !placed {
@@ -1065,27 +1146,18 @@ func isBusyError(err error) bool {
 	return strings.Contains(message, "database is locked") || strings.Contains(message, "database table is locked") || strings.Contains(message, "busy")
 }
 
-var ErrQuotaWindowOverdrawn = errors.New("quota account has more than 700 GiB of unresolved usage")
-var ErrQuotaWindowUninitialized = errors.New("quota account window boundary is not initialized")
-var ErrQuotaWindowInvalid = errors.New("quota account window boundary is invalid")
-
-func AccountWindowEnd(account models.QuotaAccount) time.Time {
-	if account.WindowStartedAt == nil {
-		return time.Time{}
-	}
-	return account.WindowStartedAt.Add(time.Duration(models.DefaultQuotaWindowSeconds) * time.Second)
-}
+var ErrQuotaWindowOverdrawn = errors.New("quota account has more than 700,000,000,000 bytes of effective usage")
+var ErrQuotaWindowUninitialized = errors.New("quota account rolling state is not initialized")
+var ErrQuotaWindowInvalid = errors.New("quota account rolling state is invalid")
 
 func ValidateAccountWindow(account models.QuotaAccount, now time.Time) error {
-	if account.WindowStartedAt == nil {
-		return fmt.Errorf("quota account %d: %w", account.ID, ErrQuotaWindowUninitialized)
-	}
-	if account.WindowSeconds != models.DefaultQuotaWindowSeconds || account.BudgetBytes != models.DefaultRotationQuotaLimitBytes {
+	if account.FixedWindowMigrationVersion > models.FixedWindowMigrationVersion || account.WindowSeconds <= 0 || account.BudgetBytes < 0 {
 		return fmt.Errorf("quota account %d: %w", account.ID, ErrQuotaWindowInvalid)
 	}
-	if account.WindowStartedAt.After(now) || AccountWindowEnd(account).Before(*account.WindowStartedAt) {
+	if account.QuotaPolicyVersion > models.RollingQuotaPolicyVersion {
 		return fmt.Errorf("quota account %d: %w", account.ID, ErrQuotaWindowInvalid)
 	}
+	_ = now
 	return nil
 }
 
@@ -1120,34 +1192,20 @@ func AdvanceAccountWindows(database *gorm.DB, accountIDs []uint, now time.Time) 
 	return accounts, err
 }
 
-// InitializeAccountWindows is the startup policy pass. It preserves every
-// non-nil anchor, advances due anchors without drift, normalizes task-era
-// account fields, and retires old runtime probe attempts as historical rows.
+// InitializeAccountWindows is the startup policy pass. Account advancement
+// owns the account lock and performs the durable fixed-v1-to-rolling migration
+// before normal ledger cleanup, so concurrent startup callers cannot duplicate it.
 func InitializeAccountWindows(database *gorm.DB, now time.Time) error {
 	if database == nil {
 		return errors.New("quota database is required")
 	}
 	return database.Transaction(func(tx *gorm.DB) error {
-		var accounts []models.QuotaAccount
-		if err := tx.Order("id ASC").Find(&accounts).Error; err != nil {
+		var accountIDs []uint
+		if err := tx.Model(&models.QuotaAccount{}).Order("id ASC").Pluck("id", &accountIDs).Error; err != nil {
 			return err
 		}
-		for _, account := range accounts {
-			if account.FixedWindowMigrationVersion < models.FixedWindowMigrationVersion {
-				if err := migrateLegacyCommittedReservationsTx(tx, account.ID, now); err != nil {
-					return err
-				}
-				if err := tx.Model(&models.QuotaAccount{}).Where("id = ? AND fixed_window_migration_version < ?", account.ID, models.FixedWindowMigrationVersion).Update("fixed_window_migration_version", models.FixedWindowMigrationVersion).Error; err != nil {
-					return err
-				}
-			}
-			if account.WindowStartedAt == nil && (account.ProviderBlockedUntil != nil || account.RecoveryState == models.QuotaRecoveryStateExhausted) {
-				anchor := now
-				if err := tx.Model(&models.QuotaAccount{}).Where("id = ?", account.ID).Update("window_started_at", anchor).Error; err != nil {
-					return err
-				}
-			}
-			if _, err := AdvanceAccountWindowTx(tx, account.ID, now); err != nil {
+		for _, accountID := range accountIDs {
+			if _, err := AdvanceAccountWindowTx(tx, accountID, now); err != nil {
 				return err
 			}
 		}
@@ -1155,16 +1213,15 @@ func InitializeAccountWindows(database *gorm.DB, now time.Time) error {
 	})
 }
 
-func migrateLegacyCommittedReservationsTx(tx *gorm.DB, accountID uint, now time.Time) error {
-	return tx.Model(&models.QuotaReservation{}).
-		Where("quota_account_id = ? AND state = ? AND expires_at IS NOT NULL AND expires_at <= ?", accountID, models.ReservationStateCommitted, now).
-		Updates(map[string]interface{}{"state": models.ReservationStateExpired, "released_at": now}).Error
+// AdvanceAccountWindowTx must run after the caller has entered its writer
+// transaction. It locks one account and applies rolling reservation expiry.
+func AdvanceAccountWindowTx(tx *gorm.DB, accountID uint, now time.Time) (models.QuotaAccount, error) {
+	return advanceRollingAccountTx(tx, accountID, now)
 }
 
-// AdvanceAccountWindowTx must run after the caller has entered its writer
-// transaction. It locks one account, normalizes the fixed 24-hour window,
-// carries unresolved reservations forward, and advances whole periods only.
-func AdvanceAccountWindowTx(tx *gorm.DB, accountID uint, now time.Time) (models.QuotaAccount, error) {
+// advanceRollingAccountTx is the only runtime quota rollover. The legacy
+// WindowStartedAt and ExpiresAt columns are deliberately ignored as clocks.
+func advanceRollingAccountTx(tx *gorm.DB, accountID uint, now time.Time) (models.QuotaAccount, error) {
 	var account models.QuotaAccount
 	if tx == nil {
 		return account, errors.New("quota transaction is required")
@@ -1179,12 +1236,28 @@ func AdvanceAccountWindowTx(tx *gorm.DB, accountID uint, now time.Time) (models.
 	if err := tx.First(&account, accountID).Error; err != nil {
 		return account, err
 	}
+	if account.FixedWindowMigrationVersion > models.FixedWindowMigrationVersion || account.QuotaPolicyVersion > models.RollingQuotaPolicyVersion {
+		return account, fmt.Errorf("quota account %d: %w", account.ID, ErrQuotaWindowInvalid)
+	}
+	if account.QuotaPolicyVersion < models.RollingQuotaPolicyVersion {
+		if err := migrateAccountToRollingTx(tx, account, now); err != nil {
+			return account, err
+		}
+		if err := tx.First(&account, account.ID).Error; err != nil {
+			return account, err
+		}
+	}
 	if account.BudgetBytes < 0 {
 		return account, fmt.Errorf("quota account %d has a negative budget", accountID)
 	}
-	if account.WindowSeconds != models.DefaultQuotaWindowSeconds || account.BudgetBytes != models.DefaultRotationQuotaLimitBytes || account.RecoveryState == "" {
+	if account.BudgetBytes == 700*1024*1024*1024 {
+		if err := tx.Model(&models.QuotaAccount{}).Where("id = ?", account.ID).Update("budget_bytes", models.DefaultRotationQuotaLimitBytes).Error; err != nil {
+			return account, err
+		}
+		account.BudgetBytes = models.DefaultRotationQuotaLimitBytes
+	}
+	if account.WindowSeconds != models.DefaultQuotaWindowSeconds || account.RecoveryState == "" {
 		updates := map[string]interface{}{
-			"budget_bytes":   models.DefaultRotationQuotaLimitBytes,
 			"window_seconds": models.DefaultQuotaWindowSeconds,
 		}
 		if account.RecoveryState == "" {
@@ -1198,67 +1271,16 @@ func AdvanceAccountWindowTx(tx *gorm.DB, accountID uint, now time.Time) (models.
 		}
 	}
 
-	anchorChanged := false
-	hadAnchor := account.WindowStartedAt != nil
-	if account.WindowStartedAt == nil {
-		if account.ProviderBlockedUntil != nil || account.RecoveryState == models.QuotaRecoveryStateExhausted {
-			return account, fmt.Errorf("quota account %d: %w", account.ID, ErrQuotaWindowUninitialized)
-		}
-		anchor := now
-		account.WindowStartedAt = &anchor
-		anchorChanged = true
-	} else {
-		if account.WindowStartedAt.After(now) {
-			return account, fmt.Errorf("quota account %d: %w", account.ID, ErrQuotaWindowInvalid)
-		}
-		window := time.Duration(models.DefaultQuotaWindowSeconds) * time.Second
-		if !now.Before(account.WindowStartedAt.Add(window)) {
-			periods := int64(now.Sub(*account.WindowStartedAt) / window)
-			if periods < 1 {
-				periods = 1
-			}
-			anchor := account.WindowStartedAt.Add(time.Duration(periods) * window)
-			account.WindowStartedAt = &anchor
-			anchorChanged = true
-		}
-	}
-	if anchorChanged {
-		if err := tx.Model(&models.QuotaAccount{}).Where("id = ?", account.ID).Updates(map[string]interface{}{"window_started_at": account.WindowStartedAt}).Error; err != nil {
-			return account, err
-		}
-	}
-	windowEnd := AccountWindowEnd(account)
-	windowRolled := hadAnchor && anchorChanged
-	var reservations []models.QuotaReservation
-	if err := tx.Where("quota_account_id = ?", account.ID).Order("id ASC").Find(&reservations).Error; err != nil {
+	if err := expireRollingReservationsTx(tx, account.ID, now); err != nil {
 		return account, err
 	}
-	for _, reservation := range reservations {
-		if reservation.Bytes < 0 {
-			return account, fmt.Errorf("quota ledger corruption: reservation %d has negative bytes", reservation.ID)
-		}
-		updates := map[string]interface{}{}
-		switch reservation.State {
-		case models.ReservationStateCommitted:
-			if windowRolled {
-				updates["state"] = models.ReservationStateExpired
-				updates["released_at"] = now
-			} else {
-				updates["expires_at"] = windowEnd
-			}
-		case models.ReservationStateHeld, models.ReservationStateActive, models.ReservationStateUnknown:
-			if reservation.State == models.ReservationStateUnknown && reservation.ExpiresAt != nil && reservation.ExpiresAt.After(now) {
-				if err := preserveUnknownReservationRetryHintTx(tx, reservation, *reservation.ExpiresAt); err != nil {
-					return account, err
-				}
-			}
-			updates["expires_at"] = windowEnd
-		case models.ReservationStateReleased, models.ReservationStateExpired:
-		default:
-			return account, fmt.Errorf("quota ledger corruption: reservation %d has invalid state %q", reservation.ID, reservation.State)
-		}
-		if len(updates) > 0 {
-			if err := tx.Model(&models.QuotaReservation{}).Where("id = ?", reservation.ID).Updates(updates).Error; err != nil {
+	var unresolved []models.QuotaReservation
+	if err := tx.Where("quota_account_id = ? AND state IN ? AND expires_at IS NOT NULL AND expires_at > ?", account.ID, []string{models.ReservationStateHeld, models.ReservationStateActive, models.ReservationStateUnknown}, now).Find(&unresolved).Error; err != nil {
+		return account, err
+	}
+	for _, reservation := range unresolved {
+		if reservation.State == models.ReservationStateUnknown {
+			if err := preserveUnknownReservationRetryHintTx(tx, reservation, *reservation.ExpiresAt); err != nil {
 				return account, err
 			}
 		}
@@ -1270,40 +1292,430 @@ func AdvanceAccountWindowTx(tx *gorm.DB, accountID uint, now time.Time) (models.
 	if usage[account.ID] > models.DefaultRotationQuotaLimitBytes {
 		return account, fmt.Errorf("account %d: %w", account.ID, ErrQuotaWindowOverdrawn)
 	}
-	accountUpdates := map[string]interface{}{"budget_bytes": models.DefaultRotationQuotaLimitBytes, "window_seconds": models.DefaultQuotaWindowSeconds, "next_probe_at": nil, "probe_claim_token": "", "probe_claim_until": nil}
-	if anchorChanged {
+	accountUpdates := map[string]interface{}{"window_seconds": models.DefaultQuotaWindowSeconds, "fixed_window_migration_version": models.FixedWindowMigrationVersion, "quota_policy_version": models.RollingQuotaPolicyVersion, "next_probe_at": nil, "probe_claim_token": "", "probe_claim_until": nil}
+	if account.RecoveryState == "" || (account.RecoveryState == models.QuotaRecoveryStateExhausted && account.CampaignCooldownUntil == nil && (account.ProviderBlockedUntil == nil || !account.ProviderBlockedUntil.After(now))) {
 		accountUpdates["recovery_state"] = models.QuotaRecoveryStateAvailable
+	}
+	if account.CampaignCooldownUntil != nil && !account.CampaignCooldownUntil.After(now) {
+		accountUpdates["cooldown_until"] = nil
+	}
+	if account.ProviderBlockedUntil != nil && !account.ProviderBlockedUntil.After(now) {
 		accountUpdates["provider_blocked_until"] = nil
-		if windowRolled {
-			accountUpdates["first_exhausted_at"] = nil
-		}
-	} else if account.RecoveryState == models.QuotaRecoveryStateExhausted {
-		accountUpdates["provider_blocked_until"] = windowEnd
-	} else if account.ProviderBlockedUntil != nil {
-		if account.ProviderBlockedUntil.After(now) {
-			accountUpdates["provider_blocked_until"] = windowEnd
-		} else {
-			accountUpdates["provider_blocked_until"] = nil
-		}
 	}
 	if err := tx.Model(&models.QuotaAccount{}).Where("id = ?", account.ID).Updates(accountUpdates).Error; err != nil {
 		return account, err
-	}
-	if windowRolled {
-		if err := tx.Exec("UPDATE quota_accounts SET provider_blocked_until = NULL, first_exhausted_at = NULL WHERE id = ?", account.ID).Error; err != nil {
-			return account, err
-		}
-	}
-	if anchorChanged {
-		if err := retireQuotaProbeAttemptsTx(tx, now, account.ID); err != nil {
-			return account, err
-		}
 	}
 	var refreshed models.QuotaAccount
 	if err := tx.First(&refreshed, account.ID).Error; err != nil {
 		return account, err
 	}
 	return refreshed, nil
+}
+
+func migrateAccountToRollingTx(tx *gorm.DB, account models.QuotaAccount, now time.Time) error {
+	var reservations []models.QuotaReservation
+	if err := tx.Where("quota_account_id = ?", account.ID).Order("id ASC").Find(&reservations).Error; err != nil {
+		return err
+	}
+	cutoff := now.Add(-24 * time.Hour)
+	for _, reservation := range reservations {
+		if reservation.Bytes < 0 {
+			return fmt.Errorf("quota ledger corruption: reservation %d has negative bytes", reservation.ID)
+		}
+		if reservation.State != models.ReservationStateCommitted {
+			continue
+		}
+		var evidence *time.Time
+		var err error
+		if reservation.CommittedAt != nil {
+			value := reservation.CommittedAt.UTC()
+			evidence = &value
+		} else {
+			evidence, err = legacyReservationCompletionEvidenceTx(tx, reservation)
+		}
+		if err != nil {
+			return err
+		}
+		committedAt, expired := legacyRollingCommittedAt(account, reservation, evidence, now)
+		updates := map[string]interface{}{"committed_at": committedAt}
+		if expired || !committedAt.After(cutoff) {
+			updates["state"] = models.ReservationStateExpired
+			updates["released_at"] = now
+		}
+		if err := tx.Model(&models.QuotaReservation{}).Where("id = ? AND state = ?", reservation.ID, models.ReservationStateCommitted).Updates(updates).Error; err != nil {
+			return err
+		}
+	}
+	updates := map[string]interface{}{
+		"window_seconds":                 models.DefaultQuotaWindowSeconds,
+		"fixed_window_migration_version": models.FixedWindowMigrationVersion,
+		"quota_policy_version":           models.RollingQuotaPolicyVersion,
+		"next_probe_at":                  nil,
+		"probe_claim_token":              "",
+		"probe_claim_until":              nil,
+	}
+	// Fixed-window exhaustion never becomes a new rolling campaign cooldown.
+	// Only the legacy provider boundary itself may remain as an outage hold.
+	updates["cooldown_until"] = nil
+	if account.ProviderBlockedUntil != nil && account.ProviderBlockedUntil.After(now) {
+		updates["provider_blocked_until"] = account.ProviderBlockedUntil
+	} else {
+		updates["provider_blocked_until"] = nil
+	}
+	updates["recovery_state"] = models.QuotaRecoveryStateAvailable
+	updates["first_exhausted_at"] = nil
+	return tx.Model(&models.QuotaAccount{}).Where("id = ? AND quota_policy_version < ?", account.ID, models.RollingQuotaPolicyVersion).Updates(updates).Error
+}
+
+func legacyReservationCompletionEvidenceTx(tx *gorm.DB, reservation models.QuotaReservation) (*time.Time, error) {
+	if tx.Migrator().HasTable(&models.RotationQuotaBatchFile{}) && reservation.BatchFileID != 0 {
+		var file models.RotationQuotaBatchFile
+		result := tx.Where("id = ?", reservation.BatchFileID).Limit(1).Find(&file)
+		if result.Error != nil {
+			return nil, result.Error
+		}
+		if file.ID != 0 && file.VerifiedAt != nil {
+			value := file.VerifiedAt.UTC()
+			return &value, nil
+		}
+	}
+	if tx.Migrator().HasTable(&models.RotationQuotaBatch{}) && reservation.BatchID != 0 {
+		var batch models.RotationQuotaBatch
+		result := tx.Where("id = ?", reservation.BatchID).Limit(1).Find(&batch)
+		if result.Error != nil {
+			return nil, result.Error
+		}
+		if batch.ID != 0 && batch.FinishedAt != nil {
+			value := batch.FinishedAt.UTC()
+			return &value, nil
+		}
+	}
+	return nil, nil
+}
+
+func legacyRollingCommittedAt(account models.QuotaAccount, reservation models.QuotaReservation, evidence *time.Time, now time.Time) (time.Time, bool) {
+	const rollingWindow = 24 * time.Hour
+	deadline, hasDeadline := legacyReservationDeadline(account, reservation, now)
+	if hasDeadline {
+		candidate := deadline.Add(-rollingWindow)
+		validEvidence := evidence != nil && !evidence.After(now)
+		if validEvidence && evidence.Before(candidate) {
+			candidate = evidence.UTC()
+		}
+		if candidate.After(now) {
+			// A future v1 deadline with no completed work evidence cannot be
+			// turned into a new charge beginning at migration time.
+			return now.Add(-rollingWindow).UTC(), true
+		}
+		return candidate, !candidate.After(now.Add(-rollingWindow))
+	}
+	if evidence != nil && !evidence.After(now) {
+		candidate := evidence.UTC()
+		return candidate, !candidate.After(now.Add(-rollingWindow))
+	}
+	// There is no trustworthy legacy clock. Do not translate that uncertainty
+	// into a fresh 24h charge from migration time; expire the row at the exact
+	// rolling cutoff instead.
+	return now.Add(-rollingWindow).UTC(), true
+}
+
+func legacyReservationDeadline(account models.QuotaAccount, reservation models.QuotaReservation, now time.Time) (time.Time, bool) {
+	var deadline *time.Time
+	add := func(candidate time.Time) {
+		candidate = candidate.UTC()
+		if candidate.IsZero() || (deadline != nil && !candidate.Before(*deadline)) {
+			return
+		}
+		value := candidate
+		deadline = &value
+	}
+	if reservation.ExpiresAt != nil {
+		add(*reservation.ExpiresAt)
+	}
+	if account.WindowStartedAt != nil && !account.WindowStartedAt.After(now) {
+		window := time.Duration(account.WindowSeconds) * time.Second
+		if window <= 0 {
+			window = 24 * time.Hour
+		}
+		add(account.WindowStartedAt.Add(window))
+	}
+	if account.ProviderBlockedUntil != nil && account.ProviderBlockedUntil.After(now) {
+		add(*account.ProviderBlockedUntil)
+	}
+	if deadline == nil {
+		return time.Time{}, false
+	}
+	return *deadline, true
+}
+
+func expireRollingReservationsTx(tx *gorm.DB, accountID uint, now time.Time) error {
+	cutoff := now.Add(-24 * time.Hour)
+	return tx.Model(&models.QuotaReservation{}).
+		Where("quota_account_id = ? AND state = ? AND committed_at IS NOT NULL AND committed_at <= ?", accountID, models.ReservationStateCommitted, cutoff).
+		Updates(map[string]interface{}{"state": models.ReservationStateExpired, "released_at": now}).Error
+}
+
+func nextAccountRecoveryTx(tx *gorm.DB, account models.QuotaAccount, now time.Time) (*time.Time, error) {
+	var next *time.Time
+	add := func(candidate time.Time) {
+		if !candidate.After(now) || (next != nil && !candidate.Before(*next)) {
+			return
+		}
+		value := candidate
+		next = &value
+	}
+	var hardHoldUntil *time.Time
+	addHardHold := func(candidate *time.Time) {
+		if candidate == nil || !candidate.After(now) || (hardHoldUntil != nil && !candidate.After(*hardHoldUntil)) {
+			return
+		}
+		value := candidate.UTC()
+		hardHoldUntil = &value
+	}
+	addHardHold(account.CampaignCooldownUntil)
+	addHardHold(account.ProviderBlockedUntil)
+	if hardHoldUntil != nil {
+		return hardHoldUntil, nil
+	}
+	var reservations []models.QuotaReservation
+	if err := tx.Where("quota_account_id = ? AND state IN ?", account.ID, []string{models.ReservationStateHeld, models.ReservationStateActive, models.ReservationStateUnknown, models.ReservationStateCommitted}).Find(&reservations).Error; err != nil {
+		return nil, err
+	}
+	for _, reservation := range reservations {
+		switch reservation.State {
+		case models.ReservationStateCommitted:
+			if reservation.CommittedAt == nil {
+				add(now.Add(24 * time.Hour))
+			} else {
+				add(reservation.CommittedAt.Add(24 * time.Hour))
+			}
+		case models.ReservationStateHeld, models.ReservationStateActive, models.ReservationStateUnknown:
+			if reservation.ExpiresAt != nil {
+				add(*reservation.ExpiresAt)
+			}
+		}
+	}
+	return next, nil
+}
+
+// NextAccountRecovery returns the earliest durable recovery point for an
+// account. It does not mutate the ledger and is safe for status projections.
+func NextAccountRecovery(tx *gorm.DB, accountID uint, now time.Time) (*time.Time, error) {
+	var account models.QuotaAccount
+	if err := tx.First(&account, accountID).Error; err != nil {
+		return nil, err
+	}
+	return nextAccountRecoveryTx(tx, account, now)
+}
+
+func accountForecasts(tx *gorm.DB, ids []uint, now time.Time) (map[uint]int64, error) {
+	result := make(map[uint]int64, len(ids))
+	for _, id := range ids {
+		forecast, err := Forecast3HBytes(tx, id, now)
+		if err != nil {
+			return nil, err
+		}
+		result[id] = forecast
+	}
+	return result, nil
+}
+
+// Forecast3HBytes derives a conservative forecast from durable completed
+// reservations. The observed interval begins with the oldest recent commit.
+func Forecast3HBytes(tx *gorm.DB, accountID uint, now time.Time) (int64, error) {
+	cutoff := now.Add(-24 * time.Hour)
+	var reservations []models.QuotaReservation
+	if err := tx.Where("quota_account_id = ? AND state = ? AND committed_at IS NOT NULL AND committed_at > ?", accountID, models.ReservationStateCommitted, cutoff).Find(&reservations).Error; err != nil {
+		return 0, err
+	}
+	if len(reservations) == 0 {
+		return 0, nil
+	}
+	var total int64
+	oldest := now
+	for _, reservation := range reservations {
+		var batch models.RotationQuotaBatch
+		if reservation.BatchID != 0 && tx.First(&batch, reservation.BatchID).Error != nil {
+			continue
+		}
+		if err := safeBytesAdd(&total, reservation.Bytes); err != nil {
+			return 0, err
+		}
+		if reservation.CommittedAt.Before(oldest) {
+			oldest = *reservation.CommittedAt
+		}
+	}
+	span := now.Sub(oldest)
+	if span < time.Second {
+		span = time.Second
+	}
+	forecast := float64(total) * float64(3*time.Hour) / float64(span)
+	if forecast >= float64(int64(^uint64(0)>>1)) {
+		return int64(^uint64(0) >> 1), nil
+	}
+	return int64(forecast), nil
+}
+
+func safeBytesAdd(target *int64, value int64) error {
+	updated, err := safeAdd(*target, value)
+	if err != nil {
+		return fmt.Errorf("quota forecast overflows int64")
+	}
+	*target = updated
+	return nil
+}
+
+// ApplyCommittedQuotaTx updates the local cooldown after a successful commit.
+// The caller must already be in the completion transaction.
+func ApplyCommittedQuotaTx(tx *gorm.DB, accountID uint, committedAt time.Time) error {
+	var account models.QuotaAccount
+	if err := tx.First(&account, accountID).Error; err != nil {
+		return err
+	}
+	usage, err := rollingCommittedUsage(tx, accountID, committedAt)
+	if err != nil {
+		return err
+	}
+	limit := account.BudgetBytes
+	if limit > models.DefaultRotationQuotaLimitBytes || limit <= 0 {
+		limit = models.DefaultRotationQuotaLimitBytes
+	}
+	if usage < limit {
+		return nil
+	}
+	until := committedAt.Add(24 * time.Hour)
+	if account.CampaignCooldownUntil != nil && account.CampaignCooldownUntil.After(until) {
+		until = *account.CampaignCooldownUntil
+	}
+	return tx.Model(&models.QuotaAccount{}).Where("id = ?", accountID).Updates(map[string]interface{}{"cooldown_until": until, "recovery_state": models.QuotaRecoveryStateAvailable}).Error
+}
+
+func rollingCommittedUsage(tx *gorm.DB, accountID uint, now time.Time) (int64, error) {
+	var reservations []models.QuotaReservation
+	if err := tx.Where("quota_account_id = ? AND state = ?", accountID, models.ReservationStateCommitted).Find(&reservations).Error; err != nil {
+		return 0, err
+	}
+	cutoff := now.Add(-24 * time.Hour)
+	var total int64
+	for _, reservation := range reservations {
+		if reservation.CommittedAt != nil && !reservation.CommittedAt.After(cutoff) {
+			continue
+		}
+		if err := safeBytesAdd(&total, reservation.Bytes); err != nil {
+			return 0, err
+		}
+	}
+	return total, nil
+}
+
+// RollingCommittedBytes returns committed rolling usage across every account.
+// It is used only for telemetry comparison and never gates scheduling.
+func RollingCommittedBytes(tx *gorm.DB, now time.Time) (int64, error) {
+	var reservations []models.QuotaReservation
+	if err := tx.Where("state = ?", models.ReservationStateCommitted).Find(&reservations).Error; err != nil {
+		return 0, err
+	}
+	cutoff := now.Add(-24 * time.Hour)
+	var total int64
+	for _, reservation := range reservations {
+		if reservation.CommittedAt != nil && !reservation.CommittedAt.After(cutoff) {
+			continue
+		}
+		if err := safeBytesAdd(&total, reservation.Bytes); err != nil {
+			return 0, err
+		}
+	}
+	return total, nil
+}
+
+type ManualResetRequest struct {
+	TaskID        uint
+	AccountID     uint
+	ActorIdentity string
+	ActorType     string
+	RequestedAt   time.Time
+	RequestCutoff time.Time
+}
+
+type ManualResetResult struct {
+	RequestCutoff time.Time
+	EffectiveAt   time.Time
+	ExpiredRows   int64
+}
+
+// ManualReset expires only committed historical quota. The cutoff is captured
+// before the transaction starts so a completion committed after the request
+// remains durable even if this reset obtains the account lock later.
+func ManualReset(database *gorm.DB, accountID uint, now time.Time) error {
+	_, err := manualReset(database, ManualResetRequest{AccountID: accountID, RequestedAt: now, RequestCutoff: now}, false)
+	return err
+}
+
+// ManualResetWithAudit performs the ordinary administrator reset and appends
+// its durable event in the same transaction as the quota mutation.
+func ManualResetWithAudit(database *gorm.DB, request ManualResetRequest) (ManualResetResult, error) {
+	return manualReset(database, request, true)
+}
+
+func manualReset(database *gorm.DB, request ManualResetRequest, audit bool) (ManualResetResult, error) {
+	result := ManualResetResult{}
+	if database == nil {
+		return result, errors.New("quota database is required")
+	}
+	requestedAt := request.RequestedAt.UTC()
+	if requestedAt.IsZero() {
+		requestedAt = time.Now().UTC()
+	}
+	cutoff := request.RequestCutoff.UTC()
+	if cutoff.IsZero() {
+		cutoff = requestedAt
+	}
+	// These values are deliberately finalized before opening the transaction.
+	result.RequestCutoff = cutoff
+	err := database.Transaction(func(tx *gorm.DB) error {
+		var account models.QuotaAccount
+		lock := tx.Model(&models.QuotaAccount{}).Where("id = ?", request.AccountID).UpdateColumn("updated_at", gorm.Expr("updated_at"))
+		if lock.Error != nil {
+			return lock.Error
+		}
+		if lock.RowsAffected != 1 {
+			return gorm.ErrRecordNotFound
+		}
+		if err := tx.First(&account, request.AccountID).Error; err != nil {
+			return err
+		}
+		effectiveAt := requestedAt
+		updated := tx.Model(&models.QuotaReservation{}).
+			Where("quota_account_id = ? AND state = ? AND committed_at IS NOT NULL AND committed_at <= ?", request.AccountID, models.ReservationStateCommitted, cutoff).
+			Updates(map[string]interface{}{"state": models.ReservationStateExpired, "released_at": effectiveAt})
+		if updated.Error != nil {
+			return updated.Error
+		}
+		result.ExpiredRows = updated.RowsAffected
+		if err := tx.Model(&models.QuotaAccount{}).Where("id = ?", request.AccountID).Updates(map[string]interface{}{
+			// This is the intentional campaign cooldown only. Provider block and
+			// recovery evidence are independent hard safety state and survive.
+			"cooldown_until":       nil,
+			"last_manual_reset_at": effectiveAt,
+		}).Error; err != nil {
+			return err
+		}
+		result.EffectiveAt = effectiveAt
+		if audit {
+			event := models.QuotaManualResetEvent{
+				TaskID: request.TaskID, QuotaAccountID: request.AccountID,
+				ActorIdentity: request.ActorIdentity, ActorType: request.ActorType,
+				RequestedAt: requestedAt, RequestCutoff: cutoff, EffectiveAt: &effectiveAt,
+				Outcome: models.QuotaManualResetOutcomeSucceeded,
+				Details: fmt.Sprintf("expired %d committed reservations and cleared campaign cooldown", result.ExpiredRows),
+			}
+			if err := tx.Create(&event).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return result, err
 }
 
 func preserveUnknownReservationRetryHintTx(tx *gorm.DB, reservation models.QuotaReservation, retryAt time.Time) error {

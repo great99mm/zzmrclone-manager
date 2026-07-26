@@ -45,6 +45,8 @@ export const getProactiveStatus = (id, limit = 100, summary = false) => {
   const summaryParam = summary ? '&summary=true' : '';
   return api.get(`/tasks/${id}/proactive-status?limit=${limit}${summaryParam}&token=${encodeURIComponent(token)}`);
 };
+export const manualResetQuotaAccount = (taskId, accountId) =>
+  api.post(`/tasks/${taskId}/quota-accounts/${encodeURIComponent(accountId)}/manual-reset`, { confirmation: 'RESET' });
 export const resolveProactiveBatch = (taskId, resolution) => {
   const token = localStorage.getItem('apiToken') || localStorage.getItem('token') || '';
   return api.post(`/tasks/${taskId}/proactive-resolutions?token=${encodeURIComponent(token)}`, resolution);

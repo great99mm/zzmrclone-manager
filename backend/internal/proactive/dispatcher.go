@@ -15,6 +15,7 @@ import (
 	"gorm.io/gorm"
 	"rclone-manager/internal/models"
 	"rclone-manager/internal/quota"
+	"rclone-manager/internal/telemetry"
 )
 
 type LocalScanner interface {
@@ -71,6 +72,7 @@ func (d *Dispatcher) RequestScan(ctx context.Context, taskID uint) error {
 	if d == nil || d.DB == nil || d.Quota == nil || d.Executor == nil {
 		return errors.New("proactive dispatcher dependencies are required")
 	}
+	_ = telemetry.Capture(d.DB, d.now())
 	generation, err := d.markPending(taskID)
 	if err != nil {
 		return err
@@ -840,6 +842,7 @@ func (d *Dispatcher) PersistImmediateWake(taskID uint) error { return d.persistI
 // ProjectStatuses derives task status from the durable quota ledger. It must
 // run after recovery and before trigger registration.
 func (d *Dispatcher) ProjectStatuses() error {
+	_ = telemetry.Capture(d.DB, d.now())
 	var accountIDs []uint
 	if err := d.DB.Model(&models.QuotaAccount{}).Pluck("id", &accountIDs).Error; err != nil {
 		return err
@@ -1049,7 +1052,7 @@ func defaultQuotaKey(config, remote string) string {
 func (d *Dispatcher) upsertAccounts(task models.Task, resolved string, keys map[string]string) error {
 	var lastErr error
 	for attempt := 0; attempt < d.retryMax(); attempt++ {
-		lastErr = d.upsertAccountsAttempt(resolved, keys)
+		lastErr = d.upsertAccountsAttempt(resolved, keys, d.now())
 		if lastErr == nil {
 			return nil
 		}
@@ -1061,8 +1064,9 @@ func (d *Dispatcher) upsertAccounts(task models.Task, resolved string, keys map[
 	return lastErr
 }
 
-func (d *Dispatcher) upsertAccountsAttempt(resolved string, keys map[string]string) error {
+func (d *Dispatcher) upsertAccountsAttempt(resolved string, keys map[string]string, now time.Time) error {
 	return d.DB.Transaction(func(tx *gorm.DB) error {
+		_ = now
 		remotes := make([]string, 0, len(keys))
 		for remote := range keys {
 			remotes = append(remotes, remote)
@@ -1073,7 +1077,7 @@ func (d *Dispatcher) upsertAccountsAttempt(resolved string, keys map[string]stri
 			var account models.QuotaAccount
 			err := tx.Where("quota_key = ?", key).First(&account).Error
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				if err := tx.Create(&models.QuotaAccount{QuotaKey: key, RemoteName: remote, ConfigIdentity: resolved, BudgetBytes: models.DefaultRotationQuotaLimitBytes, WindowSeconds: 86400, Enabled: true}).Error; err != nil {
+				if err := tx.Create(&models.QuotaAccount{QuotaKey: key, RemoteName: remote, ConfigIdentity: resolved, BudgetBytes: models.DefaultRotationQuotaLimitBytes, WindowSeconds: models.DefaultQuotaWindowSeconds, FixedWindowMigrationVersion: models.FixedWindowMigrationVersion, QuotaPolicyVersion: models.RollingQuotaPolicyVersion, RecoveryState: models.QuotaRecoveryStateAvailable, Enabled: true}).Error; err != nil {
 					return err
 				}
 			} else if err != nil {
@@ -1652,7 +1656,102 @@ func (d *Dispatcher) WakeQuotaAccounts(accountIDs []uint) error {
 	if d == nil || d.DB == nil || d.Quota == nil {
 		return errors.New("proactive dispatcher quota dependencies are required")
 	}
-	return d.persistAccountWakeForAccounts(accountIDs, d.now(), true)
+	wanted := make(map[uint]struct{}, len(accountIDs))
+	for _, accountID := range accountIDs {
+		wanted[accountID] = struct{}{}
+	}
+	var tasks []models.Task
+	if err := d.DB.Where("enabled = ? AND task_type = ? AND rotation_strategy = ?", true, "rotation", "proactive_quota").Find(&tasks).Error; err != nil {
+		return err
+	}
+	var wantedAccounts []models.QuotaAccount
+	if err := d.DB.Where("id IN ?", accountIDs).Find(&wantedAccounts).Error; err != nil {
+		return err
+	}
+	wantedKeys := make(map[string]struct{}, len(wantedAccounts))
+	for _, account := range wantedAccounts {
+		wantedKeys[account.QuotaKey] = struct{}{}
+	}
+	now := d.now()
+	for _, task := range tasks {
+		shares, err := d.taskSharesQuotaAccounts(task, wanted, wantedKeys, wantedAccounts)
+		if err != nil {
+			// A malformed/unavailable unrelated task must not prevent other
+			// matching tasks from receiving a durable wake.
+			continue
+		}
+		if !shares {
+			continue
+		}
+		if _, err := d.markPending(task.ID); err != nil {
+			return err
+		}
+		if err := d.setEarliestWake(task.ID, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *Dispatcher) taskSharesQuotaAccounts(task models.Task, wanted map[uint]struct{}, wantedKeys map[string]struct{}, wantedAccounts []models.QuotaAccount) (bool, error) {
+	explicit, err := models.ParseRotationQuotaKeys(task.RotationQuotaKeys)
+	if err != nil {
+		return false, err
+	}
+	remotes := models.ParseRotationRemotes(task.RotationRemotes)
+	for _, remote := range remotes {
+		if _, ok := wantedKeys[strings.TrimSpace(explicit[remote])]; ok {
+			return true, nil
+		}
+	}
+	hasImplicitRemote := false
+	for _, remote := range remotes {
+		if strings.TrimSpace(explicit[remote]) == "" {
+			hasImplicitRemote = true
+			break
+		}
+	}
+	potential := false
+	rawConfig := strings.TrimSpace(task.RcloneConfig)
+	for _, account := range wantedAccounts {
+		if hasImplicitRemote && (account.RemoteName == "" || rawConfig != "" && filepath.Clean(rawConfig) == filepath.Clean(account.ConfigIdentity)) {
+			potential = true
+			break
+		}
+		for _, remote := range remotes {
+			if strings.TrimSpace(explicit[remote]) == "" && account.RemoteName == remote {
+				potential = true
+				break
+			}
+		}
+		if potential {
+			break
+		}
+	}
+	if !potential {
+		return false, nil
+	}
+	resolved, err := d.Quota.ResolveConfigPath(task.RcloneConfig)
+	if err != nil {
+		return false, err
+	}
+	keys, err := completeQuotaKeys(task, resolved)
+	if err != nil {
+		return false, err
+	}
+	ids, err := quotaAccountIDsForKeys(d.DB, keys)
+	if err != nil {
+		if errors.Is(err, errIncompleteQuotaAccountMapping) {
+			return false, nil
+		}
+		return false, err
+	}
+	for _, id := range ids {
+		if _, ok := wanted[id]; ok {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (d *Dispatcher) persistAccountWakeForAccounts(accountIDs []uint, now time.Time, immediate bool) error {
@@ -1670,11 +1769,11 @@ func (d *Dispatcher) persistAccountWakeForAccounts(accountIDs []uint, now time.T
 	for _, task := range tasks {
 		resolved, err := d.Quota.ResolveConfigPath(task.RcloneConfig)
 		if err != nil {
-			return err
+			continue
 		}
 		keys, err := completeQuotaKeys(task, resolved)
 		if err != nil {
-			return err
+			continue
 		}
 		taskAccountIDs, err := quotaAccountIDsForKeys(d.DB, keys)
 		if err != nil {
@@ -1755,12 +1854,12 @@ func (d *Dispatcher) computeWake(keys map[string]string, now time.Time) (*time.T
 	}
 	var wake *time.Time
 	for _, a := range accounts {
-		if err := quota.ValidateAccountWindow(a, now); err != nil {
+		candidate, err := quota.NextAccountRecovery(d.DB, a.ID, now)
+		if err != nil {
 			return nil, err
 		}
-		candidate := quota.AccountWindowEnd(a)
-		if candidate.After(now) && (wake == nil || candidate.Before(*wake)) {
-			v := candidate
+		if candidate != nil && candidate.After(now) && (wake == nil || candidate.Before(*wake)) {
+			v := *candidate
 			wake = &v
 		}
 	}

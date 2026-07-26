@@ -175,6 +175,7 @@ func recordMoveResolutionEvidence(database *gorm.DB, batchID, fileID uint, messa
 }
 
 func commitMoveResolution(database *gorm.DB, batch models.RotationQuotaBatch, file models.RotationQuotaBatchFile, reservation models.QuotaReservation, request MoveResolutionRequest, fileState, handoffState, reservationState string) (MoveResolutionResult, error) {
+	commitAt := time.Now()
 	err := database.Transaction(func(tx *gorm.DB) error {
 		fileQuery := tx.Model(&models.RotationQuotaBatchFile{}).Where("id = ? AND batch_id = ? AND state = ? AND move_handoff_state = ? AND updated_at = ?", file.ID, batch.ID, models.BatchFileStateUnknown, models.MoveHandoffUnknown, request.ExpectedUpdatedAt)
 		if request.OperationToken != "" {
@@ -188,8 +189,11 @@ func commitMoveResolution(database *gorm.DB, batch models.RotationQuotaBatch, fi
 			return ErrMoveResolutionConflict
 		}
 		reservationUpdates := map[string]interface{}{"state": reservationState}
+		if reservationState == models.ReservationStateCommitted {
+			reservationUpdates["committed_at"] = commitAt
+		}
 		if reservationState == models.ReservationStateReleased {
-			reservationUpdates["released_at"] = time.Now()
+			reservationUpdates["released_at"] = commitAt
 		}
 		reservationUpdate := tx.Model(&models.QuotaReservation{}).Where("id = ? AND batch_id = ? AND batch_file_id = ? AND state = ?", reservation.ID, batch.ID, file.ID, models.ReservationStateUnknown).Updates(reservationUpdates)
 		if reservationUpdate.Error != nil {
@@ -212,7 +216,7 @@ func commitMoveResolution(database *gorm.DB, batch models.RotationQuotaBatch, fi
 			if failed > 0 {
 				updates["state"] = models.BatchStateFailed
 			}
-			updates["finished_at"] = time.Now()
+			updates["finished_at"] = commitAt
 		}
 		result := tx.Model(&models.RotationQuotaBatch{}).Where("id = ? AND state IN ?", batch.ID, []string{models.BatchStateUnknown, models.BatchStateReconciling}).Updates(updates)
 		if result.Error != nil {
@@ -220,6 +224,11 @@ func commitMoveResolution(database *gorm.DB, batch models.RotationQuotaBatch, fi
 		}
 		if result.RowsAffected != 1 {
 			return ErrMoveResolutionConflict
+		}
+		if reservationState == models.ReservationStateCommitted {
+			if err := quota.ApplyCommittedQuotaTx(tx, batch.QuotaAccountID, commitAt); err != nil {
+				return err
+			}
 		}
 		return nil
 	})

@@ -213,9 +213,8 @@ func (e *Executor) startMoveIntent(batchID uint, token string) error {
 		if len(reservations) == 0 {
 			return errors.New("batch has no reservations")
 		}
-		windowEnd := quota.AccountWindowEnd(account)
 		for _, reservation := range reservations {
-			if reservation.State != models.ReservationStateHeld || reservation.ExpiresAt == nil || !reservation.ExpiresAt.After(now) || !reservation.ExpiresAt.Equal(windowEnd) {
+			if reservation.State != models.ReservationStateHeld {
 				return errors.New("batch reservation is not held and unexpired")
 			}
 		}
@@ -351,6 +350,7 @@ func (e *Executor) cleanupCompletedMoveSourceDirs(batch models.RotationQuotaBatc
 }
 
 func (e *Executor) reconcileMove(batch models.RotationQuotaBatch, files []models.RotationQuotaBatchFile, token string, quarantine *quota.MoveQuarantine) error {
+	commitAt := e.now()
 	return e.claimTransaction(func(tx *gorm.DB) error {
 		var current models.RotationQuotaBatch
 		if err := tx.First(&current, batch.ID).Error; err != nil {
@@ -360,6 +360,7 @@ func (e *Executor) reconcileMove(batch models.RotationQuotaBatch, files []models
 			return ErrLeaseConflict
 		}
 		allMoved := true
+		committed := false
 		for _, file := range files {
 			present, device, inode, err := quarantine.Present(file.RelativePath, quota.LocalSnapshot{RelativePath: file.RelativePath, SizeBytes: file.SizeBytes, MtimeNS: file.MtimeNS, Device: file.Device, Inode: file.Inode})
 			if err != nil {
@@ -386,18 +387,19 @@ func (e *Executor) reconcileMove(batch models.RotationQuotaBatch, files []models
 					}
 					return ErrLeaseConflict
 				}
-				if result := tx.Model(&models.QuotaReservation{}).Where("batch_file_id = ? AND batch_id = ? AND state IN ?", file.ID, current.ID, []string{models.ReservationStateActive, models.ReservationStateUnknown}).Update("state", models.ReservationStateCommitted); result.Error != nil || result.RowsAffected != 1 {
+				if result := tx.Model(&models.QuotaReservation{}).Where("batch_file_id = ? AND batch_id = ? AND state IN ?", file.ID, current.ID, []string{models.ReservationStateActive, models.ReservationStateUnknown}).Updates(map[string]interface{}{"state": models.ReservationStateCommitted, "committed_at": commitAt}); result.Error != nil || result.RowsAffected != 1 {
 					if result.Error != nil {
 						return result.Error
 					}
 					return ErrLeaseConflict
 				}
+				committed = true
 			}
 		}
 		updates := map[string]interface{}{"state": models.BatchStateUnknown, "completion_evidence": models.CompletionEvidenceLocal, "completion_evidence_version": models.MoveCompletionEvidenceVersion}
 		if allMoved {
 			updates["state"] = models.BatchStateSucceeded
-			updates["finished_at"] = e.now()
+			updates["finished_at"] = commitAt
 		}
 		result := tx.Model(&models.RotationQuotaBatch{}).Where("id = ? AND lease_token = ? AND state = ?", current.ID, token, models.BatchStateReconciling).Updates(updates)
 		if result.Error != nil {
@@ -405,6 +407,11 @@ func (e *Executor) reconcileMove(batch models.RotationQuotaBatch, files []models
 		}
 		if result.RowsAffected != 1 {
 			return ErrLeaseConflict
+		}
+		if committed {
+			if err := quota.ApplyCommittedQuotaTx(tx, current.QuotaAccountID, commitAt); err != nil {
+				return err
+			}
 		}
 		return nil
 	})

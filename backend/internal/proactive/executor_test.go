@@ -105,7 +105,7 @@ func executionFixture(t *testing.T, db *gorm.DB, size int64) (models.RotationQuo
 		t.Fatal(err)
 	}
 	snapshot := snapshots[0]
-	account := models.QuotaAccount{QuotaKey: "key", BudgetBytes: 100, Enabled: true, WindowSeconds: 3600}
+	account := models.QuotaAccount{QuotaKey: "key", BudgetBytes: 100, Enabled: true, WindowSeconds: models.DefaultQuotaWindowSeconds, FixedWindowMigrationVersion: models.FixedWindowMigrationVersion}
 	if err := db.Create(&account).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -197,6 +197,9 @@ func TestExecutorCopySuccessAndSpec(t *testing.T) {
 	if reservation.State != models.ReservationStateCommitted {
 		t.Fatalf("reservation=%#v", reservation)
 	}
+	if reservation.CommittedAt == nil || stored.FinishedAt == nil || !reservation.CommittedAt.Equal(*stored.FinishedAt) {
+		t.Fatalf("commit timestamp was not durable and batch-atomic: reservation=%#v batch=%#v", reservation, stored)
+	}
 }
 
 func TestExecutorRefusesStartedReservedBatch(t *testing.T) {
@@ -220,7 +223,7 @@ func TestExecRunnerTokenFailureUsesWaitAndReconcilesMarker(t *testing.T) {
 	db := executionDB(t)
 	batch, file, config := executionFixture(t, db, 8)
 	script := filepath.Join(t.TempDir(), "runner")
-	body := "#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = lsjson ]; then printf '%s' '{\"Path\":\"file.txt\",\"Size\":9,\"IsDir\":false}'; exit 0; fi; done\nprintf '%s' 'drive upload limit exceeded'\n"
+	body := "#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = lsjson ]; then printf '%s' '{\"Path\":\"file.txt\",\"Size\":9,\"IsDir\":false}'; exit 0; fi; done\nprintf '%s' 'Google API 403: drive upload limit exceeded'\n"
 	if err := os.WriteFile(script, []byte(body), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -463,12 +466,11 @@ func TestBlockedAccountRetainsPlannedBatch(t *testing.T) {
 func TestExhaustedRecoveryRetainsPlannedBatchAfterLegacyBlockExpires(t *testing.T) {
 	db := executionDB(t)
 	batch, _, _ := executionFixture(t, db, 8)
-	past := time.Unix(90, 0)
+	future := time.Unix(100, 0).Add(time.Hour)
 	if err := db.Model(&models.QuotaAccount{}).Where("id = ?", batch.QuotaAccountID).Updates(map[string]interface{}{
-		"provider_blocked_until": past,
-		"recovery_state":         models.QuotaRecoveryStateExhausted,
+		"provider_blocked_until": future,
+		"recovery_state":         models.QuotaRecoveryStateAvailable,
 		"recovery_generation":    1,
-		"window_started_at":      time.Unix(100, 0),
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -494,7 +496,7 @@ func TestToReconcilingPersistsMarkerAndExhaustionTogether(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := &Executor{DB: db, Now: func() time.Time { return time.Unix(100, 0) }}
-	if err := e.toReconciling(batch.ID, lease, ProcessResult{ExitCode: 1, Stderr: "drive upload limit exceeded"}, nil); err != nil {
+	if err := e.toReconciling(batch.ID, lease, ProcessResult{ExitCode: 1, Stderr: "Google API 403: drive upload limit exceeded"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	var stored models.RotationQuotaBatch
@@ -508,7 +510,8 @@ func TestToReconcilingPersistsMarkerAndExhaustionTogether(t *testing.T) {
 	if err := db.First(&account, batch.QuotaAccountID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if account.RecoveryState != models.QuotaRecoveryStateExhausted || account.RecoveryGeneration != 1 || account.NextProbeAt != nil || account.ProviderBlockedUntil == nil || !account.ProviderBlockedUntil.Equal(time.Unix(100, 0).Add(24*time.Hour)) {
+	wantBlock := time.Unix(100, 0).Add(24 * time.Hour)
+	if account.RecoveryState != models.QuotaRecoveryStateAvailable || account.RecoveryGeneration != 0 || account.NextProbeAt != nil || account.ProviderBlockedUntil == nil || !account.ProviderBlockedUntil.Equal(wantBlock) {
 		t.Fatalf("atomic marker recovery outcome = %#v", account)
 	}
 }
@@ -529,7 +532,7 @@ func TestUnknownSiblingBlocksSameDestinationScope(t *testing.T) {
 func TestExecutorVerifiedMarkerBatchBecomesTerminalAndFreezesAccount(t *testing.T) {
 	db := executionDB(t)
 	batch, file, _ := executionFixture(t, db, 8)
-	runner := &fakeRunner{process: &fakeProcess{result: ProcessResult{ExitCode: 1, PID: 43, ProcessStartToken: "43:1", Stderr: "drive upload limit exceeded"}}, object: RemoteObject{Path: file.RelativePath, Size: file.SizeBytes}}
+	runner := &fakeRunner{process: &fakeProcess{result: ProcessResult{ExitCode: 1, PID: 43, ProcessStartToken: "43:1", Stderr: "Google API 403: drive upload limit exceeded"}}, object: RemoteObject{Path: file.RelativePath, Size: file.SizeBytes}}
 	executor := &Executor{DB: db, ManifestDir: t.TempDir(), Runner: runner, Now: func() time.Time { return time.Unix(100, 0) }}
 	if err := executor.RunBatch(context.Background(), batch.ID); err != nil {
 		t.Fatal(err)
@@ -562,7 +565,7 @@ func TestExecutorVerifiedMarkerBatchBecomesTerminalAndFreezesAccount(t *testing.
 }
 
 func TestDetectUploadLimit(t *testing.T) {
-	if !DetectUploadLimit("fatal: drive upload limit exceeded").Detected {
+	if !DetectUploadLimit("fatal: Google API 403: drive upload limit exceeded").Detected {
 		t.Fatal("marker not detected")
 	}
 	if DetectUploadLimit("ordinary copy completed").Detected {
@@ -601,7 +604,7 @@ func TestMissingProcessIdentityBecomesUnknown(t *testing.T) {
 	}
 }
 
-func TestMarkerUsesFixedAccountWindowAndDoesNotExtendIt(t *testing.T) {
+func TestProvider403UsesIndependent24HourBlockAndDoesNotExtendIt(t *testing.T) {
 	db := executionDB(t)
 	batch, _, _ := executionFixture(t, db, 8)
 	lease := "marker-lease"
@@ -609,36 +612,34 @@ func TestMarkerUsesFixedAccountWindowAndDoesNotExtendIt(t *testing.T) {
 	if err := db.Model(&models.RotationQuotaBatch{}).Where("id = ?", batch.ID).Updates(map[string]interface{}{"state": models.BatchStateReconciling, "lease_token": lease}).Error; err != nil {
 		t.Fatal(err)
 	}
-	anchor := time.Unix(100, 0)
-	if err := db.Model(&models.QuotaAccount{}).Where("id = ?", batch.QuotaAccountID).Updates(map[string]interface{}{"provider_blocked_until": until, "window_started_at": anchor}).Error; err != nil {
+	if err := db.Model(&models.QuotaAccount{}).Where("id = ?", batch.QuotaAccountID).Update("provider_blocked_until", until).Error; err != nil {
 		t.Fatal(err)
 	}
 	e := &Executor{DB: db, Now: func() time.Time { return time.Unix(100, 0) }}
-	if err := e.freezeOnMarker(batch.ID, lease, ProcessResult{Stderr: "upload limit exceeded"}); err != nil {
+	if err := e.freezeOnMarker(batch.ID, lease, ProcessResult{Stderr: "Google API 403: upload limit exceeded"}); err != nil {
 		t.Fatal(err)
 	}
 	var account models.QuotaAccount
 	if err := db.First(&account, batch.QuotaAccountID).Error; err != nil {
 		t.Fatal(err)
 	}
-	windowEnd := time.Unix(100, 0).Add(24 * time.Hour)
-	if account.ProviderBlockedUntil == nil || !account.ProviderBlockedUntil.Equal(windowEnd) {
-		t.Fatalf("block did not use fixed window end: %v", account.ProviderBlockedUntil)
+	if account.ProviderBlockedUntil == nil || !account.ProviderBlockedUntil.Equal(until) {
+		t.Fatalf("provider block changed unexpectedly: %v", account.ProviderBlockedUntil)
 	}
-	if account.RecoveryState != models.QuotaRecoveryStateExhausted || account.RecoveryGeneration != 1 || account.FirstExhaustedAt == nil || !account.FirstExhaustedAt.Equal(time.Unix(100, 0)) {
+	if account.RecoveryState != models.QuotaRecoveryStateAvailable || account.RecoveryGeneration != 0 || account.FirstExhaustedAt != nil {
 		t.Fatalf("recovery transition = state %q generation %d first %v", account.RecoveryState, account.RecoveryGeneration, account.FirstExhaustedAt)
 	}
 	if account.NextProbeAt != nil {
 		t.Fatal("probe schedule was created")
 	}
-	if err := e.freezeOnMarker(batch.ID, lease, ProcessResult{Stderr: "upload limit exceeded again"}); err != nil {
+	if err := e.freezeOnMarker(batch.ID, lease, ProcessResult{Stderr: "Google API 403: upload limit exceeded again"}); err != nil {
 		t.Fatal(err)
 	}
 	var repeated models.QuotaAccount
 	if err := db.First(&repeated, batch.QuotaAccountID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if repeated.RecoveryGeneration != 1 || repeated.FirstExhaustedAt == nil || !repeated.FirstExhaustedAt.Equal(*account.FirstExhaustedAt) || repeated.NextProbeAt != nil || repeated.ProviderBlockedUntil == nil || !repeated.ProviderBlockedUntil.Equal(windowEnd) {
+	if repeated.RecoveryGeneration != 0 || repeated.FirstExhaustedAt != nil || repeated.NextProbeAt != nil || repeated.ProviderBlockedUntil == nil || !repeated.ProviderBlockedUntil.Equal(until) {
 		t.Fatalf("repeated marker changed recovery timing = %#v", repeated)
 	}
 	var wg sync.WaitGroup
@@ -647,7 +648,7 @@ func TestMarkerUsesFixedAccountWindowAndDoesNotExtendIt(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs <- e.freezeOnMarker(batch.ID, lease, ProcessResult{Stderr: "upload limit exceeded concurrently"})
+			errs <- e.freezeOnMarker(batch.ID, lease, ProcessResult{Stderr: "Google API 403: upload limit exceeded concurrently"})
 		}()
 	}
 	wg.Wait()
@@ -661,12 +662,12 @@ func TestMarkerUsesFixedAccountWindowAndDoesNotExtendIt(t *testing.T) {
 	if err := db.First(&concurrent, batch.QuotaAccountID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if concurrent.RecoveryGeneration != 1 || concurrent.NextProbeAt != nil || concurrent.ProviderBlockedUntil == nil || !concurrent.ProviderBlockedUntil.Equal(windowEnd) {
+	if concurrent.RecoveryGeneration != 0 || concurrent.NextProbeAt != nil || concurrent.ProviderBlockedUntil == nil || !concurrent.ProviderBlockedUntil.Equal(until) {
 		t.Fatalf("concurrent markers changed recovery timing = %#v", concurrent)
 	}
 }
 
-func TestMarkerFreezeRollsAtBoundaryAndAllowsNextReservation(t *testing.T) {
+func TestProvider403ExpiresAtItsOwn24HourBoundary(t *testing.T) {
 	db := executionDB(t)
 	if err := db.AutoMigrate(&models.RotationQuotaDirectoryAssignment{}); err != nil {
 		t.Fatal(err)
@@ -678,7 +679,7 @@ func TestMarkerFreezeRollsAtBoundaryAndAllowsNextReservation(t *testing.T) {
 	}
 	clock := time.Unix(100, 0)
 	executor := &Executor{DB: db, Now: func() time.Time { return clock }}
-	if err := executor.freezeOnMarker(batch.ID, lease, ProcessResult{Stderr: "upload limit exceeded"}); err != nil {
+	if err := executor.freezeOnMarker(batch.ID, lease, ProcessResult{Stderr: "Google API 403: upload limit exceeded"}); err != nil {
 		t.Fatal(err)
 	}
 	var frozen models.QuotaAccount
@@ -686,10 +687,10 @@ func TestMarkerFreezeRollsAtBoundaryAndAllowsNextReservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	boundary := clock.Add(24 * time.Hour)
-	if frozen.WindowStartedAt == nil || !frozen.WindowStartedAt.Equal(clock) || frozen.FirstExhaustedAt == nil || !frozen.FirstExhaustedAt.Equal(clock) || frozen.ProviderBlockedUntil == nil || !frozen.ProviderBlockedUntil.Equal(boundary) {
+	if frozen.WindowStartedAt != nil || frozen.FirstExhaustedAt != nil || frozen.RecoveryState != models.QuotaRecoveryStateAvailable || frozen.ProviderBlockedUntil == nil || !frozen.ProviderBlockedUntil.Equal(boundary) {
 		t.Fatalf("marker freeze = %#v", frozen)
 	}
-	if err := db.Model(&models.QuotaReservation{}).Where("batch_file_id = ?", file.ID).Updates(map[string]interface{}{"state": models.ReservationStateCommitted, "expires_at": boundary}).Error; err != nil {
+	if err := db.Model(&models.QuotaReservation{}).Where("batch_file_id = ?", file.ID).Updates(map[string]interface{}{"state": models.ReservationStateCommitted, "committed_at": clock}).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Model(&models.RotationQuotaBatch{}).Where("id = ?", batch.ID).Update("state", models.BatchStateSucceeded).Error; err != nil {
@@ -717,8 +718,8 @@ func TestMarkerFreezeRollsAtBoundaryAndAllowsNextReservation(t *testing.T) {
 	if err := db.Where("batch_id = ?", result.Batches[0].ID).First(&next).Error; err != nil {
 		t.Fatal(err)
 	}
-	if next.ExpiresAt == nil || !next.ExpiresAt.Equal(boundary.Add(24*time.Hour)) {
-		t.Fatalf("next reservation boundary = %v", next.ExpiresAt)
+	if next.ExpiresAt != nil {
+		t.Fatalf("next reservation retained a fixed deadline = %v", next.ExpiresAt)
 	}
 }
 
@@ -749,7 +750,7 @@ func TestExecutorStartFailureReleasesOnlyThisBatch(t *testing.T) {
 func TestStartedIdentityErrorKeepsQuotaUnknownForReconcile(t *testing.T) {
 	db := executionDB(t)
 	batch, file, _ := executionFixture(t, db, 8)
-	runner := &fakeRunner{startErr: &StartedProcessIdentityError{PID: 77, Cause: errors.New("token unavailable"), Result: ProcessResult{PID: 77, ExitCode: 1, Stderr: "drive upload limit exceeded"}}, object: RemoteObject{Path: "wrong", Size: file.SizeBytes}}
+	runner := &fakeRunner{startErr: &StartedProcessIdentityError{PID: 77, Cause: errors.New("token unavailable"), Result: ProcessResult{PID: 77, ExitCode: 1, Stderr: "Google API 403: drive upload limit exceeded"}}, object: RemoteObject{Path: "wrong", Size: file.SizeBytes}}
 	e := &Executor{DB: db, ManifestDir: t.TempDir(), Runner: runner, Now: func() time.Time { return time.Unix(100, 0) }}
 	if err := e.RunBatch(context.Background(), batch.ID); err != nil {
 		t.Fatal(err)
@@ -797,7 +798,7 @@ func TestPersistProcessFailureStillRunsMarkerReconcile(t *testing.T) {
 	e := &Executor{DB: db, Runner: &fakeRunner{object: RemoteObject{Path: file.RelativePath, Size: file.SizeBytes}}, Now: func() time.Time { return time.Unix(100, 0) }}
 	batch.LeaseToken = lease
 	processErr := errors.New("persist process row failed")
-	if err := e.finishProcess(context.Background(), batch, []models.RotationQuotaBatchFile{file}, lease, stage, ProcessResult{PID: 90, Stderr: "drive upload limit exceeded"}, nil, processErr); !errors.Is(err, processErr) {
+	if err := e.finishProcess(context.Background(), batch, []models.RotationQuotaBatchFile{file}, lease, stage, ProcessResult{PID: 90, Stderr: "Google API 403: drive upload limit exceeded"}, nil, processErr); !errors.Is(err, processErr) {
 		t.Fatalf("finish error=%v", err)
 	}
 	var stored models.RotationQuotaBatch
@@ -820,7 +821,7 @@ func TestPersistProcessFailureStillRunsMarkerReconcile(t *testing.T) {
 func TestPersistFailureProcessDoneStillFreezesMarker(t *testing.T) {
 	db := executionDB(t)
 	batch, file, _ := executionFixture(t, db, 8)
-	runner := &fakeRunner{process: &fakeProcess{result: ProcessResult{PID: 92, Stderr: "drive upload limit exceeded"}, stopErr: os.ErrProcessDone}, object: RemoteObject{Path: file.RelativePath, Size: file.SizeBytes}}
+	runner := &fakeRunner{process: &fakeProcess{result: ProcessResult{PID: 92, Stderr: "Google API 403: drive upload limit exceeded"}, stopErr: os.ErrProcessDone}, object: RemoteObject{Path: file.RelativePath, Size: file.SizeBytes}}
 	e := &Executor{DB: db, ManifestDir: t.TempDir(), Runner: runner, PersistProcessFunc: func(uint, string, ProcessHandle) error { return errors.New("persist failed") }, Now: func() time.Time { return time.Unix(100, 0) }}
 	if err := e.RunBatch(context.Background(), batch.ID); err == nil {
 		t.Fatal("persist failure was swallowed")

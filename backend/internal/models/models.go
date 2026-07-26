@@ -27,98 +27,107 @@ func IsValidOwnerToken(value string) bool {
 func IsValidLeaseToken(value string) bool { return IsValidOwnerToken(value) }
 
 const (
-	DefaultRotationQuotaLimitBytes int64 = 700 * 1024 * 1024 * 1024
+	DefaultRotationQuotaLimitBytes int64 = 700_000_000_000
 	DefaultQuotaWindowSeconds            = 86400
-	FixedWindowMigrationVersion          = 1
+	FixedWindowMigrationVersionV1        = 1
+	FixedWindowMigrationVersion          = 2
+	RollingQuotaPolicyVersion            = 1
 	DefaultRcloneConfigPath              = "/root/.config/rclone/rclone.conf"
 
-	BatchStatePlanned                      = "planned"
-	BatchStateReserved                     = "reserved"
-	BatchStateRunning                      = "running"
-	BatchStateUnknown                      = "unknown"
-	BatchStateReconciling                  = "reconciling"
-	BatchStateSucceeded                    = "succeeded"
-	BatchStateFailed                       = "failed"
-	BatchStateCanceled                     = "canceled"
-	BatchStateExpired                      = "expired"
-	ReservationStateHeld                   = "held"
-	ReservationStateActive                 = "active"
-	ReservationStateCommitted              = "committed"
-	ReservationStateUnknown                = "unknown"
-	ReservationStateReleased               = "released"
-	ReservationStateExpired                = "expired"
-	BatchFileStateHeld                     = "held"
-	BatchFileStateActive                   = "active"
-	BatchFileStateVerified                 = "verified"
-	BatchFileStateUnknown                  = "unknown"
-	BatchFileStateFailed                   = "failed"
-	BatchFileStateCommitted                = "committed"
-	TransferModeCopy                       = "copy"
-	TransferModeMove                       = "move"
-	CompletionEvidenceRemote               = "remote_verified"
-	CompletionEvidenceLocal                = "local_move"
-	ProactiveMoveSettingKey                = "proactive_move_enabled"
-	ProactiveMoveSettingMigrationKey       = "proactive_move_enabled_phase3_initialized"
-	MoveHandoffVersion                     = 1
-	MoveHandoffReady                       = "ready"
-	MoveHandoffQuarantined                 = "quarantined"
-	MoveHandoffRestored                    = "restored"
-	MoveHandoffMoved                       = "moved"
-	MoveHandoffUnknown                     = "unknown"
-	MoveCompletionEvidenceVersion          = 1
-	MoveResolutionResolving                = "resolving"
-	MoveResolutionFrozen                   = "frozen"
-	ReserveClassNoFiles                    = "no_files"
-	ReserveClassReserved                   = "reserved"
-	ReserveClassBudgetExhausted            = "budget_exhausted"
-	ReserveClassProviderBlocked            = "provider_blocked"
-	ReserveClassDisabled                   = "disabled"
-	ReserveClassTaskCeiling                = "task_ceiling"
-	ReserveClassOversize                   = "oversize"
-	ReserveClassNoFit                      = "no_fit"
-	ReserveClassActive                     = "active"
-	ReserveClassAccountBlocked             = "account_blocked"
-	ReserveClassUnknown                    = "unknown"
-	ReserveClassFailed                     = "failed"
-	MaintenanceStateExhausted              = "exhausted"
-	MaintenanceStateClaimed                = "claimed"
-	MaintenanceStateRunning                = "running"
-	MaintenanceStateSucceeded              = "succeeded"
-	MaintenanceStateFailed                 = "failed"
-	MaintenanceStateUnknown                = "unknown"
-	MaintenanceStateClosed                 = "closed"
-	MaintenanceReasonQuotaExhaustion       = "quota_exhaustion"
-	MaintenanceReasonManualMerge           = "manual_merge"
-	DedupeStatePending                     = "pending"
-	DedupeStateRunning                     = "running"
-	DedupeStateSucceeded                   = "succeeded"
-	DedupeStateFailed                      = "failed"
-	DedupeStateUnknown                     = "unknown"
-	DedupeStateClaimed                     = "claimed"
-	QuotaRecoveryStateAvailable            = "available"
-	QuotaRecoveryStateExhausted            = "exhausted"
-	ProbeAttemptStatePending               = "pending"
-	ProbeAttemptStateClaimed               = "claimed"
-	ProbeAttemptStateRunning               = "running"
-	ProbeAttemptStateSucceeded             = "succeeded"
-	ProbeAttemptStateFailed                = "failed"
-	ProbeAttemptStateUnknown               = "unknown"
-	ProbeAttemptStateCanceled              = "canceled"
-	ProbeVerificationStatePending          = "pending"
-	ProbeVerificationStateSucceeded        = "succeeded"
-	ProbeVerificationStateFailed           = "failed"
-	ProbeVerificationStateUnknown          = "unknown"
-	ProbeCleanupStatePending               = "pending"
-	ProbeCleanupStateSucceeded             = "succeeded"
-	ProbeCleanupStateFailed                = "failed"
-	ProbeCleanupStateUnknown               = "unknown"
-	ProbeContractVersion                   = 1
-	ProbePhaseClaimed                      = "claimed"
-	ProbePhaseUpload                       = "upload"
-	ProbePhaseVerify                       = "verify"
-	ProbePhaseCleanup                      = "cleanup"
-	ProbePhaseFinished                     = "finished"
-	ProbeExpectedBytes               int64 = 1 << 30
+	BatchStatePlanned                            = "planned"
+	BatchStateReserved                           = "reserved"
+	BatchStateRunning                            = "running"
+	BatchStateUnknown                            = "unknown"
+	BatchStateReconciling                        = "reconciling"
+	BatchStateSucceeded                          = "succeeded"
+	BatchStateFailed                             = "failed"
+	BatchStateCanceled                           = "canceled"
+	BatchStateExpired                            = "expired"
+	ReservationStateHeld                         = "held"
+	ReservationStateActive                       = "active"
+	ReservationStateCommitted                    = "committed"
+	ReservationStateUnknown                      = "unknown"
+	ReservationStateReleased                     = "released"
+	ReservationStateExpired                      = "expired"
+	BatchFileStateHeld                           = "held"
+	BatchFileStateActive                         = "active"
+	BatchFileStateVerified                       = "verified"
+	BatchFileStateUnknown                        = "unknown"
+	BatchFileStateFailed                         = "failed"
+	BatchFileStateCommitted                      = "committed"
+	TransferModeCopy                             = "copy"
+	TransferModeMove                             = "move"
+	CompletionEvidenceRemote                     = "remote_verified"
+	CompletionEvidenceLocal                      = "local_move"
+	ProactiveMoveSettingKey                      = "proactive_move_enabled"
+	ProactiveMoveSettingMigrationKey             = "proactive_move_enabled_phase3_initialized"
+	MoveHandoffVersion                           = 1
+	MoveHandoffReady                             = "ready"
+	MoveHandoffQuarantined                       = "quarantined"
+	MoveHandoffRestored                          = "restored"
+	MoveHandoffMoved                             = "moved"
+	MoveHandoffUnknown                           = "unknown"
+	MoveCompletionEvidenceVersion                = 1
+	MoveResolutionResolving                      = "resolving"
+	MoveResolutionFrozen                         = "frozen"
+	ReserveClassNoFiles                          = "no_files"
+	ReserveClassReserved                         = "reserved"
+	ReserveClassBudgetExhausted                  = "budget_exhausted"
+	ReserveClassProviderBlocked                  = "provider_blocked"
+	ReserveClassDisabled                         = "disabled"
+	ReserveClassTaskCeiling                      = "task_ceiling"
+	ReserveClassOversize                         = "oversize"
+	ReserveClassNoFit                            = "no_fit"
+	ReserveClassActive                           = "active"
+	ReserveClassAccountBlocked                   = "account_blocked"
+	ReserveClassUnknown                          = "unknown"
+	ReserveClassFailed                           = "failed"
+	MaintenanceStateExhausted                    = "exhausted"
+	MaintenanceStateClaimed                      = "claimed"
+	MaintenanceStateRunning                      = "running"
+	MaintenanceStateSucceeded                    = "succeeded"
+	MaintenanceStateFailed                       = "failed"
+	MaintenanceStateUnknown                      = "unknown"
+	MaintenanceStateClosed                       = "closed"
+	MaintenanceReasonQuotaExhaustion             = "quota_exhaustion"
+	MaintenanceReasonManualMerge                 = "manual_merge"
+	DedupeStatePending                           = "pending"
+	DedupeStateRunning                           = "running"
+	DedupeStateSucceeded                         = "succeeded"
+	DedupeStateFailed                            = "failed"
+	DedupeStateUnknown                           = "unknown"
+	DedupeStateClaimed                           = "claimed"
+	QuotaRecoveryStateAvailable                  = "available"
+	QuotaRecoveryStateExhausted                  = "exhausted"
+	QuotaAvailabilityStateAvailable              = "available"
+	QuotaAvailabilityStateCampaignCooldown       = "campaign_cooldown"
+	QuotaAvailabilityStateProviderBlocked        = "provider_blocked"
+	QuotaAvailabilityStateDisabled               = "disabled"
+	QuotaManualResetActorAdminSession            = "admin_session"
+	QuotaManualResetActorPrivilegedToken         = "privileged_token"
+	QuotaManualResetOutcomeSucceeded             = "succeeded"
+	ProbeAttemptStatePending                     = "pending"
+	ProbeAttemptStateClaimed                     = "claimed"
+	ProbeAttemptStateRunning                     = "running"
+	ProbeAttemptStateSucceeded                   = "succeeded"
+	ProbeAttemptStateFailed                      = "failed"
+	ProbeAttemptStateUnknown                     = "unknown"
+	ProbeAttemptStateCanceled                    = "canceled"
+	ProbeVerificationStatePending                = "pending"
+	ProbeVerificationStateSucceeded              = "succeeded"
+	ProbeVerificationStateFailed                 = "failed"
+	ProbeVerificationStateUnknown                = "unknown"
+	ProbeCleanupStatePending                     = "pending"
+	ProbeCleanupStateSucceeded                   = "succeeded"
+	ProbeCleanupStateFailed                      = "failed"
+	ProbeCleanupStateUnknown                     = "unknown"
+	ProbeContractVersion                         = 1
+	ProbePhaseClaimed                            = "claimed"
+	ProbePhaseUpload                             = "upload"
+	ProbePhaseVerify                             = "verify"
+	ProbePhaseCleanup                            = "cleanup"
+	ProbePhaseFinished                           = "finished"
+	ProbeExpectedBytes                     int64 = 1 << 30
 )
 
 type DestinationScopeMaintenance struct {
@@ -421,31 +430,37 @@ type QuotaAccount struct {
 	QuotaKey             string     `json:"quota_key" gorm:"not null;uniqueIndex;check:quota_key_nonempty,quota_key <> ''"`
 	RemoteName           string     `json:"remote_name"`
 	ConfigIdentity       string     `json:"config_identity"`
-	BudgetBytes          int64      `json:"budget_bytes" gorm:"not null;default:751619276800;check:quota_account_budget_nonnegative,budget_bytes >= 0"`
+	BudgetBytes          int64      `json:"budget_bytes" gorm:"not null;default:700000000000;check:quota_account_budget_nonnegative,budget_bytes >= 0"`
 	WindowSeconds        int        `json:"window_seconds" gorm:"not null;default:86400"`
 	ProviderBlockedUntil *time.Time `json:"provider_blocked_until"`
-	RecoveryState        string     `json:"recovery_state" gorm:"not null;default:'available';check:quota_account_recovery_state_valid,recovery_state IN ('available','exhausted')"`
-	FirstExhaustedAt     *time.Time `json:"first_exhausted_at"`
-	RecoveryGeneration   int64      `json:"recovery_generation" gorm:"not null;default:0;check:quota_account_recovery_generation_nonnegative,recovery_generation >= 0"`
-	NextProbeAt          *time.Time `json:"next_probe_at" gorm:"index"`
-	ProbeClaimToken      string     `json:"-"`
-	ProbeClaimUntil      *time.Time `json:"-" gorm:"index"`
-	Enabled              bool       `json:"enabled" gorm:"not null;default:true"`
-	// WindowStartedAt is the durable start of this account's fixed rolling
-	// 24-hour quota window. It is never cleared when usage changes.
+	// CampaignCooldownUntil is the intentional account-wide hold installed when
+	// the rolling campaign cap is reached. The column name remains legacy-
+	// compatible for existing databases.
+	CampaignCooldownUntil *time.Time `json:"campaign_cooldown_until" gorm:"column:cooldown_until;index"`
+	LastManualResetAt     *time.Time `json:"last_manual_reset_at"`
+	RecoveryState         string     `json:"recovery_state" gorm:"not null;default:'available';check:quota_account_recovery_state_valid,recovery_state IN ('available','exhausted')"`
+	FirstExhaustedAt      *time.Time `json:"first_exhausted_at"`
+	RecoveryGeneration    int64      `json:"recovery_generation" gorm:"not null;default:0;check:quota_account_recovery_generation_nonnegative,recovery_generation >= 0"`
+	NextProbeAt           *time.Time `json:"next_probe_at" gorm:"index"`
+	ProbeClaimToken       string     `json:"-"`
+	ProbeClaimUntil       *time.Time `json:"-" gorm:"index"`
+	Enabled               bool       `json:"enabled" gorm:"not null;default:true"`
+	// WindowStartedAt is retained for legacy database compatibility and is not
+	// used by rolling quota accounting.
 	WindowStartedAt *time.Time `json:"window_started_at"`
-	// FixedWindowMigrationVersion records one-time cleanup of legacy quota
-	// reservations before fixed-window accounting began.
+	// FixedWindowMigrationVersion records the legacy policy schema level.
 	FixedWindowMigrationVersion int       `json:"fixed_window_migration_version" gorm:"not null;default:0;check:quota_account_fixed_window_migration_version_nonnegative,fixed_window_migration_version >= 0"`
+	QuotaPolicyVersion          int       `json:"quota_policy_version" gorm:"not null;default:0;check:quota_account_policy_version_nonnegative,quota_policy_version >= 0"`
 	CreatedAt                   time.Time `json:"created_at"`
 	UpdatedAt                   time.Time `json:"updated_at"`
 }
 
 // IsUnavailableForProactiveTransfers is the single account-level gate for
-// proactive reservation and execution. Provider-limit exhaustion remains
-// durable until the shared fixed window rolls over.
+// proactive reservation and execution. Rolling cooldown and provider blocks
+// are independent durable holds.
 func IsUnavailableForProactiveTransfers(account QuotaAccount, now time.Time) bool {
-	return !account.Enabled || account.RecoveryState == QuotaRecoveryStateExhausted ||
+	return !account.Enabled ||
+		(account.CampaignCooldownUntil != nil && account.CampaignCooldownUntil.After(now)) ||
 		(account.ProviderBlockedUntil != nil && account.ProviderBlockedUntil.After(now))
 }
 
@@ -599,10 +614,39 @@ type QuotaReservation struct {
 	ReservedAt     *time.Time `json:"reserved_at"`
 	StartedAt      *time.Time `json:"started_at"`
 	ReleasedAt     *time.Time `json:"released_at"`
+	CommittedAt    *time.Time `json:"committed_at" gorm:"index:idx_quota_reservations_account_state_expiry"`
 	ExpiresAt      *time.Time `json:"expires_at" gorm:"index:idx_quota_reservations_account_state_expiry"`
 	LastError      string     `json:"last_error"`
 	CreatedAt      time.Time  `json:"created_at"`
 	UpdatedAt      time.Time  `json:"updated_at"`
+}
+
+// QuotaManualResetEvent is an append-only record of an administrator quota
+// reset. Reset mutation code only creates rows; it never updates or deletes
+// them after they are written.
+type QuotaManualResetEvent struct {
+	ID             uint       `json:"id" gorm:"primaryKey"`
+	TaskID         uint       `json:"task_id" gorm:"not null;index"`
+	QuotaAccountID uint       `json:"quota_account_id" gorm:"not null;index"`
+	ActorIdentity  string     `json:"actor_identity" gorm:"not null"`
+	ActorType      string     `json:"actor_type" gorm:"not null;check:quota_manual_reset_actor_type_valid,actor_type IN ('admin_session','privileged_token')"`
+	RequestedAt    time.Time  `json:"requested_at" gorm:"not null"`
+	RequestCutoff  time.Time  `json:"request_cutoff" gorm:"not null"`
+	EffectiveAt    *time.Time `json:"effective_at"`
+	Outcome        string     `json:"outcome" gorm:"not null"`
+	Details        string     `json:"details" gorm:"type:text"`
+	CreatedAt      time.Time  `json:"created_at"`
+}
+
+// NetworkTelemetrySample stores a bounded, read-only kernel counter history.
+// Unavailable samples are retained so a missing counter cannot be mistaken for
+// a zero-byte baseline.
+type NetworkTelemetrySample struct {
+	ID        uint      `json:"id" gorm:"primaryKey"`
+	SampledAt time.Time `json:"sampled_at" gorm:"uniqueIndex"`
+	TxBytes   int64     `json:"tx_bytes"`
+	Available bool      `json:"available"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type OpenlistConfig struct {

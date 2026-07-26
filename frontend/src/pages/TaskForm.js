@@ -34,7 +34,7 @@ const TaskForm = () => {
     remote_dir: '',
     rotation_remotes: '[]',
     rotation_strategy: 'proactive_quota',
-    rotation_quota_limit_bytes: 700 * 1024 * 1024 * 1024,
+    rotation_quota_limit_bytes: 700 * 1000 * 1000 * 1000,
     rotation_quota_keys: '{}',
     rotation_batch_files: 5,
     rotation_concurrent_batches: 1,
@@ -119,7 +119,7 @@ const TaskForm = () => {
         rotation_remotes: res.data.rotation_remotes || '[]',
         rotation_strategy: res.data.rotation_strategy || 'proactive_quota',
         rotation_quota_limit_bytes: res.data.rotation_quota_limit_bytes == null
-          ? 700 * 1024 * 1024 * 1024
+          ? 700 * 1000 * 1000 * 1000
           : res.data.rotation_quota_limit_bytes,
         rotation_quota_keys: res.data.rotation_quota_keys || '{}',
         rotation_batch_files: res.data.rotation_batch_files || 5,
@@ -288,9 +288,9 @@ const TaskForm = () => {
           return;
         }
         const quotaLimitBytes = Number(submitForm.rotation_quota_limit_bytes);
-        const maxQuotaBytes = 700 * 1024 * 1024 * 1024;
+        const maxQuotaBytes = 700 * 1000 * 1000 * 1000;
         if (!Number.isFinite(quotaLimitBytes) || quotaLimitBytes < 0 || quotaLimitBytes > maxQuotaBytes) {
-          toast.error('每账号每日额度必须在 0 到 700 GiB 之间');
+          toast.error('每账号滚动 24 小时本地安全额度必须在 0 到 700 GB 之间');
           return;
         }
         const batchFiles = Number(submitForm.rotation_batch_files);
@@ -750,7 +750,7 @@ const TaskForm = () => {
                     <div className="flex items-start gap-2 text-sm text-emerald-900">
                       <ListChecks className="w-4 h-4 mt-0.5 shrink-0" />
                       <p>
-                        主动额度池的安全边界：每个账号每天最多 <strong>700 GiB</strong>，按额度预留批次并使用复制模式保留源文件。
+                        主动额度池的安全边界：每个账号滚动 24 小时最多 <strong>700 GB</strong>（十进制），达到本地上限后进入滚动冷却；Provider 阻断单独处理。
                       </p>
                     </div>
 
@@ -759,7 +759,7 @@ const TaskForm = () => {
                      </div>
 
                       <div>
-                        <label htmlFor="rotation-quota-limit" className="block text-xs font-medium text-gray-700 mb-1">每账号每日额度</label>
+                        <label htmlFor="rotation-quota-limit" className="block text-xs font-medium text-gray-700 mb-1">每账号滚动 24 小时本地安全额度</label>
                       <div className="flex flex-col sm:flex-row sm:items-center gap-2 min-w-0">
                         <input
                           id="rotation-quota-limit"
@@ -767,16 +767,16 @@ const TaskForm = () => {
                           min="0"
                           max="700"
                           step="0.01"
-                          value={(Number(form.rotation_quota_limit_bytes || 0) / (1024 * 1024 * 1024)).toFixed(2).replace(/\.00$/, '')}
+                          value={(Number(form.rotation_quota_limit_bytes || 0) / (1000 * 1000 * 1000)).toFixed(2).replace(/\.00$/, '')}
                           onChange={(e) => {
-                            const gib = Number(e.target.value);
-                            handleChange('rotation_quota_limit_bytes', Number.isFinite(gib) ? Math.round(gib * 1024 * 1024 * 1024) : '');
+                            const gb = Number(e.target.value);
+                            handleChange('rotation_quota_limit_bytes', Number.isFinite(gb) ? Math.round(gb * 1000 * 1000 * 1000) : '');
                           }}
                           aria-describedby="quota-limit-help"
                           className="w-36 h-10 px-3 border border-emerald-300 bg-white rounded-lg text-sm font-medium text-gray-800 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                         />
-                        <span className="text-sm text-gray-700">GiB / 天</span>
-                        <span id="quota-limit-help" className="text-xs text-gray-600">默认 700；可降低，不能超过 700 GiB。服务端会再次校验。</span>
+                        <span className="text-sm text-gray-700">十进制 GB / 滚动 24 小时</span>
+                        <span id="quota-limit-help" className="text-xs text-gray-600">默认 700 GB（十进制）；可降低，不能超过 700 GB。达到本地上限后进入滚动冷却。</span>
                         </div>
                       </div>
 

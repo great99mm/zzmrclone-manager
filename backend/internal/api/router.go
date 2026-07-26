@@ -187,6 +187,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			tasks.GET("/:id/proactive-status", requireTokenOrSession, getProactiveStatus)
 			tasks.POST("/:id/proactive-resolutions", requireStrictTokenOrSession, resolveProactiveMove)
 			tasks.POST("/:id/proactive-manual-merge", requireStrictTokenOrSession, startProactiveManualMerge)
+			tasks.POST("/:id/quota-accounts/:accountID/manual-reset", requireAdminStrictTokenOrSession, manualQuotaReset)
 		}
 		api.POST("/proactive-maintenance/:id/close-unknown", requireStrictTokenOrSession, closeProactiveUnknownMaintenance)
 
@@ -263,6 +264,30 @@ func requireStrictTokenOrSession(c *gin.Context) {
 		return
 	}
 	c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "authenticated session or exact API token required"})
+}
+
+func requireAdminStrictTokenOrSession(c *gin.Context) {
+	if cfgGlobal != nil && cfgGlobal.APIToken != "" && c.Query("token") == cfgGlobal.APIToken {
+		c.Set("quota_reset_actor_identity", "configured-api-token")
+		c.Set("quota_reset_actor_type", models.QuotaManualResetActorPrivilegedToken)
+		c.Next()
+		return
+	}
+	authorization := strings.TrimSpace(c.GetHeader("Authorization"))
+	if strings.HasPrefix(strings.ToLower(authorization), "bearer ") {
+		claims, ok := auth.ClaimsForToken(strings.TrimSpace(authorization[len("Bearer "):]))
+		if ok && claims.IsAdmin {
+			c.Set("quota_reset_actor_identity", claims.Username)
+			c.Set("quota_reset_actor_type", models.QuotaManualResetActorAdminSession)
+			c.Next()
+			return
+		}
+		if ok {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "administrator privileges are required"})
+			return
+		}
+	}
+	c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "administrator session or exact privileged API token required"})
 }
 
 // requireTokenQuery middleware checks ?token= query param against configured API token.

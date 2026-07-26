@@ -56,6 +56,38 @@ func TestStrictMoveResolutionAuthRequiresSessionOrExactToken(t *testing.T) {
 	}
 }
 
+func TestManualQuotaResetAuthRequiresAdministratorSessionOrPrivilegedToken(t *testing.T) {
+	if code := runAdminStrictAuth(t, &config.Config{}, "", "Bearer "+auth.IssueToken("regular", false)); code != http.StatusForbidden {
+		t.Fatalf("non-admin reset session = %d", code)
+	}
+	if code := runAdminStrictAuth(t, &config.Config{}, "", "Bearer "+auth.IssueToken("admin", true)); code != http.StatusNoContent {
+		t.Fatalf("admin reset session = %d", code)
+	}
+	if code := runAdminStrictAuth(t, &config.Config{}, "token=unconfigured", ""); code != http.StatusForbidden {
+		t.Fatalf("unconfigured reset token = %d", code)
+	}
+	if code := runAdminStrictAuth(t, &config.Config{APIToken: "privileged"}, "token=privileged", ""); code != http.StatusNoContent {
+		t.Fatalf("privileged reset token = %d", code)
+	}
+}
+
+func runAdminStrictAuth(t *testing.T, cfg *config.Config, query, authorization string) int {
+	t.Helper()
+	previous := cfgGlobal
+	cfgGlobal = cfg
+	defer func() { cfgGlobal = previous }()
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET("/reset", requireAdminStrictTokenOrSession, func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/reset?"+query, nil)
+	if authorization != "" {
+		request.Header.Set("Authorization", authorization)
+	}
+	router.ServeHTTP(recorder, request)
+	return recorder.Code
+}
+
 type routeManualExecutor struct{ db *gorm.DB }
 
 func (r routeManualExecutor) RunBatch(context.Context, uint) error { return nil }

@@ -98,30 +98,37 @@ func (d *Dispatcher) acquireScannerLease(scope string, now time.Time) (string, e
 		return "", nil
 	}
 	token := randomToken()
-	err := d.DB.Transaction(func(tx *gorm.DB) error {
-		coordinator, err := d.ensureCoordinator(tx, scope)
-		if err != nil {
-			return err
-		}
-		result := tx.Model(&models.DestinationScopeCoordinator{}).
-			Where("id = ? AND (scanner_lease_token = '' OR scanner_lease_until IS NULL OR scanner_lease_until <= ?)", coordinator.ID, now).
-			Updates(map[string]interface{}{"scanner_lease_token": token, "scanner_lease_until": now.Add(d.scannerLeaseDuration()), "revision": gorm.Expr("revision + 1")})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != 1 {
-			return ErrCoordinatorConflict
-		}
-		if coordinator.MaintenanceEpochID != 0 {
-			var epoch models.DestinationScopeMaintenance
-			if err := tx.First(&epoch, coordinator.MaintenanceEpochID).Error; err == nil {
-				if epoch.State != models.MaintenanceStateClosed || epoch.DedupeState == models.DedupeStateClaimed || epoch.DedupeState == models.DedupeStateRunning || epoch.DedupeState == models.DedupeStateUnknown {
-					return ErrCoordinatorConflict
+	var err error
+	for attempt := 0; attempt < d.retryMax(); attempt++ {
+		err = d.DB.Transaction(func(tx *gorm.DB) error {
+			coordinator, err := d.ensureCoordinator(tx, scope)
+			if err != nil {
+				return err
+			}
+			result := tx.Model(&models.DestinationScopeCoordinator{}).
+				Where("id = ? AND (scanner_lease_token = '' OR scanner_lease_until IS NULL OR scanner_lease_until <= ?)", coordinator.ID, now).
+				Updates(map[string]interface{}{"scanner_lease_token": token, "scanner_lease_until": now.Add(d.scannerLeaseDuration()), "revision": gorm.Expr("revision + 1")})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return ErrCoordinatorConflict
+			}
+			if coordinator.MaintenanceEpochID != 0 {
+				var epoch models.DestinationScopeMaintenance
+				if err := tx.First(&epoch, coordinator.MaintenanceEpochID).Error; err == nil {
+					if epoch.State != models.MaintenanceStateClosed || epoch.DedupeState == models.DedupeStateClaimed || epoch.DedupeState == models.DedupeStateRunning || epoch.DedupeState == models.DedupeStateUnknown {
+						return ErrCoordinatorConflict
+					}
 				}
 			}
+			return nil
+		})
+		if err == nil || errors.Is(err, ErrCoordinatorConflict) || !retryableSQLiteError(err) {
+			return token, err
 		}
-		return nil
-	})
+		d.retrySleep(attempt)
+	}
 	return token, err
 }
 

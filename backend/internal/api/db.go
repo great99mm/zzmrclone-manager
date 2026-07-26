@@ -81,6 +81,8 @@ func InitDB(dataDir string) error {
 		&models.RotationQuotaBatch{},
 		&models.RotationQuotaBatchFile{},
 		&models.QuotaReservation{},
+		&models.QuotaManualResetEvent{},
+		&models.NetworkTelemetrySample{},
 		&models.DestinationScopeMaintenance{},
 		&models.DestinationScopeCoordinator{},
 	)
@@ -89,6 +91,9 @@ func InitDB(dataDir string) error {
 	}
 	if err := ensureQuotaProbeAttemptIndexes(db); err != nil {
 		return fmt.Errorf("failed to upgrade quota probe attempt indexes: %v", err)
+	}
+	if err := normalizeLegacyQuotaAccountBudgets(db); err != nil {
+		return fmt.Errorf("failed to normalize quota account budgets: %v", err)
 	}
 	if err := quota.InitializeAccountWindows(db, time.Now()); err != nil {
 		return fmt.Errorf("failed to initialize quota account windows: %v", err)
@@ -165,6 +170,13 @@ func InitDB(dataDir string) error {
 	}()
 
 	return nil
+}
+
+func normalizeLegacyQuotaAccountBudgets(database *gorm.DB) error {
+	const legacyFixedWindowBudgetBytes int64 = 700 * 1024 * 1024 * 1024
+	return database.Model(&models.QuotaAccount{}).
+		Where("budget_bytes = ?", legacyFixedWindowBudgetBytes).
+		Update("budget_bytes", models.DefaultRotationQuotaLimitBytes).Error
 }
 
 // prepareQuotaProbeAttemptMigration upgrades the immediately preceding Phase

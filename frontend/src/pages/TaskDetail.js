@@ -18,9 +18,10 @@ import {
   ShieldCheck,
   ListChecks,
   Database,
-  ChevronDown
+  ChevronDown,
+  Network
 } from 'lucide-react';
-import { getTask, getTaskStatus, getProactiveStatus, resolveProactiveBatch, startTask, stopTask, pauseTask, cancelTask, dedupeTask, startProactiveManualMerge, closeProactiveUnknownMaintenance, deleteTask } from '../services/api';
+import { getTask, getTaskStatus, getProactiveStatus, resolveProactiveBatch, manualResetQuotaAccount, startTask, stopTask, pauseTask, cancelTask, dedupeTask, startProactiveManualMerge, closeProactiveUnknownMaintenance, deleteTask } from '../services/api';
 import { createWebSocket } from '../services/api';
 import toast from 'react-hot-toast';
 import { QuotaAccountBar, QuotaExhaustedNotice } from '../components/QuotaAccountBar';
@@ -170,6 +171,11 @@ const TaskDetail = () => {
       }
     }
   }, [id, loadProactiveStatus, loadStatus]);
+
+  const handleManualReset = useCallback(async (accountId) => {
+    await manualResetQuotaAccount(id, accountId);
+    await loadProactiveStatus();
+  }, [id, loadProactiveStatus]);
 
   useEffect(() => {
     loadTask();
@@ -582,6 +588,8 @@ const TaskDetail = () => {
           loading={proactiveStatusLoading}
           error={proactiveStatusError}
           onRetry={loadProactiveStatus}
+          taskId={id}
+          onManualReset={handleManualReset}
           resolutionState={resolutionState}
           onResolve={handleResolveBatch}
           legacyRecoveryState={legacyRecoveryState}
@@ -890,7 +898,7 @@ const getResolutionItems = (batch, task) => {
   return [{ batchId: batch.id, actions, fileId, expectedState, expectedUpdatedAt }];
 };
 
-const ProactiveQuotaPanel = ({ status, loading, error, onRetry, resolutionState, onResolve, legacyRecoveryState, onRecover }) => {
+const ProactiveQuotaPanel = ({ status, loading, error, onRetry, taskId, onManualReset, resolutionState, onResolve, legacyRecoveryState, onRecover }) => {
   if (loading && !status) {
     return (
       <section className="bg-white rounded-xl shadow-sm border border-emerald-200 p-6" aria-live="polite" aria-busy="true">
@@ -1108,7 +1116,7 @@ const ProactiveQuotaPanel = ({ status, loading, error, onRetry, resolutionState,
                 <h3 className="text-sm font-semibold text-gray-900 mb-3">账号额度</h3>
                 <div className="space-y-3 max-h-72 overflow-auto">
                   {accounts.map((account, index) => (
-                    <div key={account.remote_name || index} className="space-y-1.5">
+                    <div key={account.account_id ?? index} className="space-y-1.5">
                       <div className="flex flex-col sm:flex-row sm:items-baseline justify-between gap-2 text-xs min-w-0">
                         <div className="min-w-0">
                           <span className="font-medium text-gray-800 break-words">{account.remote_name || `账号 ${index + 1}`}</span>
@@ -1116,12 +1124,14 @@ const ProactiveQuotaPanel = ({ status, loading, error, onRetry, resolutionState,
                             <span className="block text-amber-700 mt-0.5">未初始化 quota account</span>
                           ) : account.enabled === false ? (
                             <span className="block text-gray-500 mt-0.5">已禁用</span>
-                          ) : isFutureTimestamp(account.provider_blocked_until) ? (
+                          ) : account.availability_state === 'campaign_cooldown' ? (
+                            <span className="block text-amber-700 mt-0.5">本地 24 小时活动冷却中 · 最早可用 {account.next_recovery_at ? formatDateTime(account.next_recovery_at) : account.cooldown_until ? formatDateTime(account.cooldown_until) : '等待状态更新'}</span>
+                          ) : account.availability_state === 'provider_blocked' || isFutureTimestamp(account.provider_blocked_until) ? (
                             <span className="block text-red-700 mt-0.5">Provider 暂时阻断</span>
                           ) : null}
                         </div>
                       </div>
-                      <QuotaAccountBar account={account} />
+                      <QuotaAccountBar account={account} taskId={taskId} onManualReset={onManualReset} />
                     </div>
                   ))}
                 </div>
@@ -1132,6 +1142,53 @@ const ProactiveQuotaPanel = ({ status, loading, error, onRetry, resolutionState,
             )}
           </div>
         )}
+        <NetworkTelemetry telemetry={status.network_telemetry} />
+      </div>
+    </section>
+  );
+};
+
+const NetworkTelemetry = ({ telemetry }) => {
+  if (!telemetry || typeof telemetry !== 'object') return null;
+  const available = telemetry.available === true;
+  const baselineAvailable = telemetry.baseline_available === true;
+  const formatTelemetryBytes = (value) => {
+    if (value == null || !Number.isFinite(Number(value))) return '不可用';
+    const bytes = Math.max(0, Number(value));
+    if (bytes === 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1000)), units.length - 1);
+    return `${parseFloat((bytes / (1000 ** exponent)).toFixed(2))} ${units[exponent]}`;
+  };
+  const formatDifference = (value) => {
+    if (value == null || !Number.isFinite(Number(value))) return '不可用';
+    const numericValue = Number(value);
+    return `${numericValue >= 0 ? '+' : '-'}${formatTelemetryBytes(Math.abs(numericValue))}`;
+  };
+  const fields = available ? [
+    ['tx_bytes', '本次发送', formatTelemetryBytes(telemetry.tx_bytes)],
+    ['rolling_24h_tx_bytes', '发送（滚动24小时）', formatTelemetryBytes(telemetry.rolling_24h_tx_bytes)],
+    ['ledger_committed_bytes', '账本已提交', formatTelemetryBytes(telemetry.ledger_committed_bytes)],
+    ['difference_bytes', '账本差值', formatDifference(telemetry.difference_bytes)],
+    ['baseline_available', '基线', baselineAvailable ? '可用' : '不可用'],
+    ['baseline_at', '基线时间', baselineAvailable && telemetry.baseline_at ? formatDateTime(telemetry.baseline_at) : '不可用'],
+    ['sampled_at', '采样时间', telemetry.sampled_at ? formatDateTime(telemetry.sampled_at) : '不可用'],
+  ] : [];
+  return (
+    <section className="mt-4 border-t border-gray-200 pt-4" aria-labelledby="network-telemetry-heading">
+      <div className="flex items-start gap-2">
+        <Network className="mt-0.5 h-4 w-4 shrink-0 text-gray-500" />
+        <div className="min-w-0">
+          <h3 id="network-telemetry-heading" className="text-sm font-semibold text-gray-800">网络观测</h3>
+          <p className="mt-0.5 text-xs text-gray-500">只读遥测对比，不参与额度判断或执行。</p>
+          {!available ? (
+            <p className="mt-2 text-xs text-gray-500">网络遥测当前不可用。</p>
+          ) : (
+            <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-2 text-xs sm:grid-cols-3 lg:grid-cols-4">
+              {fields.map(([key, label, value]) => <div key={key} className="min-w-0"><dt className="text-gray-500">{label}</dt><dd className="mt-0.5 break-words font-medium text-gray-800">{value}</dd></div>)}
+            </dl>
+          )}
+        </div>
       </div>
     </section>
   );

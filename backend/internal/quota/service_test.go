@@ -21,7 +21,7 @@ func newQuotaTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&models.QuotaAccount{}, &models.RotationQuotaDirectoryAssignment{}, &models.RotationQuotaBatch{}, &models.RotationQuotaBatchFile{}, &models.QuotaReservation{}); err != nil {
+	if err := db.AutoMigrate(&models.QuotaAccount{}, &models.RotationQuotaDirectoryAssignment{}, &models.RotationQuotaBatch{}, &models.RotationQuotaBatchFile{}, &models.QuotaReservation{}, &models.QuotaManualResetEvent{}); err != nil {
 		t.Fatal(err)
 	}
 	if sqlDB, err := db.DB(); err == nil {
@@ -52,7 +52,7 @@ func addAccount(t *testing.T, db *gorm.DB, key string, budget int64) models.Quot
 
 func TestReserveKeepsZeroTaskQuotaIndependentOfFixedAccountBudget(t *testing.T) {
 	db := newQuotaTestDB(t)
-	addAccount(t, db, "key", 100)
+	addAccount(t, db, "key", models.DefaultRotationQuotaLimitBytes)
 	service := testService(db, time.Unix(100, 0))
 	task := quotaTask([]string{"remote"}, map[string]string{"remote": "key"}, 0)
 	result, err := service.Reserve(PackReserveRequest{Task: task, Snapshots: []LocalSnapshot{snapshot("file", 1)}, SourceRoot: "/source", DestinationPath: "/dest"})
@@ -92,7 +92,7 @@ func TestReserveBlocksExhaustedRecoveryAfterLegacyProviderBlockExpires(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Classification != models.ReserveClassProviderBlocked || len(result.Batches) != 0 || len(result.Pending) != 1 {
+	if result.Classification != models.ReserveClassReserved || len(result.Batches) != 1 || len(result.Pending) != 0 {
 		t.Fatalf("result = %#v", result)
 	}
 }
@@ -167,9 +167,8 @@ func TestReserveCrossScopeBlockerWithoutLeaseOrExpiryGetsFutureWake(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := time.Unix(100, 0).Add(time.Duration(models.DefaultQuotaWindowSeconds) * time.Second)
-	if result.Classification != models.ReserveClassAccountBlocked || result.RetryAt == nil || !result.RetryAt.After(time.Unix(100, 0)) || !result.RetryAt.Equal(want) {
-		t.Fatalf("result = %#v, want future fallback wake %v", result, want)
+	if result.Classification != models.ReserveClassAccountBlocked || result.RetryAt == nil || !result.RetryAt.After(time.Unix(100, 0)) {
+		t.Fatalf("result = %#v, want future rolling wake", result)
 	}
 }
 
@@ -194,7 +193,7 @@ func TestReserveCrossScopeReservedBatchWithoutLeaseGetsReconciliationWake(t *tes
 func TestReserveCrossScopeUnknownReservationWakesAtReconciliationExpiry(t *testing.T) {
 	db := newQuotaTestDB(t)
 	start := time.Unix(100, 0)
-	account := models.QuotaAccount{QuotaKey: "key", RemoteName: "remote", BudgetBytes: models.DefaultRotationQuotaLimitBytes, WindowSeconds: models.DefaultQuotaWindowSeconds, Enabled: true, WindowStartedAt: &start}
+	account := models.QuotaAccount{QuotaKey: "key", RemoteName: "remote", BudgetBytes: models.DefaultRotationQuotaLimitBytes, WindowSeconds: models.DefaultQuotaWindowSeconds, Enabled: true, QuotaPolicyVersion: models.RollingQuotaPolicyVersion}
 	if err := db.Create(&account).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -202,11 +201,12 @@ func TestReserveCrossScopeUnknownReservationWakesAtReconciliationExpiry(t *testi
 	if err := db.Create(&foreign).Error; err != nil {
 		t.Fatal(err)
 	}
-	reconcileAt := time.Unix(140, 0)
+	now := start.Add(time.Minute)
+	reconcileAt := now.Add(40 * time.Second)
 	if err := db.Create(&models.QuotaReservation{QuotaAccountID: account.ID, BatchID: foreign.ID, BatchFileID: 1, Bytes: 1, State: models.ReservationStateUnknown, IdempotencyKey: "foreign-unknown", ExpiresAt: &reconcileAt}).Error; err != nil {
 		t.Fatal(err)
 	}
-	service := testService(db, start)
+	service := testService(db, now)
 	result, err := service.Reserve(PackReserveRequest{Task: quotaTask([]string{"remote"}, map[string]string{"remote": account.QuotaKey}, 10), Snapshots: []LocalSnapshot{snapshot("file", 1)}, SourceRoot: "/source", DestinationPath: "/local"})
 	if err != nil {
 		t.Fatal(err)
@@ -218,9 +218,8 @@ func TestReserveCrossScopeUnknownReservationWakesAtReconciliationExpiry(t *testi
 	if err := db.Where("batch_id = ?", foreign.ID).First(&reservation).Error; err != nil {
 		t.Fatal(err)
 	}
-	wantDeadline := AccountWindowEnd(account)
-	if reservation.ExpiresAt == nil || !reservation.ExpiresAt.Equal(wantDeadline) {
-		t.Fatalf("unknown reservation deadline = %v, want account boundary %v", reservation.ExpiresAt, wantDeadline)
+	if reservation.ExpiresAt == nil || !reservation.ExpiresAt.Equal(reconcileAt) {
+		t.Fatalf("unknown reservation deadline = %v, want reconciliation expiry %v", reservation.ExpiresAt, reconcileAt)
 	}
 	var storedBatch models.RotationQuotaBatch
 	if err := db.First(&storedBatch, foreign.ID).Error; err != nil {
@@ -319,7 +318,7 @@ func testService(db *gorm.DB, now time.Time) Service {
 		defer tokenMu.Unlock()
 		next++
 		return fmt.Sprintf("token-%d", next)
-	}, ConfigResolver: func(string) (string, error) { return configPath, nil }, MaxRetries: 4}
+	}, ConfigResolver: func(string) (string, error) { return configPath, nil }, MaxRetries: 8}
 }
 
 func TestReserveFirstFitSharedCapacityAndIdempotency(t *testing.T) {
@@ -816,8 +815,8 @@ func TestHeldReservationsCarryForwardAtFixedWindowBoundary(t *testing.T) {
 		t.Fatalf("old reservation count = %d", len(oldReservations))
 	}
 	for _, reservation := range oldReservations {
-		if reservation.State != models.ReservationStateHeld || reservation.ExpiresAt == nil || !reservation.ExpiresAt.Equal(time.Unix(100, 0).Add(time.Duration(models.DefaultQuotaWindowSeconds)*time.Second)) {
-			t.Fatalf("old reservation was not carried forward: %#v", reservation)
+		if reservation.State != models.ReservationStateHeld || reservation.ExpiresAt == nil || !reservation.ExpiresAt.Equal(expired) {
+			t.Fatalf("old unresolved reservation was changed: %#v", reservation)
 		}
 	}
 	var stored models.RotationQuotaBatch
@@ -832,7 +831,7 @@ func TestHeldReservationsCarryForwardAtFixedWindowBoundary(t *testing.T) {
 func TestInitializedWindowNormalizesLegacyHeldExpiry(t *testing.T) {
 	db := newQuotaTestDB(t)
 	anchor := time.Unix(100, 0)
-	account := models.QuotaAccount{QuotaKey: "initialized", RemoteName: "remote", BudgetBytes: models.DefaultRotationQuotaLimitBytes, WindowSeconds: models.DefaultQuotaWindowSeconds, Enabled: true, WindowStartedAt: &anchor}
+	account := models.QuotaAccount{QuotaKey: "initialized", RemoteName: "remote", BudgetBytes: models.DefaultRotationQuotaLimitBytes, WindowSeconds: models.DefaultQuotaWindowSeconds, Enabled: true, WindowStartedAt: &anchor, FixedWindowMigrationVersion: models.FixedWindowMigrationVersion}
 	if err := db.Create(&account).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -851,9 +850,8 @@ func TestInitializedWindowNormalizesLegacyHeldExpiry(t *testing.T) {
 	if err := db.First(&reservation, "idempotency_key = ?", "legacy-held-expiry").Error; err != nil {
 		t.Fatal(err)
 	}
-	want := anchor.Add(time.Duration(models.DefaultQuotaWindowSeconds) * time.Second)
-	if reservation.State != models.ReservationStateHeld || reservation.ExpiresAt == nil || !reservation.ExpiresAt.Equal(want) {
-		t.Fatalf("legacy held reservation deadline = %#v, want %v", reservation, want)
+	if reservation.State != models.ReservationStateHeld || reservation.ExpiresAt == nil || !reservation.ExpiresAt.Equal(legacyExpiry) {
+		t.Fatalf("legacy held reservation deadline changed: %#v", reservation)
 	}
 }
 
@@ -1011,13 +1009,31 @@ func TestConcurrentSharedKeyDifferentTasksAndDestinationsRespectBudget(t *testin
 	}
 }
 
+func TestPackSnapshotsStaysStickyUntilForecastAllowsSuccessor(t *testing.T) {
+	now := time.Unix(1000, 0)
+	accounts := []models.QuotaAccount{
+		{ID: 1, QuotaKey: "first", BudgetBytes: 100, Enabled: true},
+		{ID: 2, QuotaKey: "second", BudgetBytes: 100, Enabled: true},
+	}
+	keys := map[string]string{"r1": "first", "r2": "second"}
+	snapshot := LocalSnapshot{RelativePath: "file", SnapshotKey: "file", SizeBytes: 5, RootDevice: 1, RootInode: 1}
+	selected, pending, _, err := packSnapshotsWithForecast([]LocalSnapshot{snapshot}, []string{"r1", "r2"}, keys, accounts, map[uint]int64{1: 90, 2: 0}, map[uint]int64{1: 0, 2: 0}, 100, 5, nil, now)
+	if err != nil || len(pending) != 0 || len(selected["r1"]) != 1 {
+		t.Fatalf("without forecast selected=%#v pending=%#v err=%v", selected, pending, err)
+	}
+	selected, pending, _, err = packSnapshotsWithForecast([]LocalSnapshot{snapshot}, []string{"r1", "r2"}, keys, accounts, map[uint]int64{1: 90, 2: 0}, map[uint]int64{1: 20, 2: 0}, 100, 5, nil, now)
+	if err != nil || len(pending) != 0 || len(selected["r2"]) != 1 || len(selected["r1"]) != 0 {
+		t.Fatalf("forecast did not preselect successor: selected=%#v pending=%#v err=%v", selected, pending, err)
+	}
+}
+
 func TestReconcileAccountWindowAnchorIsFixedAndNeverCleared(t *testing.T) {
 	db := newQuotaTestDB(t)
 	account := addAccount(t, db, "key", 100)
 	task := quotaTask([]string{"remote"}, map[string]string{"remote": "key"}, 100)
 	service := testService(db, time.Unix(100, 0))
 
-	// The first reservation initializes the fixed account window.
+	// The first reservation initializes rolling policy state without a calendar anchor.
 	if _, err := service.Reserve(PackReserveRequest{Task: task, Snapshots: []LocalSnapshot{snapshot("a", 40), snapshot("b", 60)}, SourceRoot: "/source", DestinationPath: "/dest"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1025,11 +1041,11 @@ func TestReconcileAccountWindowAnchorIsFixedAndNeverCleared(t *testing.T) {
 	if err := db.First(&current, account.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if current.WindowStartedAt == nil || !current.WindowStartedAt.Equal(time.Unix(100, 0)) {
-		t.Fatalf("window anchor = %v", current.WindowStartedAt)
+	if current.QuotaPolicyVersion != models.RollingQuotaPolicyVersion {
+		t.Fatalf("quota policy version = %d", current.QuotaPolicyVersion)
 	}
 
-	// Releasing usage must not clear or move the fixed anchor.
+	// Releasing usage leaves rolling policy metadata stable.
 	now := time.Unix(200, 0)
 	if err := db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&models.QuotaReservation{}).Where("quota_account_id = ?", account.ID).Update("state", models.ReservationStateReleased).Error; err != nil {
@@ -1042,11 +1058,11 @@ func TestReconcileAccountWindowAnchorIsFixedAndNeverCleared(t *testing.T) {
 	if err := db.First(&current, account.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if current.WindowStartedAt == nil || !current.WindowStartedAt.Equal(time.Unix(100, 0)) {
-		t.Fatalf("anchor changed after release: %v", current.WindowStartedAt)
+	if current.QuotaPolicyVersion != models.RollingQuotaPolicyVersion {
+		t.Fatalf("policy changed after release: %d", current.QuotaPolicyVersion)
 	}
 
-	// Idempotency: calling reconcile again must keep the original anchor.
+	// Idempotency: calling reconcile again must not recreate a calendar anchor.
 	if err := db.Transaction(func(tx *gorm.DB) error {
 		return ReconcileAccountWindowAnchor(tx, account.ID, time.Unix(300, 0))
 	}); err != nil {
@@ -1055,8 +1071,8 @@ func TestReconcileAccountWindowAnchorIsFixedAndNeverCleared(t *testing.T) {
 	if err := db.First(&current, account.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if !current.WindowStartedAt.Equal(time.Unix(100, 0)) {
-		t.Fatalf("anchor drifted on idempotent reconcile: %v", current.WindowStartedAt)
+	if current.WindowStartedAt != nil {
+		t.Fatalf("legacy calendar anchor was recreated: %v", current.WindowStartedAt)
 	}
 }
 
@@ -1076,10 +1092,10 @@ func TestReconcileAccountWindowAnchorRefillPreservesAnchor(t *testing.T) {
 	if err := db.First(&current, account.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if current.WindowStartedAt == nil {
-		t.Fatal("expected anchor set after first reconcile")
+	if current.QuotaPolicyVersion != models.RollingQuotaPolicyVersion {
+		t.Fatalf("expected rolling policy after first reconcile: %d", current.QuotaPolicyVersion)
 	}
-	// Adding a reservation does not move the fixed window.
+	// Adding a reservation does not create a calendar quota window.
 	if err := db.Transaction(func(tx *gorm.DB) error {
 		expires := now.Add(3600 * time.Second)
 		if err := tx.Create(&models.RotationQuotaBatch{TaskID: 999, QuotaAccountID: current.ID, DestinationScope: "scope", State: models.BatchStateReserved, RequestKey: "inline-refill", OwnerToken: "o", ReservedBytes: 30}).Error; err != nil {
@@ -1101,8 +1117,8 @@ func TestReconcileAccountWindowAnchorRefillPreservesAnchor(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if current.WindowStartedAt == nil || !current.WindowStartedAt.Equal(now) {
-		t.Fatalf("anchor changed on refill: %v", current.WindowStartedAt)
+	if current.WindowStartedAt != nil {
+		t.Fatalf("calendar anchor changed on refill: %v", current.WindowStartedAt)
 	}
 }
 
@@ -1132,16 +1148,17 @@ func newClockedTestService(db *gorm.DB, clock *mutableClock) *Service {
 	}
 }
 
-func TestFixedWindowRolloverExpiresCommittedAndCarriesUnresolved(t *testing.T) {
+func TestRollingRolloverExpiresCommittedAndCarriesUnresolved(t *testing.T) {
 	db := newQuotaTestDB(t)
 	start := time.Unix(100, 0)
-	account := models.QuotaAccount{QuotaKey: "window", BudgetBytes: 10, WindowSeconds: 3600, Enabled: true, WindowStartedAt: &start}
+	account := models.QuotaAccount{QuotaKey: "window", BudgetBytes: 10, WindowSeconds: models.DefaultQuotaWindowSeconds, Enabled: true, QuotaPolicyVersion: models.RollingQuotaPolicyVersion}
 	if err := db.Create(&account).Error; err != nil {
 		t.Fatal(err)
 	}
 	oldExpiry := start.Add(time.Hour)
+	committedAt := start
 	rows := []models.QuotaReservation{
-		{QuotaAccountID: account.ID, BatchFileID: 1, Bytes: 2, State: models.ReservationStateCommitted, IdempotencyKey: "committed", ExpiresAt: &oldExpiry},
+		{QuotaAccountID: account.ID, BatchFileID: 1, Bytes: 2, State: models.ReservationStateCommitted, CommittedAt: &committedAt, IdempotencyKey: "committed", ExpiresAt: &oldExpiry},
 		{QuotaAccountID: account.ID, BatchFileID: 2, Bytes: 3, State: models.ReservationStateHeld, IdempotencyKey: "held", ExpiresAt: &oldExpiry},
 		{QuotaAccountID: account.ID, BatchFileID: 3, Bytes: 4, State: models.ReservationStateUnknown, IdempotencyKey: "unknown", ExpiresAt: &oldExpiry},
 	}
@@ -1151,15 +1168,14 @@ func TestFixedWindowRolloverExpiresCommittedAndCarriesUnresolved(t *testing.T) {
 		}
 	}
 
-	exact := start.Add(24 * time.Hour)
+	exact := committedAt.Add(24 * time.Hour)
 	advanced, err := AdvanceAccountWindow(db, account.ID, exact)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if advanced.WindowStartedAt == nil || !advanced.WindowStartedAt.Equal(exact) {
-		t.Fatalf("exact rollover anchor = %v", advanced.WindowStartedAt)
+	if advanced.QuotaPolicyVersion != models.RollingQuotaPolicyVersion {
+		t.Fatalf("rolling policy version = %d", advanced.QuotaPolicyVersion)
 	}
-	wantEnd := exact.Add(24 * time.Hour)
 	var stored []models.QuotaReservation
 	if err := db.Where("quota_account_id = ?", account.ID).Order("id").Find(&stored).Error; err != nil {
 		t.Fatal(err)
@@ -1171,8 +1187,8 @@ func TestFixedWindowRolloverExpiresCommittedAndCarriesUnresolved(t *testing.T) {
 		if reservation.State != models.ReservationStateHeld && reservation.State != models.ReservationStateUnknown {
 			t.Fatalf("unresolved reservation state = %q", reservation.State)
 		}
-		if reservation.ExpiresAt == nil || !reservation.ExpiresAt.Equal(wantEnd) {
-			t.Fatalf("unresolved reservation expiry = %v, want %v", reservation.ExpiresAt, wantEnd)
+		if reservation.ExpiresAt == nil || !reservation.ExpiresAt.Equal(oldExpiry) {
+			t.Fatalf("unresolved reservation expiry changed = %v, want %v", reservation.ExpiresAt, oldExpiry)
 		}
 	}
 
@@ -1181,20 +1197,12 @@ func TestFixedWindowRolloverExpiresCommittedAndCarriesUnresolved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantAnchor := exact.Add(48 * time.Hour)
-	if advanced.WindowStartedAt == nil || !advanced.WindowStartedAt.Equal(wantAnchor) {
-		t.Fatalf("late rollover anchor = %v, want %v", advanced.WindowStartedAt, wantAnchor)
-	}
-	if !quotaWindowEndEqual(advanced, wantAnchor.Add(24*time.Hour)) {
-		t.Fatalf("late rollover end = %v", AccountWindowEnd(advanced))
+	if advanced.WindowStartedAt != nil {
+		t.Fatalf("late rolling advance recreated calendar anchor: %v", advanced.WindowStartedAt)
 	}
 }
 
-func quotaWindowEndEqual(account models.QuotaAccount, want time.Time) bool {
-	return AccountWindowEnd(account).Equal(want)
-}
-
-func TestReserveUsesOneSharedReservationDeadline(t *testing.T) {
+func TestReserveDoesNotCreateFixedReservationDeadline(t *testing.T) {
 	db := newQuotaTestDB(t)
 	account := addAccount(t, db, "shared-window", 20)
 	clock := time.Unix(100, 0)
@@ -1211,26 +1219,26 @@ func TestReserveUsesOneSharedReservationDeadline(t *testing.T) {
 	if err := db.Where("batch_id = ?", result.Batches[0].ID).Order("id").Find(&reservations).Error; err != nil {
 		t.Fatal(err)
 	}
-	want := clock.Add(24 * time.Hour)
 	for _, reservation := range reservations {
-		if reservation.ExpiresAt == nil || !reservation.ExpiresAt.Equal(want) {
-			t.Fatalf("reservation deadline = %v, want %v", reservation.ExpiresAt, want)
+		if reservation.ExpiresAt != nil {
+			t.Fatalf("reservation has a fixed quota deadline: %v", reservation.ExpiresAt)
 		}
 	}
 }
 
-func TestReserveAt700GiBWaitsForRolloverThenReserves(t *testing.T) {
+func TestReserveAtRollingCapWaitsForCommitExpiryThenReserves(t *testing.T) {
 	db := newQuotaTestDB(t)
 	start := time.Unix(100, 0)
-	account := models.QuotaAccount{QuotaKey: "full", RemoteName: "remote", BudgetBytes: models.DefaultRotationQuotaLimitBytes, WindowSeconds: models.DefaultQuotaWindowSeconds, Enabled: true, WindowStartedAt: &start}
+	account := models.QuotaAccount{QuotaKey: "full", RemoteName: "remote", BudgetBytes: models.DefaultRotationQuotaLimitBytes, WindowSeconds: models.DefaultQuotaWindowSeconds, Enabled: true, QuotaPolicyVersion: models.RollingQuotaPolicyVersion}
 	if err := db.Create(&account).Error; err != nil {
 		t.Fatal(err)
 	}
-	legacyExpiry := start.Add(time.Hour)
-	if err := db.Create(&models.QuotaReservation{QuotaAccountID: account.ID, BatchFileID: 99, Bytes: models.DefaultRotationQuotaLimitBytes, State: models.ReservationStateCommitted, IdempotencyKey: "full-window", ExpiresAt: &legacyExpiry}).Error; err != nil {
+	committedAt := start
+	if err := db.Create(&models.QuotaReservation{QuotaAccountID: account.ID, BatchFileID: 99, Bytes: models.DefaultRotationQuotaLimitBytes, State: models.ReservationStateCommitted, CommittedAt: &committedAt, IdempotencyKey: "full-window"}).Error; err != nil {
 		t.Fatal(err)
 	}
-	beforeBoundary := start.Add(24*time.Hour - time.Second)
+	boundary := committedAt.Add(24 * time.Hour)
+	beforeBoundary := boundary.Add(-time.Second)
 	request := PackReserveRequest{Task: quotaTask([]string{"remote"}, map[string]string{"remote": account.QuotaKey}, models.DefaultRotationQuotaLimitBytes), Snapshots: []LocalSnapshot{snapshot("next", 1)}, RequestIdempotencyKey: "before-boundary", SourceRoot: "/source", DestinationPath: "/before"}
 	if result, err := func() (PackReserveResult, error) {
 		service := testService(db, beforeBoundary)
@@ -1238,10 +1246,9 @@ func TestReserveAt700GiBWaitsForRolloverThenReserves(t *testing.T) {
 	}(); err != nil {
 		t.Fatal(err)
 	} else if len(result.Batches) != 0 || len(result.Pending) != 1 {
-		t.Fatalf("reservation crossed live boundary: %#v", result)
+		t.Fatalf("reservation crossed live rolling cap: %#v", result)
 	}
 
-	boundary := start.Add(24 * time.Hour)
 	request.RequestIdempotencyKey = "at-boundary"
 	request.DestinationPath = "/at-boundary"
 	result, err := func() (PackReserveResult, error) {
@@ -1249,7 +1256,7 @@ func TestReserveAt700GiBWaitsForRolloverThenReserves(t *testing.T) {
 		return service.Reserve(request)
 	}()
 	if err != nil || len(result.Batches) != 1 || len(result.Pending) != 0 {
-		t.Fatalf("reservation did not become available at rollover: result=%#v err=%v", result, err)
+		t.Fatalf("reservation did not become available at commit expiry: result=%#v err=%v", result, err)
 	}
 	var old models.QuotaReservation
 	if err := db.Where("id = ?", 1).First(&old).Error; err != nil {
@@ -1263,7 +1270,7 @@ func TestReserveAt700GiBWaitsForRolloverThenReserves(t *testing.T) {
 		t.Fatal(err)
 	}
 	if held > models.DefaultRotationQuotaLimitBytes {
-		t.Fatalf("live reservations exceeded fixed budget: %d", held)
+		t.Fatalf("live reservations exceeded rolling budget: %d", held)
 	}
 }
 
@@ -1301,3 +1308,165 @@ func TestInitializeAccountWindowsRetiresHistoricalProbeRows(t *testing.T) {
 		t.Fatalf("probe scheduling state remained active: %#v", current)
 	}
 }
+
+func TestManualResetExpiresCommittedOnlyAndRecordsAudit(t *testing.T) {
+	db := newQuotaTestDB(t)
+	now := time.Unix(1000, 0)
+	account := models.QuotaAccount{QuotaKey: "manual-reset", BudgetBytes: 100, WindowSeconds: models.DefaultQuotaWindowSeconds, Enabled: true, QuotaPolicyVersion: models.RollingQuotaPolicyVersion, CampaignCooldownUntil: ptrTime(now.Add(time.Hour)), ProviderBlockedUntil: ptrTime(now.Add(2 * time.Hour)), RecoveryState: models.QuotaRecoveryStateExhausted}
+	if err := db.Create(&account).Error; err != nil {
+		t.Fatal(err)
+	}
+	states := []string{models.ReservationStateCommitted, models.ReservationStateHeld, models.ReservationStateActive, models.ReservationStateUnknown}
+	for i, state := range states {
+		reservation := models.QuotaReservation{QuotaAccountID: account.ID, BatchFileID: uint(i + 1), Bytes: 10, State: state, IdempotencyKey: fmt.Sprintf("manual-reset-%d", i)}
+		if state == models.ReservationStateCommitted {
+			committedAt := now.Add(-time.Minute)
+			reservation.CommittedAt = &committedAt
+		}
+		if err := db.Create(&reservation).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ManualReset(db, account.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	var stored models.QuotaAccount
+	if err := db.First(&stored, account.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.CampaignCooldownUntil != nil || stored.ProviderBlockedUntil == nil || stored.RecoveryState != models.QuotaRecoveryStateExhausted || stored.LastManualResetAt == nil || !stored.LastManualResetAt.Equal(now) {
+		t.Fatalf("reset account state = %#v", stored)
+	}
+	var reservations []models.QuotaReservation
+	if err := db.Where("quota_account_id = ?", account.ID).Order("id").Find(&reservations).Error; err != nil {
+		t.Fatal(err)
+	}
+	if reservations[0].State != models.ReservationStateExpired || reservations[0].ReleasedAt == nil {
+		t.Fatalf("committed reservation was not expired: %#v", reservations[0])
+	}
+	for _, reservation := range reservations[1:] {
+		if reservation.State == models.ReservationStateExpired || reservation.State == models.ReservationStateReleased {
+			t.Fatalf("in-flight reservation was changed: %#v", reservation)
+		}
+	}
+	usage, err := EffectiveAccountUsage(db, account.ID, now)
+	if err != nil || usage != 30 {
+		t.Fatalf("preserved unresolved usage=%d err=%v", usage, err)
+	}
+}
+
+func TestManualResetCutoffPreservesCompletionAfterRequest(t *testing.T) {
+	db := newQuotaTestDB(t)
+	cutoff := time.Unix(2000, 0)
+	account := addAccount(t, db, "manual-reset-cutoff", 100)
+	before := cutoff.Add(-time.Second)
+	after := cutoff.Add(time.Second)
+	if err := db.Create(&models.QuotaReservation{QuotaAccountID: account.ID, BatchFileID: 1, Bytes: 10, State: models.ReservationStateCommitted, CommittedAt: &before, IdempotencyKey: "reset-before-cutoff"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.QuotaReservation{QuotaAccountID: account.ID, BatchFileID: 2, Bytes: 20, State: models.ReservationStateCommitted, CommittedAt: &after, IdempotencyKey: "reset-after-cutoff"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := ManualReset(db, account.ID, cutoff); err != nil {
+		t.Fatal(err)
+	}
+	var beforeRow, afterRow models.QuotaReservation
+	if err := db.First(&beforeRow, "idempotency_key = ?", "reset-before-cutoff").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(&afterRow, "idempotency_key = ?", "reset-after-cutoff").Error; err != nil {
+		t.Fatal(err)
+	}
+	if beforeRow.State != models.ReservationStateExpired || afterRow.State != models.ReservationStateCommitted {
+		t.Fatalf("reset cutoff states before=%#v after=%#v", beforeRow, afterRow)
+	}
+}
+
+func TestLegacyMigrationClampsCommittedAtToOldDeadlineAndIgnoresLaterExhaustion(t *testing.T) {
+	db := newQuotaTestDB(t)
+	now := time.Unix(5000, 0).UTC()
+	windowStart := now.Add(-time.Hour)
+	firstExhausted := now.Add(12 * time.Hour)
+	legacyExpiry := now.Add(6 * time.Hour)
+	account := models.QuotaAccount{
+		QuotaKey: "legacy-deadline", BudgetBytes: 100, WindowSeconds: models.DefaultQuotaWindowSeconds,
+		Enabled: true, RecoveryState: models.QuotaRecoveryStateExhausted,
+		WindowStartedAt: &windowStart, FirstExhaustedAt: &firstExhausted,
+	}
+	if err := db.Create(&account).Error; err != nil {
+		t.Fatal(err)
+	}
+	verifiedAt := now.Add(-time.Minute)
+	if err := db.Create(&models.RotationQuotaBatchFile{ID: 1, BatchID: 1, RelativePath: "file", SnapshotKey: "file", SizeBytes: 10, VerifiedAt: &verifiedAt}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.QuotaReservation{QuotaAccountID: account.ID, BatchFileID: 1, Bytes: 10, State: models.ReservationStateCommitted, ExpiresAt: &legacyExpiry, IdempotencyKey: "legacy-deadline-row"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AdvanceAccountWindow(db, account.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	var migrated models.QuotaReservation
+	if err := db.Where("idempotency_key = ?", "legacy-deadline-row").First(&migrated).Error; err != nil {
+		t.Fatal(err)
+	}
+	wantCommittedAt := legacyExpiry.Add(-24 * time.Hour)
+	if migrated.State != models.ReservationStateCommitted || migrated.CommittedAt == nil || !migrated.CommittedAt.Equal(wantCommittedAt) || migrated.CommittedAt.Add(24*time.Hour).After(legacyExpiry) {
+		t.Fatalf("legacy row deadline clamp = %#v, want committed_at %v", migrated, wantCommittedAt)
+	}
+	var migratedAccount models.QuotaAccount
+	if err := db.First(&migratedAccount, account.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if migratedAccount.CampaignCooldownUntil != nil || migratedAccount.RecoveryState != models.QuotaRecoveryStateAvailable || migratedAccount.FirstExhaustedAt != nil {
+		t.Fatalf("legacy exhaustion became rolling state: %#v", migratedAccount)
+	}
+	if _, err := AdvanceAccountWindow(db, account.ID, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	var restarted models.QuotaReservation
+	if err := db.First(&restarted, migrated.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if restarted.State != migrated.State || restarted.CommittedAt == nil || !restarted.CommittedAt.Equal(*migrated.CommittedAt) {
+		t.Fatalf("legacy migration changed on restart: before=%#v after=%#v", migrated, restarted)
+	}
+}
+
+func TestLegacyMigrationExpiresAtExactBoundaryAndWithoutEvidence(t *testing.T) {
+	db := newQuotaTestDB(t)
+	now := time.Unix(6000, 0).UTC()
+	account := addAccount(t, db, "legacy-boundaries", 100)
+	exactExpiry := now
+	if err := db.Create(&models.QuotaReservation{QuotaAccountID: account.ID, BatchFileID: 1, Bytes: 10, State: models.ReservationStateCommitted, ExpiresAt: &exactExpiry, IdempotencyKey: "legacy-exact-boundary"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&models.QuotaReservation{QuotaAccountID: account.ID, BatchFileID: 2, Bytes: 10, State: models.ReservationStateCommitted, IdempotencyKey: "legacy-no-evidence"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	staleCommittedAt := now.Add(-48 * time.Hour)
+	if err := db.Create(&models.QuotaReservation{QuotaAccountID: account.ID, BatchFileID: 3, Bytes: 10, State: models.ReservationStateCommitted, CommittedAt: &staleCommittedAt, IdempotencyKey: "legacy-stale-committed-at"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AdvanceAccountWindow(db, account.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	var rows []models.QuotaReservation
+	if err := db.Where("quota_account_id = ?", account.ID).Order("id").Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 || rows[0].State != models.ReservationStateExpired || rows[1].State != models.ReservationStateExpired || rows[2].State != models.ReservationStateExpired {
+		t.Fatalf("legacy stale rows were charged: %#v", rows)
+	}
+	cutoff := now.Add(-24 * time.Hour)
+	for _, row := range rows[:2] {
+		if row.CommittedAt == nil || !row.CommittedAt.Equal(cutoff) {
+			t.Fatalf("legacy stale row committed_at = %#v, want %v", row, cutoff)
+		}
+	}
+	if rows[2].CommittedAt == nil || rows[2].CommittedAt.After(cutoff) {
+		t.Fatalf("direct stale committed_at was not expired: %#v", rows[2])
+	}
+}
+
+func ptrTime(value time.Time) *time.Time { return &value }

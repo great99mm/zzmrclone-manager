@@ -32,7 +32,7 @@ func proactiveStatusTestDB(t *testing.T) *gorm.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
-	if err := database.AutoMigrate(&models.Task{}, &models.SystemSetting{}, &models.QuotaAccount{}, &models.RotationQuotaBatch{}, &models.RotationQuotaBatchFile{}, &models.QuotaReservation{}); err != nil {
+	if err := database.AutoMigrate(&models.Task{}, &models.SystemSetting{}, &models.QuotaAccount{}, &models.RotationQuotaBatch{}, &models.RotationQuotaBatchFile{}, &models.QuotaReservation{}, &models.NetworkTelemetrySample{}); err != nil {
 		t.Fatal(err)
 	}
 	return database
@@ -627,7 +627,7 @@ func TestProactiveStatusExposesWindowAnchorAndExhaustionFlag(t *testing.T) {
 	}
 }
 
-func TestProactiveStatusUsesOneSharedWindowResetBoundary(t *testing.T) {
+func TestProactiveStatusLeavesNextRecoveryUnavailableWithoutLedgerEvidence(t *testing.T) {
 	database := proactiveStatusTestDB(t)
 	anchor := time.Now().Add(-time.Hour)
 	task := models.Task{ID: 1, Enabled: true, TaskType: "rotation", RotationStrategy: "proactive_quota", RotationRemotes: `["remote"]`, RotationQuotaKeys: `{"remote":"boundary-key"}`}
@@ -642,11 +642,10 @@ func TestProactiveStatusUsesOneSharedWindowResetBoundary(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("status failed: %d %#v", code, body)
 	}
-	want := anchor.Add(24 * time.Hour).Format(time.RFC3339Nano)
 	accounts := body["accounts"].([]interface{})
 	accountStatus := accounts[0].(map[string]interface{})
-	if accountStatus["next_reset_at"] != want || body["next_quota_reset_at"] != want {
-		t.Fatalf("status reset boundaries diverged: account=%v top=%v want=%v", accountStatus["next_reset_at"], body["next_quota_reset_at"], want)
+	if accountStatus["next_reset_at"] != nil || body["next_quota_reset_at"] != nil {
+		t.Fatalf("status invented a calendar reset: account=%v top=%v", accountStatus["next_reset_at"], body["next_quota_reset_at"])
 	}
 }
 
@@ -675,12 +674,12 @@ func TestProactiveStatusTreatsProviderBlockAsExhaustedUntilReset(t *testing.T) {
 		t.Fatalf("blocked account did not project an exhausted reset state: %#v", body)
 	}
 	accountStatus := body["accounts"].([]interface{})[0].(map[string]interface{})
-	if accountStatus["remaining_bytes"] != float64(0) || accountStatus["next_reset_at"] == nil {
+	if accountStatus["account_id"] != float64(account.ID) || accountStatus["availability_state"] != models.QuotaAvailabilityStateProviderBlocked || accountStatus["remaining_bytes"] != float64(0) || accountStatus["next_reset_at"] == nil {
 		t.Fatalf("blocked account did not project empty quota and provider reset: %#v", accountStatus)
 	}
 }
 
-func TestProactiveStatusKeepsRecoveryExhaustionAfterLegacyBlockExpires(t *testing.T) {
+func TestProactiveStatusClearsExpiredLegacyProviderRecovery(t *testing.T) {
 	database := proactiveStatusTestDB(t)
 	task := models.Task{ID: 1, Enabled: true, TaskType: "rotation", RotationStrategy: "proactive_quota", RotationRemotes: `["remote"]`, RotationQuotaKeys: `{"remote":"recovery-key"}`}
 	if err := database.Create(&task).Error; err != nil {
@@ -697,11 +696,46 @@ func TestProactiveStatusKeepsRecoveryExhaustionAfterLegacyBlockExpires(t *testin
 	if code != http.StatusOK {
 		t.Fatalf("status failed: %d %#v", code, body)
 	}
-	if body["all_accounts_exhausted"] != true || body["next_quota_reset_at"] == nil {
-		t.Fatalf("recovery-exhausted account was not projected as blocked: %#v", body)
+	if body["all_accounts_exhausted"] != false || body["next_quota_reset_at"] != nil {
+		t.Fatalf("expired legacy provider recovery remained blocking: %#v", body)
 	}
 	accountStatus := body["accounts"].([]interface{})[0].(map[string]interface{})
-	if accountStatus["recovery_state"] != models.QuotaRecoveryStateExhausted || accountStatus["remaining_bytes"] != float64(0) || accountStatus["next_reset_at"] == nil {
-		t.Fatalf("recovery exhaustion projection contradicted gates: %#v", accountStatus)
+	if accountStatus["recovery_state"] != models.QuotaRecoveryStateAvailable || accountStatus["availability_state"] != models.QuotaAvailabilityStateAvailable || accountStatus["remaining_bytes"] != float64(models.DefaultRotationQuotaLimitBytes) || accountStatus["next_reset_at"] != nil || accountStatus["campaign_cooldown_until"] != nil || accountStatus["provider_blocked_until"] != nil {
+		t.Fatalf("expired legacy provider recovery projection contradicted gates: %#v", accountStatus)
+	}
+}
+
+func TestProactiveStatusReportsNetworkAndLedgerRollingComparison(t *testing.T) {
+	database := proactiveStatusTestDB(t)
+	task := models.Task{ID: 1, Enabled: true, TaskType: "rotation", RotationStrategy: "proactive_quota", RotationRemotes: `["remote"]`, RotationQuotaKeys: `{"remote":"telemetry-key"}`}
+	if err := database.Create(&task).Error; err != nil {
+		t.Fatal(err)
+	}
+	account := models.QuotaAccount{QuotaKey: "telemetry-key", RemoteName: "remote", BudgetBytes: 1000, WindowSeconds: models.DefaultQuotaWindowSeconds, Enabled: true, QuotaPolicyVersion: models.RollingQuotaPolicyVersion}
+	if err := database.Create(&account).Error; err != nil {
+		t.Fatal(err)
+	}
+	committedAt := time.Now().Add(-time.Minute)
+	if err := database.Create(&models.QuotaReservation{QuotaAccountID: account.ID, Bytes: 25, State: models.ReservationStateCommitted, CommittedAt: &committedAt, IdempotencyKey: "telemetry-ledger"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	sampledAt := time.Now().Add(-time.Second)
+	if err := database.Create(&models.NetworkTelemetrySample{SampledAt: sampledAt.Add(-24 * time.Hour), TxBytes: 100, Available: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Create(&models.NetworkTelemetrySample{SampledAt: sampledAt, TxBytes: 250, Available: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+	code, body := callProactiveStatus(t, database, 1)
+	if code != http.StatusOK {
+		t.Fatalf("status failed: %d %#v", code, body)
+	}
+	network, ok := body["network_telemetry"].(map[string]interface{})
+	if !ok || network["rolling_24h_tx_bytes"] != float64(150) || network["ledger_committed_bytes"] != float64(25) || network["difference_bytes"] != float64(125) {
+		t.Fatalf("network telemetry = %#v", body["network_telemetry"])
+	}
+	accountStatus := body["accounts"].([]interface{})[0].(map[string]interface{})
+	if accountStatus["account_id"] != float64(account.ID) || accountStatus["rolling_usage_bytes"] != float64(25) || accountStatus["unresolved_bytes"] != float64(0) || accountStatus["forecast_3h_bytes"] == nil {
+		t.Fatalf("rolling account status = %#v", accountStatus)
 	}
 }

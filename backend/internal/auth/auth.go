@@ -47,6 +47,15 @@ func VerifyToken(token string) bool {
 	return ok
 }
 
+func ClaimsForToken(token string) (Claims, bool) {
+	value, ok := sessions.Load(strings.TrimSpace(token))
+	if !ok {
+		return Claims{}, false
+	}
+	claims, ok := value.(Claims)
+	return claims, ok
+}
+
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
