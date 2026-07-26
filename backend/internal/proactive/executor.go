@@ -403,6 +403,11 @@ func (e *Executor) startIntent(batchID uint, token string) error {
 			return err
 		}
 		now := e.now()
+		advanced, err := quota.AdvanceAccountWindowTx(tx, account.ID, now)
+		if err != nil {
+			return err
+		}
+		account = advanced
 		if models.IsUnavailableForProactiveTransfers(account, now) {
 			return ErrAccountBlocked
 		}
@@ -413,8 +418,9 @@ func (e *Executor) startIntent(batchID uint, token string) error {
 		if len(reservations) == 0 {
 			return errors.New("batch has no reservations")
 		}
+		windowEnd := quota.AccountWindowEnd(account)
 		for _, reservation := range reservations {
-			if reservation.State != models.ReservationStateHeld || reservation.ExpiresAt == nil || !reservation.ExpiresAt.After(now) {
+			if reservation.State != models.ReservationStateHeld || reservation.ExpiresAt == nil || !reservation.ExpiresAt.After(now) || !reservation.ExpiresAt.Equal(windowEnd) {
 				return errors.New("batch reservation is not held and unexpired")
 			}
 		}
@@ -676,15 +682,19 @@ func (e *Executor) freezeMarkerTx(tx *gorm.DB, batchID uint, token string, marke
 	if err := tx.First(&account, batch.QuotaAccountID).Error; err != nil {
 		return err
 	}
-	until := now.Add(24 * time.Hour)
+	advanced, err := quota.AdvanceAccountWindowTx(tx, account.ID, now)
+	if err != nil {
+		return err
+	}
+	account = advanced
+	until := quota.AccountWindowEnd(account)
 	if account.RecoveryState != models.QuotaRecoveryStateExhausted {
 		transition := tx.Model(&models.QuotaAccount{}).
 			Where("id = ? AND (recovery_state IS NULL OR recovery_state <> ?)", account.ID, models.QuotaRecoveryStateExhausted).
 			Updates(map[string]interface{}{
 				"recovery_state":      models.QuotaRecoveryStateExhausted,
-				"first_exhausted_at":  now,
+				"first_exhausted_at":  gorm.Expr("COALESCE(first_exhausted_at, ?)", now),
 				"recovery_generation": gorm.Expr("recovery_generation + 1"),
-				"next_probe_at":       now.Add(models.DefaultQuotaRecoveryProbeDelay),
 				"probe_claim_token":   "",
 				"probe_claim_until":   nil,
 			})
@@ -694,7 +704,7 @@ func (e *Executor) freezeMarkerTx(tx *gorm.DB, batchID uint, token string, marke
 	}
 	legacyBlock := tx.Model(&models.QuotaAccount{}).
 		Where("id = ?", account.ID).
-		Update("provider_blocked_until", gorm.Expr("CASE WHEN provider_blocked_until IS NULL OR provider_blocked_until < ? THEN ? ELSE provider_blocked_until END", until, until))
+		Update("provider_blocked_until", until)
 	if legacyBlock.Error != nil {
 		return legacyBlock.Error
 	}

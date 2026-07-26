@@ -28,9 +28,10 @@ type MoveResolutionRequest struct {
 }
 
 type MoveResolutionResult struct {
-	BatchID uint
-	FileID  uint
-	State   string
+	BatchID        uint
+	FileID         uint
+	QuotaAccountID uint
+	State          string
 }
 
 func ResolveUnknownMoveFile(database *gorm.DB, request MoveResolutionRequest) (result MoveResolutionResult, err error) {
@@ -229,5 +230,5 @@ func commitMoveResolution(database *gorm.DB, batch models.RotationQuotaBatch, fi
 	if err := database.First(&current, batch.ID).Error; err != nil {
 		return MoveResolutionResult{}, err
 	}
-	return MoveResolutionResult{BatchID: batch.ID, FileID: file.ID, State: current.State}, nil
+	return MoveResolutionResult{BatchID: batch.ID, FileID: file.ID, QuotaAccountID: batch.QuotaAccountID, State: current.State}, nil
 }

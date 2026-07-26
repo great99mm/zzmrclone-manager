@@ -65,6 +65,8 @@ type Dispatcher struct {
 	active                         map[uint]bool
 }
 
+var errIncompleteQuotaAccountMapping = errors.New("one or more quota accounts are missing")
+
 func (d *Dispatcher) RequestScan(ctx context.Context, taskID uint) error {
 	if d == nil || d.DB == nil || d.Quota == nil || d.Executor == nil {
 		return errors.New("proactive dispatcher dependencies are required")
@@ -281,10 +283,13 @@ func (d *Dispatcher) RequestScan(ctx context.Context, taskID uint) error {
 		}
 	}
 	if err := d.executeGroup(ctx, taskID, requestKey); err != nil {
-		wakeErr := d.persistScopeWake(resolved, task.RemoteDir, now)
+		wakeErr := errors.Join(d.persistScopeWake(resolved, task.RemoteDir, now), d.persistAccountWakeForKeys(keys, now, true))
 		return errors.Join(err, wakeErr, d.persistRequestError(taskID, err))
 	}
 	if d.groupTerminal(taskID, requestKey) {
+		if err := d.persistAccountWakeForKeys(keys, now, true); err != nil {
+			return err
+		}
 		if len(result.Pending) > 0 {
 			// The file-count batch limit leaves eligible files pending even though
 			// every batch in this group completed. Continue packing them without
@@ -423,6 +428,11 @@ func (d *Dispatcher) Recover(ctx context.Context) error {
 				if wakeErr := d.persistScopeWake(resolved, task.RemoteDir, d.now()); wakeErr != nil {
 					return wakeErr
 				}
+				if keys, keyErr := completeQuotaKeys(task, resolved); keyErr != nil {
+					return keyErr
+				} else if wakeErr := d.persistAccountWakeForKeys(keys, d.now(), true); wakeErr != nil {
+					return wakeErr
+				}
 				return err
 			}
 		}
@@ -431,6 +441,13 @@ func (d *Dispatcher) Recover(ctx context.Context) error {
 			return resolveErr
 		}
 		if wakeErr := d.persistScopeWake(resolved, task.RemoteDir, d.now()); wakeErr != nil {
+			return wakeErr
+		}
+		quotaKeys, keyErr := completeQuotaKeys(task, resolved)
+		if keyErr != nil {
+			return keyErr
+		}
+		if wakeErr := d.persistAccountWakeForKeys(quotaKeys, d.now(), true); wakeErr != nil {
 			return wakeErr
 		}
 		if len(blockedGroups) == 0 {
@@ -823,6 +840,13 @@ func (d *Dispatcher) PersistImmediateWake(taskID uint) error { return d.persistI
 // ProjectStatuses derives task status from the durable quota ledger. It must
 // run after recovery and before trigger registration.
 func (d *Dispatcher) ProjectStatuses() error {
+	var accountIDs []uint
+	if err := d.DB.Model(&models.QuotaAccount{}).Pluck("id", &accountIDs).Error; err != nil {
+		return err
+	}
+	if _, err := quota.AdvanceAccountWindows(d.DB, accountIDs, d.now()); err != nil {
+		return err
+	}
 	var tasks []models.Task
 	if err := d.DB.Where("enabled = ? AND task_type = ? AND rotation_strategy = ?", true, "rotation", "proactive_quota").Find(&tasks).Error; err != nil {
 		return err
@@ -1185,9 +1209,16 @@ func (d *Dispatcher) executeGroup(ctx context.Context, taskID uint, requestKey s
 // intent. ReleaseHeldBatch rechecks the same pre-start predicates in its
 // transaction, so active or unknown work is never released by this path.
 func (d *Dispatcher) cancelBlockedHeld(batchID uint) error {
+	var batch models.RotationQuotaBatch
+	if err := d.DB.Select("quota_account_id").First(&batch, batchID).Error; err != nil {
+		return err
+	}
 	err := d.Quota.ReleaseHeldBatch(batchID)
 	if err == nil || errors.Is(err, quota.ErrHeldBatchNotSafe) || strings.Contains(strings.ToLower(err.Error()), "not an unstarted held batch") {
-		return nil
+		if err != nil {
+			return nil
+		}
+		return d.persistAccountWakeForAccounts([]uint{batch.QuotaAccountID}, d.now(), true)
 	}
 	return err
 }
@@ -1207,7 +1238,7 @@ func (d *Dispatcher) finishPauseIfRequested(taskID uint) {
 func (d *Dispatcher) cancelLaterHeld(batches []models.RotationQuotaBatch) error {
 	for _, batch := range batches {
 		if batch.StartedAt == nil && (batch.State == models.BatchStateReserved || batch.State == models.BatchStatePlanned) {
-			if err := d.Quota.ReleaseHeldBatch(batch.ID); err != nil {
+			if err := d.cancelBlockedHeld(batch.ID); err != nil {
 				return err
 			}
 		}
@@ -1454,7 +1485,7 @@ func (d *Dispatcher) persistRequestError(id uint, original error) error {
 	return errors.Join(errs...)
 }
 func (d *Dispatcher) persistPendingState(task models.Task, keys map[string]string, pending []quota.LocalSnapshot, now time.Time, generation uint64, allowClear bool) error {
-	max := int64(task.RotationQuotaLimitBytes)
+	max := task.RotationQuotaLimitBytes
 	var accounts []models.QuotaAccount
 	if err := d.DB.Where("quota_key IN ?", mapValues(keys)).Find(&accounts).Error; err != nil {
 		return err
@@ -1466,7 +1497,11 @@ func (d *Dispatcher) persistPendingState(task models.Task, keys map[string]strin
 		if !permanent {
 			fits := false
 			for _, a := range accounts {
-				if s.SizeBytes <= a.BudgetBytes {
+				limit := a.BudgetBytes
+				if max < limit {
+					limit = max
+				}
+				if s.SizeBytes <= limit {
 					fits = true
 					break
 				}
@@ -1510,6 +1545,16 @@ func mapValues(m map[string]string) []string {
 	return r
 }
 func (d *Dispatcher) persistWake(taskID uint, keys map[string]string, now time.Time) error {
+	if err := advanceAccountWindowsForKeys(d.DB, keys, now); err != nil {
+		var accountCount int64
+		if countErr := d.DB.Model(&models.QuotaAccount{}).Where("quota_key IN ?", mapValues(keys)).Count(&accountCount).Error; countErr != nil {
+			return countErr
+		}
+		if accountCount == 0 {
+			return d.setEarliestWake(taskID, now.Add(time.Minute))
+		}
+		return err
+	}
 	wake, err := d.computeWake(keys, now)
 	if err != nil {
 		return err
@@ -1555,6 +1600,16 @@ func (d *Dispatcher) persistScopeWake(resolved, destination string, now time.Tim
 		if err != nil {
 			return err
 		}
+		var accountCount int64
+		if err := d.DB.Model(&models.QuotaAccount{}).Where("quota_key IN ?", mapValues(keys)).Count(&accountCount).Error; err != nil {
+			return err
+		}
+		if accountCount == 0 {
+			continue
+		}
+		if err := advanceAccountWindowsForKeys(d.DB, keys, now); err != nil {
+			return err
+		}
 		wake, err := d.computeWake(keys, now)
 		if err != nil {
 			return err
@@ -1577,42 +1632,159 @@ func (d *Dispatcher) persistScopeWake(resolved, destination string, now time.Tim
 	}
 	return nil
 }
+
+func (d *Dispatcher) persistAccountWakeForKeys(keys map[string]string, now time.Time, immediate bool) error {
+	accountIDs, err := quotaAccountIDsForKeys(d.DB, keys)
+	if err != nil {
+		if errors.Is(err, errIncompleteQuotaAccountMapping) {
+			return nil
+		}
+		return err
+	}
+	return d.persistAccountWakeForAccounts(accountIDs, now, immediate)
+}
+
+// WakeQuotaAccounts is called after an external ledger transition has
+// committed, such as manual move resolution. It deliberately runs outside the
+// resolution transaction so pending-task wake updates cannot be rolled back
+// with the already durable resolution.
+func (d *Dispatcher) WakeQuotaAccounts(accountIDs []uint) error {
+	if d == nil || d.DB == nil || d.Quota == nil {
+		return errors.New("proactive dispatcher quota dependencies are required")
+	}
+	return d.persistAccountWakeForAccounts(accountIDs, d.now(), true)
+}
+
+func (d *Dispatcher) persistAccountWakeForAccounts(accountIDs []uint, now time.Time, immediate bool) error {
+	if len(accountIDs) == 0 {
+		return nil
+	}
+	wanted := make(map[uint]struct{}, len(accountIDs))
+	for _, accountID := range accountIDs {
+		wanted[accountID] = struct{}{}
+	}
+	var tasks []models.Task
+	if err := d.DB.Where("enabled = ? AND task_type = ? AND rotation_strategy = ? AND rotation_rescan_pending = ?", true, "rotation", "proactive_quota", true).Find(&tasks).Error; err != nil {
+		return err
+	}
+	for _, task := range tasks {
+		resolved, err := d.Quota.ResolveConfigPath(task.RcloneConfig)
+		if err != nil {
+			return err
+		}
+		keys, err := completeQuotaKeys(task, resolved)
+		if err != nil {
+			return err
+		}
+		taskAccountIDs, err := quotaAccountIDsForKeys(d.DB, keys)
+		if err != nil {
+			if errors.Is(err, errIncompleteQuotaAccountMapping) {
+				continue
+			}
+			return err
+		}
+		sharesAccount := false
+		for _, accountID := range taskAccountIDs {
+			if _, ok := wanted[accountID]; ok {
+				sharesAccount = true
+				break
+			}
+		}
+		if !sharesAccount {
+			continue
+		}
+		if err := advanceAccountWindowsForKeys(d.DB, keys, now); err != nil {
+			return err
+		}
+		blocked, blockerWake, err := quota.AccountWideBlocker(d.DB, taskAccountIDs, models.DestinationScope(resolved, task.RemoteDir), now)
+		if err != nil {
+			return err
+		}
+		var wake *time.Time
+		if blocked {
+			wake = &blockerWake
+		} else if immediate {
+			value := now
+			wake = &value
+		} else {
+			wake, err = d.computeWake(keys, now)
+			if err != nil {
+				return err
+			}
+		}
+		if wake != nil {
+			if err := d.setEarliestWake(task.ID, *wake); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func quotaAccountIDsForKeys(database *gorm.DB, keys map[string]string) ([]uint, error) {
+	uniqueKeys := uniqueQuotaKeys(keys)
+	if len(uniqueKeys) == 0 {
+		return nil, nil
+	}
+	values := make([]string, 0, len(uniqueKeys))
+	for key := range uniqueKeys {
+		values = append(values, key)
+	}
+	sort.Strings(values)
+	var accounts []models.QuotaAccount
+	if err := database.Where("quota_key IN ?", values).Find(&accounts).Error; err != nil {
+		return nil, err
+	}
+	if len(accounts) != len(values) {
+		return nil, errIncompleteQuotaAccountMapping
+	}
+	ids := make([]uint, 0, len(accounts))
+	for _, account := range accounts {
+		ids = append(ids, account.ID)
+	}
+	return ids, nil
+}
+
 func (d *Dispatcher) computeWake(keys map[string]string, now time.Time) (*time.Time, error) {
 	var accounts []models.QuotaAccount
 	if err := d.DB.Where("quota_key IN ?", mapValues(keys)).Find(&accounts).Error; err != nil {
 		return nil, err
 	}
+	if len(accounts) != len(uniqueQuotaKeys(keys)) {
+		return nil, errors.New("one or more quota accounts are missing")
+	}
 	var wake *time.Time
 	for _, a := range accounts {
-		// The next quota reset is anchored to the first moment this account
-		// hit zero. WindowStartedAt is set by quota.ReconcileAccountWindowAnchor
-		// whenever usage transitions from positive to zero, and cleared again on
-		// refill. When the anchor is unknown (account has never been fully
-		// exhausted in this window) we leave wake nil for this account — the
-		// system has fresh quota and there is no need to pause.
-		if a.WindowStartedAt != nil && a.WindowSeconds > 0 {
-			candidate := a.WindowStartedAt.Add(time.Duration(a.WindowSeconds) * time.Second)
-			if candidate.After(now) && (wake == nil || candidate.Before(*wake)) {
-				v := candidate
-				wake = &v
-			}
+		if err := quota.ValidateAccountWindow(a, now); err != nil {
+			return nil, err
 		}
-		if a.ProviderBlockedUntil != nil && a.ProviderBlockedUntil.After(now) && (wake == nil || a.ProviderBlockedUntil.Before(*wake)) {
-			v := *a.ProviderBlockedUntil
-			wake = &v
-		}
-	}
-	var reservations []models.QuotaReservation
-	if err := d.DB.Where("quota_account_id IN ? AND state IN ? AND expires_at > ?", accountIDs(accounts), []string{models.ReservationStateCommitted, models.ReservationStateHeld}, now).Find(&reservations).Error; err != nil {
-		return nil, err
-	}
-	for _, r := range reservations {
-		if r.ExpiresAt != nil && r.ExpiresAt.After(now) && (wake == nil || r.ExpiresAt.Before(*wake)) {
-			v := *r.ExpiresAt
+		candidate := quota.AccountWindowEnd(a)
+		if candidate.After(now) && (wake == nil || candidate.Before(*wake)) {
+			v := candidate
 			wake = &v
 		}
 	}
 	return wake, nil
+}
+
+func advanceAccountWindowsForKeys(database *gorm.DB, keys map[string]string, now time.Time) error {
+	var accounts []models.QuotaAccount
+	if err := database.Where("quota_key IN ?", mapValues(keys)).Find(&accounts).Error; err != nil {
+		return err
+	}
+	if len(accounts) != len(uniqueQuotaKeys(keys)) {
+		return errors.New("one or more quota accounts are missing")
+	}
+	_, err := quota.AdvanceAccountWindows(database, accountIDs(accounts), now)
+	return err
+}
+
+func uniqueQuotaKeys(keys map[string]string) map[string]struct{} {
+	unique := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		unique[key] = struct{}{}
+	}
+	return unique
 }
 func accountIDs(accounts []models.QuotaAccount) []uint {
 	r := make([]uint, len(accounts))

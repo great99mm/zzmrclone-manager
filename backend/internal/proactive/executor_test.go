@@ -468,6 +468,7 @@ func TestExhaustedRecoveryRetainsPlannedBatchAfterLegacyBlockExpires(t *testing.
 		"provider_blocked_until": past,
 		"recovery_state":         models.QuotaRecoveryStateExhausted,
 		"recovery_generation":    1,
+		"window_started_at":      time.Unix(100, 0),
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -507,7 +508,7 @@ func TestToReconcilingPersistsMarkerAndExhaustionTogether(t *testing.T) {
 	if err := db.First(&account, batch.QuotaAccountID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if account.RecoveryState != models.QuotaRecoveryStateExhausted || account.RecoveryGeneration != 1 || account.NextProbeAt == nil || !account.NextProbeAt.Equal(time.Unix(100, 0).Add(models.DefaultQuotaRecoveryProbeDelay)) {
+	if account.RecoveryState != models.QuotaRecoveryStateExhausted || account.RecoveryGeneration != 1 || account.NextProbeAt != nil || account.ProviderBlockedUntil == nil || !account.ProviderBlockedUntil.Equal(time.Unix(100, 0).Add(24*time.Hour)) {
 		t.Fatalf("atomic marker recovery outcome = %#v", account)
 	}
 }
@@ -600,7 +601,7 @@ func TestMissingProcessIdentityBecomesUnknown(t *testing.T) {
 	}
 }
 
-func TestMarkerDoesNotShortenLongerAccountBlock(t *testing.T) {
+func TestMarkerUsesFixedAccountWindowAndDoesNotExtendIt(t *testing.T) {
 	db := executionDB(t)
 	batch, _, _ := executionFixture(t, db, 8)
 	lease := "marker-lease"
@@ -608,7 +609,8 @@ func TestMarkerDoesNotShortenLongerAccountBlock(t *testing.T) {
 	if err := db.Model(&models.RotationQuotaBatch{}).Where("id = ?", batch.ID).Updates(map[string]interface{}{"state": models.BatchStateReconciling, "lease_token": lease}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Model(&models.QuotaAccount{}).Where("id = ?", batch.QuotaAccountID).Update("provider_blocked_until", until).Error; err != nil {
+	anchor := time.Unix(100, 0)
+	if err := db.Model(&models.QuotaAccount{}).Where("id = ?", batch.QuotaAccountID).Updates(map[string]interface{}{"provider_blocked_until": until, "window_started_at": anchor}).Error; err != nil {
 		t.Fatal(err)
 	}
 	e := &Executor{DB: db, Now: func() time.Time { return time.Unix(100, 0) }}
@@ -619,18 +621,15 @@ func TestMarkerDoesNotShortenLongerAccountBlock(t *testing.T) {
 	if err := db.First(&account, batch.QuotaAccountID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if !account.ProviderBlockedUntil.Equal(until) {
-		t.Fatalf("block shortened to %v", account.ProviderBlockedUntil)
+	windowEnd := time.Unix(100, 0).Add(24 * time.Hour)
+	if account.ProviderBlockedUntil == nil || !account.ProviderBlockedUntil.Equal(windowEnd) {
+		t.Fatalf("block did not use fixed window end: %v", account.ProviderBlockedUntil)
 	}
 	if account.RecoveryState != models.QuotaRecoveryStateExhausted || account.RecoveryGeneration != 1 || account.FirstExhaustedAt == nil || !account.FirstExhaustedAt.Equal(time.Unix(100, 0)) {
 		t.Fatalf("recovery transition = state %q generation %d first %v", account.RecoveryState, account.RecoveryGeneration, account.FirstExhaustedAt)
 	}
-	if account.NextProbeAt == nil {
-		t.Fatal("first probe was not scheduled")
-	}
-	firstProbe := *account.NextProbeAt
-	if !firstProbe.Equal(time.Unix(100, 0).Add(models.DefaultQuotaRecoveryProbeDelay)) {
-		t.Fatalf("first probe = %v", account.NextProbeAt)
+	if account.NextProbeAt != nil {
+		t.Fatal("probe schedule was created")
 	}
 	if err := e.freezeOnMarker(batch.ID, lease, ProcessResult{Stderr: "upload limit exceeded again"}); err != nil {
 		t.Fatal(err)
@@ -639,7 +638,7 @@ func TestMarkerDoesNotShortenLongerAccountBlock(t *testing.T) {
 	if err := db.First(&repeated, batch.QuotaAccountID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if repeated.RecoveryGeneration != 1 || repeated.FirstExhaustedAt == nil || !repeated.FirstExhaustedAt.Equal(*account.FirstExhaustedAt) || repeated.NextProbeAt == nil || !repeated.NextProbeAt.Equal(firstProbe) {
+	if repeated.RecoveryGeneration != 1 || repeated.FirstExhaustedAt == nil || !repeated.FirstExhaustedAt.Equal(*account.FirstExhaustedAt) || repeated.NextProbeAt != nil || repeated.ProviderBlockedUntil == nil || !repeated.ProviderBlockedUntil.Equal(windowEnd) {
 		t.Fatalf("repeated marker changed recovery timing = %#v", repeated)
 	}
 	var wg sync.WaitGroup
@@ -662,8 +661,64 @@ func TestMarkerDoesNotShortenLongerAccountBlock(t *testing.T) {
 	if err := db.First(&concurrent, batch.QuotaAccountID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if concurrent.RecoveryGeneration != 1 || concurrent.NextProbeAt == nil || !concurrent.NextProbeAt.Equal(firstProbe) {
+	if concurrent.RecoveryGeneration != 1 || concurrent.NextProbeAt != nil || concurrent.ProviderBlockedUntil == nil || !concurrent.ProviderBlockedUntil.Equal(windowEnd) {
 		t.Fatalf("concurrent markers changed recovery timing = %#v", concurrent)
+	}
+}
+
+func TestMarkerFreezeRollsAtBoundaryAndAllowsNextReservation(t *testing.T) {
+	db := executionDB(t)
+	if err := db.AutoMigrate(&models.RotationQuotaDirectoryAssignment{}); err != nil {
+		t.Fatal(err)
+	}
+	batch, file, config := executionFixture(t, db, 8)
+	lease := "marker-rollover-lease"
+	if err := db.Model(&models.RotationQuotaBatch{}).Where("id = ?", batch.ID).Updates(map[string]interface{}{"state": models.BatchStateReconciling, "lease_token": lease}).Error; err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Unix(100, 0)
+	executor := &Executor{DB: db, Now: func() time.Time { return clock }}
+	if err := executor.freezeOnMarker(batch.ID, lease, ProcessResult{Stderr: "upload limit exceeded"}); err != nil {
+		t.Fatal(err)
+	}
+	var frozen models.QuotaAccount
+	if err := db.First(&frozen, batch.QuotaAccountID).Error; err != nil {
+		t.Fatal(err)
+	}
+	boundary := clock.Add(24 * time.Hour)
+	if frozen.WindowStartedAt == nil || !frozen.WindowStartedAt.Equal(clock) || frozen.FirstExhaustedAt == nil || !frozen.FirstExhaustedAt.Equal(clock) || frozen.ProviderBlockedUntil == nil || !frozen.ProviderBlockedUntil.Equal(boundary) {
+		t.Fatalf("marker freeze = %#v", frozen)
+	}
+	if err := db.Model(&models.QuotaReservation{}).Where("batch_file_id = ?", file.ID).Updates(map[string]interface{}{"state": models.ReservationStateCommitted, "expires_at": boundary}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&models.RotationQuotaBatch{}).Where("id = ?", batch.ID).Update("state", models.BatchStateSucceeded).Error; err != nil {
+		t.Fatal(err)
+	}
+	rolled, err := quota.AdvanceAccountWindow(db, batch.QuotaAccountID, boundary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rolled.FirstExhaustedAt != nil || rolled.RecoveryState != models.QuotaRecoveryStateAvailable || rolled.ProviderBlockedUntil != nil {
+		t.Fatalf("boundary rollover did not clear freeze evidence: %#v", rolled)
+	}
+
+	service := &quota.Service{DB: db, Now: func() time.Time { return boundary }, ConfigResolver: func(string) (string, error) { return config, nil }}
+	request := quota.PackReserveRequest{
+		Task:                  models.Task{ID: 77, RcloneConfig: config, TransferMode: models.TransferModeCopy, RotationRemotes: `["remote"]`, RotationQuotaKeys: `{"remote":"key"}`, RotationQuotaLimitBytes: models.DefaultRotationQuotaLimitBytes},
+		Snapshots:             []quota.LocalSnapshot{{RelativePath: "next", SizeBytes: 1, MtimeNS: 1, Device: 2, Inode: 3, RootDevice: 4, RootInode: 5, SnapshotKey: "next-snapshot"}},
+		RequestIdempotencyKey: "after-rollover", SourceRoot: "/source", DestinationPath: "/next",
+	}
+	result, err := service.Reserve(request)
+	if err != nil || len(result.Batches) != 1 || len(result.Pending) != 0 {
+		t.Fatalf("next reservation after marker rollover = %#v err=%v", result, err)
+	}
+	var next models.QuotaReservation
+	if err := db.Where("batch_id = ?", result.Batches[0].ID).First(&next).Error; err != nil {
+		t.Fatal(err)
+	}
+	if next.ExpiresAt == nil || !next.ExpiresAt.Equal(boundary.Add(24*time.Hour)) {
+		t.Fatalf("next reservation boundary = %v", next.ExpiresAt)
 	}
 }
 
@@ -791,7 +846,17 @@ func TestLeaseHeartbeatRenewsDuringStagePreparation(t *testing.T) {
 	db := executionDB(t)
 	batch, file, _ := executionFixture(t, db, 8)
 	clock := time.Unix(100, 0)
-	e := &Executor{DB: db, ManifestDir: t.TempDir(), Runner: &fakeRunner{process: &fakeProcess{result: ProcessResult{PID: 91, ProcessStartToken: "91:1"}}, object: RemoteObject{Path: file.RelativePath, Size: file.SizeBytes}}, LeaseDuration: 10 * time.Minute, LeaseRenewInterval: time.Millisecond, BeforeStageClone: func() { clock = clock.Add(time.Hour); time.Sleep(20 * time.Millisecond) }, Now: func() time.Time { return clock }}
+	var clockMu sync.Mutex
+	e := &Executor{DB: db, ManifestDir: t.TempDir(), Runner: &fakeRunner{process: &fakeProcess{result: ProcessResult{PID: 91, ProcessStartToken: "91:1"}}, object: RemoteObject{Path: file.RelativePath, Size: file.SizeBytes}}, LeaseDuration: 10 * time.Minute, LeaseRenewInterval: time.Millisecond, BeforeStageClone: func() {
+		clockMu.Lock()
+		clock = clock.Add(time.Hour)
+		clockMu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+	}, Now: func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return clock
+	}}
 	if err := e.RunBatch(context.Background(), batch.ID); err != nil {
 		t.Fatal(err)
 	}

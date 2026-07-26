@@ -97,7 +97,8 @@ func TestProactiveStatusReturnsAccountsBatchesAndReservations(t *testing.T) {
 		t.Fatalf("status = %d, body = %#v", code, body)
 	}
 	accounts := body["accounts"].([]interface{})[0].(map[string]interface{})
-	if accounts["used_bytes"] != float64(200) || accounts["active_reserved_bytes"] != float64(300) || accounts["remaining_bytes"] != float64(500) {
+	wantRemaining := float64(models.DefaultRotationQuotaLimitBytes - 200 - 300)
+	if accounts["used_bytes"] != float64(200) || accounts["active_reserved_bytes"] != float64(300) || accounts["remaining_bytes"] != wantRemaining {
 		t.Fatalf("unexpected account totals: %#v", accounts)
 	}
 	batches := body["batches"].([]interface{})
@@ -398,7 +399,7 @@ func TestProactiveManualAvailabilityMatchesAccountWideBlocker(t *testing.T) {
 	previous := db
 	db = database
 	defer func() { db = previous }()
-	available, blocker := proactiveManualMergeAvailability(models.DestinationScope("/config", "/dest"), models.DestinationScopeMaintenance{}, map[string]string{"remote": "shared-status"}, "idle")
+	available, blocker := proactiveManualMergeAvailability(models.DestinationScope("/config", "/dest"), models.DestinationScopeMaintenance{}, map[string]string{"remote": "shared-status"}, "idle", time.Now())
 	if available || blocker != "account_active_elsewhere" {
 		t.Fatalf("status blocker parity = available=%v blocker=%q", available, blocker)
 	}
@@ -410,12 +411,12 @@ func TestProactiveManualAvailabilityRejectsNonIdleTask(t *testing.T) {
 	db = database
 	defer func() { db = previous }()
 	for _, status := range []string{"running", "paused", "error", "canceled"} {
-		available, blocker := proactiveManualMergeAvailability("scope", models.DestinationScopeMaintenance{}, map[string]string{}, status)
+		available, blocker := proactiveManualMergeAvailability("scope", models.DestinationScopeMaintenance{}, map[string]string{}, status, time.Now())
 		if available || blocker != "task_running" {
 			t.Fatalf("status=%q: available=%v blocker=%q", status, available, blocker)
 		}
 	}
-	available, blocker := proactiveManualMergeAvailability("scope", models.DestinationScopeMaintenance{}, map[string]string{}, "idle")
+	available, blocker := proactiveManualMergeAvailability("scope", models.DestinationScopeMaintenance{}, map[string]string{}, "idle", time.Now())
 	if !available || blocker != "" {
 		t.Fatalf("idle: available=%v blocker=%q", available, blocker)
 	}
@@ -537,7 +538,8 @@ func TestProactiveStatusSummaryFiltersHistoricalReservations(t *testing.T) {
 		t.Fatalf("status = %d, body = %#v", code, body)
 	}
 	binding := body["accounts"].([]interface{})[0].(map[string]interface{})
-	if binding["used_bytes"] != float64(11) || binding["active_reserved_bytes"] != float64(7) || binding["remaining_bytes"] != float64(982) {
+	wantRemaining := float64(models.DefaultRotationQuotaLimitBytes - 11 - 7)
+	if binding["used_bytes"] != float64(11) || binding["active_reserved_bytes"] != float64(7) || binding["remaining_bytes"] != wantRemaining {
 		t.Fatalf("historical reservations affected summary totals: %#v", binding)
 	}
 }
@@ -596,10 +598,10 @@ func TestProactiveStatusExposesWindowAnchorAndExhaustionFlag(t *testing.T) {
 	// user's intent (no more quota available today).
 	expires := time.Now().Add(time.Hour)
 	committedAt := time.Now().Add(-time.Minute)
-	if err := database.Create(&models.RotationQuotaBatch{TaskID: 1, QuotaAccountID: account.ID, DestinationScope: "scope", State: models.BatchStateSucceeded, RequestKey: "drain", OwnerToken: "o", ReservedBytes: 100, StartedAt: &committedAt, FinishedAt: &committedAt}).Error; err != nil {
+	if err := database.Create(&models.RotationQuotaBatch{TaskID: 1, QuotaAccountID: account.ID, DestinationScope: "scope", State: models.BatchStateSucceeded, RequestKey: "drain", OwnerToken: "o", ReservedBytes: models.DefaultRotationQuotaLimitBytes, StartedAt: &committedAt, FinishedAt: &committedAt}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := database.Create(&models.QuotaReservation{QuotaAccountID: account.ID, Bytes: 100, State: models.ReservationStateCommitted, ExpiresAt: &expires, ReservedAt: &committedAt, IdempotencyKey: "drain"}).Error; err != nil {
+	if err := database.Create(&models.QuotaReservation{QuotaAccountID: account.ID, Bytes: models.DefaultRotationQuotaLimitBytes, State: models.ReservationStateCommitted, ExpiresAt: &expires, ReservedAt: &committedAt, IdempotencyKey: "drain"}).Error; err != nil {
 		t.Fatal(err)
 	}
 	code, body := callProactiveStatus(t, database, 1)
@@ -625,6 +627,29 @@ func TestProactiveStatusExposesWindowAnchorAndExhaustionFlag(t *testing.T) {
 	}
 }
 
+func TestProactiveStatusUsesOneSharedWindowResetBoundary(t *testing.T) {
+	database := proactiveStatusTestDB(t)
+	anchor := time.Now().Add(-time.Hour)
+	task := models.Task{ID: 1, Enabled: true, TaskType: "rotation", RotationStrategy: "proactive_quota", RotationRemotes: `["remote"]`, RotationQuotaKeys: `{"remote":"boundary-key"}`}
+	if err := database.Create(&task).Error; err != nil {
+		t.Fatal(err)
+	}
+	account := models.QuotaAccount{QuotaKey: "boundary-key", RemoteName: "remote", BudgetBytes: 100, WindowSeconds: 60, Enabled: true, WindowStartedAt: &anchor}
+	if err := database.Create(&account).Error; err != nil {
+		t.Fatal(err)
+	}
+	code, body := callProactiveStatus(t, database, 1)
+	if code != http.StatusOK {
+		t.Fatalf("status failed: %d %#v", code, body)
+	}
+	want := anchor.Add(24 * time.Hour).Format(time.RFC3339Nano)
+	accounts := body["accounts"].([]interface{})
+	accountStatus := accounts[0].(map[string]interface{})
+	if accountStatus["next_reset_at"] != want || body["next_quota_reset_at"] != want {
+		t.Fatalf("status reset boundaries diverged: account=%v top=%v want=%v", accountStatus["next_reset_at"], body["next_quota_reset_at"], want)
+	}
+}
+
 func TestProactiveStatusTreatsProviderBlockAsExhaustedUntilReset(t *testing.T) {
 	database := proactiveStatusTestDB(t)
 	task := models.Task{ID: 1, Enabled: true, TaskType: "rotation", RotationStrategy: "proactive_quota", RotationRemotes: `["remote"]`, RotationQuotaKeys: `{"remote":"blocked-key"}`}
@@ -632,7 +657,8 @@ func TestProactiveStatusTreatsProviderBlockAsExhaustedUntilReset(t *testing.T) {
 		t.Fatal(err)
 	}
 	blockedUntil := time.Now().Add(24 * time.Hour)
-	account := models.QuotaAccount{QuotaKey: "blocked-key", RemoteName: "remote", BudgetBytes: 100, WindowSeconds: 86400, Enabled: true, ProviderBlockedUntil: &blockedUntil}
+	anchor := time.Now().Add(-time.Hour)
+	account := models.QuotaAccount{QuotaKey: "blocked-key", RemoteName: "remote", BudgetBytes: 100, WindowSeconds: 86400, Enabled: true, ProviderBlockedUntil: &blockedUntil, WindowStartedAt: &anchor}
 	if err := database.Create(&account).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -661,8 +687,8 @@ func TestProactiveStatusKeepsRecoveryExhaustionAfterLegacyBlockExpires(t *testin
 		t.Fatal(err)
 	}
 	past := time.Now().Add(-time.Hour)
-	nextProbe := time.Now().Add(30 * time.Minute)
-	account := models.QuotaAccount{QuotaKey: "recovery-key", RemoteName: "remote", BudgetBytes: 100, WindowSeconds: 86400, Enabled: true, ProviderBlockedUntil: &past, RecoveryState: models.QuotaRecoveryStateExhausted, RecoveryGeneration: 3, FirstExhaustedAt: &past, NextProbeAt: &nextProbe}
+	anchor := time.Now().Add(-time.Hour)
+	account := models.QuotaAccount{QuotaKey: "recovery-key", RemoteName: "remote", BudgetBytes: 100, WindowSeconds: 86400, Enabled: true, ProviderBlockedUntil: &past, RecoveryState: models.QuotaRecoveryStateExhausted, RecoveryGeneration: 3, FirstExhaustedAt: &past, WindowStartedAt: &anchor}
 	if err := database.Create(&account).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -675,7 +701,7 @@ func TestProactiveStatusKeepsRecoveryExhaustionAfterLegacyBlockExpires(t *testin
 		t.Fatalf("recovery-exhausted account was not projected as blocked: %#v", body)
 	}
 	accountStatus := body["accounts"].([]interface{})[0].(map[string]interface{})
-	if accountStatus["recovery_state"] != models.QuotaRecoveryStateExhausted || accountStatus["remaining_bytes"] != float64(0) || accountStatus["next_probe_at"] == nil || accountStatus["next_reset_at"] == nil {
+	if accountStatus["recovery_state"] != models.QuotaRecoveryStateExhausted || accountStatus["remaining_bytes"] != float64(0) || accountStatus["next_reset_at"] == nil {
 		t.Fatalf("recovery exhaustion projection contradicted gates: %#v", accountStatus)
 	}
 }

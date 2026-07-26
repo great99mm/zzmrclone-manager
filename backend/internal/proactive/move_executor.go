@@ -197,7 +197,13 @@ func (e *Executor) startMoveIntent(batchID uint, token string) error {
 		if err := tx.First(&account, batch.QuotaAccountID).Error; err != nil {
 			return err
 		}
-		if models.IsUnavailableForProactiveTransfers(account, e.now()) {
+		now := e.now()
+		advanced, err := quota.AdvanceAccountWindowTx(tx, account.ID, now)
+		if err != nil {
+			return err
+		}
+		account = advanced
+		if models.IsUnavailableForProactiveTransfers(account, now) {
 			return ErrAccountBlocked
 		}
 		var reservations []models.QuotaReservation
@@ -207,9 +213,9 @@ func (e *Executor) startMoveIntent(batchID uint, token string) error {
 		if len(reservations) == 0 {
 			return errors.New("batch has no reservations")
 		}
-		now := e.now()
+		windowEnd := quota.AccountWindowEnd(account)
 		for _, reservation := range reservations {
-			if reservation.State != models.ReservationStateHeld || reservation.ExpiresAt == nil || !reservation.ExpiresAt.After(now) {
+			if reservation.State != models.ReservationStateHeld || reservation.ExpiresAt == nil || !reservation.ExpiresAt.After(now) || !reservation.ExpiresAt.Equal(windowEnd) {
 				return errors.New("batch reservation is not held and unexpired")
 			}
 		}

@@ -208,7 +208,7 @@ func TestMoveExecutorMarkerFreezesAccount(t *testing.T) {
 	if err := db.First(&account, fixture.batch.QuotaAccountID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if account.RecoveryState != models.QuotaRecoveryStateExhausted || account.RecoveryGeneration != 1 || account.NextProbeAt == nil || !account.NextProbeAt.Equal(time.Unix(100, 0).Add(models.DefaultQuotaRecoveryProbeDelay)) {
+	if account.RecoveryState != models.QuotaRecoveryStateExhausted || account.RecoveryGeneration != 1 || account.NextProbeAt != nil || account.ProviderBlockedUntil == nil || !account.ProviderBlockedUntil.Equal(time.Unix(100, 0).Add(24*time.Hour)) {
 		t.Fatalf("move recovery transition = %#v", account)
 	}
 }
@@ -220,6 +220,7 @@ func TestMoveStartHonorsExhaustedRecoveryAfterLegacyBlockExpires(t *testing.T) {
 	if err := db.Model(&models.QuotaAccount{}).Where("id = ?", fixture.batch.QuotaAccountID).Updates(map[string]interface{}{
 		"provider_blocked_until": past,
 		"recovery_state":         models.QuotaRecoveryStateExhausted,
+		"window_started_at":      time.Unix(100, 0),
 	}).Error; err != nil {
 		t.Fatal(err)
 	}

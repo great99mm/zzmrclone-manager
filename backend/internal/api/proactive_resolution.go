@@ -72,5 +72,11 @@ func resolveProactiveMove(c *gin.Context) {
 		c.JSON(status, gin.H{"error": redactProactiveError(err.Error(), models.Task{})})
 		return
 	}
+	if proactiveDispatcher != nil {
+		if err := proactiveDispatcher.WakeQuotaAccounts([]uint{result.QuotaAccountID}); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "move resolution committed but pending quota tasks could not be woken"})
+			return
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{"batch_id": result.BatchID, "file_id": result.FileID, "state": result.State, "action": request.Action})
 }

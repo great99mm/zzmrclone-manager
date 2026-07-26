@@ -90,8 +90,11 @@ func InitDB(dataDir string) error {
 	if err := ensureQuotaProbeAttemptIndexes(db); err != nil {
 		return fmt.Errorf("failed to upgrade quota probe attempt indexes: %v", err)
 	}
-	if err := backfillQuotaRecoveryState(db, time.Now()); err != nil {
-		return fmt.Errorf("failed to backfill quota recovery state: %v", err)
+	if err := quota.InitializeAccountWindows(db, time.Now()); err != nil {
+		return fmt.Errorf("failed to initialize quota account windows: %v", err)
+	}
+	if err := normalizeProactiveTaskQuotaLimits(db); err != nil {
+		return fmt.Errorf("failed to normalize proactive quota limits: %v", err)
 	}
 	if err := validateQuotaLedgerMigration(db); err != nil {
 		return fmt.Errorf("quota ledger migration audit failed: %v", err)
@@ -235,27 +238,17 @@ func ensureQuotaProbeAttemptIndexes(database *gorm.DB) error {
 	return nil
 }
 
-// backfillQuotaRecoveryState carries legacy provider blocks into the durable
-// recovery state. It is deliberately idempotent: only the available-to-
-// exhausted transition increments the generation, and the first probe is due
-// immediately rather than at the legacy block expiry.
+// backfillQuotaRecoveryState remains as a compatibility shim for old migration
+// tests and callers. Fixed-window initialization is idempotent and never
+// schedules a recovery probe or resets an existing non-nil anchor.
 func backfillQuotaRecoveryState(database *gorm.DB, now time.Time) error {
-	result := database.Model(&models.QuotaAccount{}).
-		Where("provider_blocked_until IS NOT NULL AND (recovery_state IS NULL OR recovery_state <> ?)", models.QuotaRecoveryStateExhausted).
-		Updates(map[string]interface{}{
-			"recovery_state":      models.QuotaRecoveryStateExhausted,
-			"first_exhausted_at":  gorm.Expr("COALESCE(first_exhausted_at, ?)", now),
-			"recovery_generation": gorm.Expr("recovery_generation + 1"),
-			"next_probe_at":       now,
-			"probe_claim_token":   "",
-			"probe_claim_until":   nil,
-		})
-	if result.Error != nil {
-		return result.Error
-	}
-	return database.Model(&models.QuotaAccount{}).
-		Where("recovery_state = ? AND next_probe_at IS NULL", models.QuotaRecoveryStateExhausted).
-		Update("next_probe_at", now).Error
+	return quota.InitializeAccountWindows(database, now)
+}
+
+func normalizeProactiveTaskQuotaLimits(database *gorm.DB) error {
+	// Account budget is fixed by the quota ledger. A task's lower packing
+	// ceiling is independent request configuration and must survive migration.
+	return nil
 }
 
 func disableLegacyAutoDedupe(database *gorm.DB) error {

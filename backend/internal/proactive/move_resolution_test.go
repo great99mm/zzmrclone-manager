@@ -128,6 +128,43 @@ func TestResolveUnknownMoveRestoresExactQuarantineAndReleasesReservation(t *test
 	}
 }
 
+func TestMoveResolutionReleaseWakesPendingSharedQuotaTask(t *testing.T) {
+	db := dispatcherDB(t)
+	fixture := makeMoveFixture(t, db, 1)
+	other := models.Task{
+		Name: "pending-shared-account", Enabled: true, TaskType: "rotation", RotationStrategy: "proactive_quota",
+		RcloneConfig: fixture.batch.RcloneConfigPath, RemoteDir: "/other", SourceType: "local", SourceDir: fixture.root,
+		TransferMode: models.TransferModeCopy, RotationRemotes: `["remote"]`, RotationQuotaKeys: `{"remote":"move-key"}`,
+		RotationQuotaLimitBytes: 100, MinAge: "0s",
+	}
+	if err := db.Create(&other).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&models.Task{}).Where("id = ?", other.ID).Updates(map[string]interface{}{"rotation_rescan_pending": true, "rotation_rescan_generation": 1}).Error; err != nil {
+		t.Fatal(err)
+	}
+	file, _ := prepareUnknownMoveResolution(t, db, fixture)
+	result, err := ResolveUnknownMoveFile(db, MoveResolutionRequest{BatchID: fixture.batch.ID, FileID: file.ID, Action: "restore_and_release", ExpectedState: models.BatchFileStateUnknown, ExpectedUpdatedAt: file.UpdatedAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &Dispatcher{
+		DB:    db,
+		Quota: &quota.Service{DB: db, ConfigResolver: func(raw string) (string, error) { return raw, nil }},
+		Now:   func() time.Time { return time.Unix(100, 0) },
+	}
+	if err := d.WakeQuotaAccounts([]uint{result.QuotaAccountID}); err != nil {
+		t.Fatal(err)
+	}
+	var stored models.Task
+	if err := db.First(&stored, other.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.RotationQuotaWakeAt == nil || !stored.RotationQuotaWakeAt.Equal(time.Unix(100, 0)) {
+		t.Fatalf("manual move release wake = %#v", stored)
+	}
+}
+
 func TestMoveResolutionRestartFinalizesResolvingRestoreClaim(t *testing.T) {
 	db := executionDB(t)
 	fixture := makeMoveFixture(t, db, 1)

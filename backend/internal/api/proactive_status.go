@@ -40,15 +40,10 @@ type proactiveAccountStatus struct {
 	RecoveryState        string     `json:"recovery_state"`
 	RecoveryGeneration   *int64     `json:"recovery_generation"`
 	FirstExhaustedAt     *time.Time `json:"first_exhausted_at"`
-	NextProbeAt          *time.Time `json:"next_probe_at"`
 	Enabled              *bool      `json:"enabled"`
-	// WindowStartedAt is the first moment the account's reservation usage
-	// hit zero. While non-nil, the next quota reset is WindowStartedAt +
-	// WindowSeconds. Reset to nil on refill so the cycle restarts cleanly.
+	// WindowStartedAt is the durable start of the fixed account window.
 	WindowStartedAt *time.Time `json:"window_started_at"`
-	// NextResetAt is the absolute next reset timestamp derived from
-	// WindowStartedAt + WindowSeconds. Null while the account is still
-	// active (anchor not set) or after the reset has passed.
+	// NextResetAt is the absolute end of the shared account window.
 	NextResetAt *time.Time `json:"next_reset_at"`
 }
 
@@ -202,8 +197,18 @@ func getProactiveStatus(c *gin.Context) {
 			accounts = append(accounts, account)
 		}
 	}
-	accountsByKey := make(map[string]models.QuotaAccount, len(accounts))
+	now := time.Now()
+	accountIDsForWindow := make([]uint, 0, len(accounts))
 	for _, account := range accounts {
+		accountIDsForWindow = append(accountIDsForWindow, account.ID)
+	}
+	advancedAccounts, err := quota.AdvanceAccountWindows(db, accountIDsForWindow, now)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to advance quota account windows"})
+		return
+	}
+	accountsByKey := make(map[string]models.QuotaAccount, len(advancedAccounts))
+	for _, account := range advancedAccounts {
 		accountsByKey[account.QuotaKey] = account
 	}
 
@@ -269,10 +274,9 @@ func getProactiveStatus(c *gin.Context) {
 		var rows []proactiveReservationAggregate
 		reservationQuery := db.Model(&models.QuotaReservation{}).Select("quota_account_id, state, bytes, expires_at").Where("quota_account_id IN ?", accountIDs)
 		if summary {
-			// Match quota.accountUsage without scanning historical releases and
-			// expirations: committed usage is current only when unexpired;
-			// held/active/unknown reservations remain current by ledger contract.
-			reservationQuery = reservationQuery.Where("state IN ? OR (state = ? AND (expires_at IS NULL OR expires_at > ?))", []string{models.ReservationStateHeld, models.ReservationStateActive, models.ReservationStateUnknown}, models.ReservationStateCommitted, time.Now())
+			// Match quota.accountUsage without scanning historical releases:
+			// committed usage is released only by account-window rollover.
+			reservationQuery = reservationQuery.Where("state IN ?", []string{models.ReservationStateHeld, models.ReservationStateActive, models.ReservationStateUnknown, models.ReservationStateCommitted})
 		}
 		if err := reservationQuery.Find(&rows).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load quota ledger"})
@@ -285,9 +289,7 @@ func getProactiveStatus(c *gin.Context) {
 			}
 			switch row.State {
 			case models.ReservationStateCommitted:
-				if row.ExpiresAt == nil || row.ExpiresAt.After(time.Now()) {
-					used[row.QuotaAccountID] += row.Bytes
-				}
+				used[row.QuotaAccountID] += row.Bytes
 			case models.ReservationStateActive:
 				uploading[row.QuotaAccountID] += row.Bytes
 			case models.ReservationStateHeld, models.ReservationStateUnknown:
@@ -301,7 +303,6 @@ func getProactiveStatus(c *gin.Context) {
 	}
 
 	bindings := make([]proactiveAccountStatus, 0, len(remotes))
-	now := time.Now()
 	allExhausted := len(remotes) > 0
 	allInitialized := true
 	var earliestReset *time.Time
@@ -309,7 +310,7 @@ func getProactiveStatus(c *gin.Context) {
 		key := quotaKeys[remote]
 		binding := proactiveAccountStatus{RemoteName: remote, QuotaKey: key}
 		if account, ok := accountsByKey[key]; ok {
-			budget, window, enabled := account.BudgetBytes, account.WindowSeconds, account.Enabled
+			budget, window, enabled := models.DefaultRotationQuotaLimitBytes, models.DefaultQuotaWindowSeconds, account.Enabled
 			u, r, up := used[account.ID], reserved[account.ID], uploading[account.ID]
 			totalReserved := r + up
 			remaining := budget - u - totalReserved
@@ -322,22 +323,12 @@ func getProactiveStatus(c *gin.Context) {
 			binding.RecoveryState = account.RecoveryState
 			binding.RecoveryGeneration = &account.RecoveryGeneration
 			binding.FirstExhaustedAt = account.FirstExhaustedAt
-			binding.NextProbeAt = account.NextProbeAt
 			binding.WindowStartedAt = account.WindowStartedAt
 			if recoveryExhausted || providerBlocked {
-				// Provider-reported quota exhaustion overrides local ledger headroom
-				// until recovery state is cleared by a later probe or the provider's
-				// advertised reset time.
 				remaining = 0
-				if recoveryExhausted && account.NextProbeAt != nil && account.NextProbeAt.After(now) {
-					reset := *account.NextProbeAt
-					binding.NextResetAt = &reset
-				} else if providerBlocked {
-					reset := *account.ProviderBlockedUntil
-					binding.NextResetAt = &reset
-				}
-			} else if account.WindowStartedAt != nil && window > 0 {
-				reset := account.WindowStartedAt.Add(time.Duration(window) * time.Second)
+			}
+			if account.WindowStartedAt != nil {
+				reset := quota.AccountWindowEnd(account)
 				binding.NextResetAt = &reset
 			}
 			binding.RemainingBytes = &remaining
@@ -440,7 +431,7 @@ func getProactiveStatus(c *gin.Context) {
 		}
 		_ = db.Where("destination_scope = ? AND reason = ? AND (state <> ? OR dedupe_state IN ?)", models.DestinationScope(resolvedIdentity, task.RemoteDir), models.MaintenanceReasonQuotaExhaustion, models.MaintenanceStateClosed, []string{models.DedupeStateClaimed, models.DedupeStateRunning, models.DedupeStateUnknown}).Order("epoch DESC").First(&legacyRecovery).Error
 	}
-	maintenance.ManualMergeAvailable, maintenance.Blocker = proactiveManualMergeAvailability(models.DestinationScope(resolvedIdentity, task.RemoteDir), epoch, quotaKeys, task.Status)
+	maintenance.ManualMergeAvailable, maintenance.Blocker = proactiveManualMergeAvailability(models.DestinationScope(resolvedIdentity, task.RemoteDir), epoch, quotaKeys, task.Status, now)
 	if legacyRecovery.ID != 0 {
 		maintenance.LegacyRecovery = &proactiveLegacyRecoveryStatus{
 			EpochID:                  legacyRecovery.ID,
@@ -464,7 +455,7 @@ func getProactiveStatus(c *gin.Context) {
 	})
 }
 
-func proactiveManualMergeAvailability(scope string, epoch models.DestinationScopeMaintenance, keys map[string]string, taskStatus string) (bool, string) {
+func proactiveManualMergeAvailability(scope string, epoch models.DestinationScopeMaintenance, keys map[string]string, taskStatus string, now time.Time) (bool, string) {
 	if taskStatus != "idle" {
 		return false, "task_running"
 	}
@@ -473,7 +464,7 @@ func proactiveManualMergeAvailability(scope string, epoch models.DestinationScop
 	}
 	if db.Migrator().HasTable(&models.DestinationScopeCoordinator{}) {
 		var coordinator models.DestinationScopeCoordinator
-		if err := db.Where("destination_scope = ?", scope).First(&coordinator).Error; err == nil && coordinator.ScannerLeaseUntil != nil && coordinator.ScannerLeaseUntil.After(time.Now()) {
+		if err := db.Where("destination_scope = ?", scope).First(&coordinator).Error; err == nil && coordinator.ScannerLeaseUntil != nil && coordinator.ScannerLeaseUntil.After(now) {
 			return false, "scanner_active"
 		}
 	}
@@ -488,7 +479,7 @@ func proactiveManualMergeAvailability(scope string, epoch models.DestinationScop
 	if err := db.Where("quota_key IN ?", mapStringValues(keys)).Find(&accounts).Error; err != nil {
 		return false, "ledger_unavailable"
 	}
-	blocked, _, err := quota.AccountWideBlocker(db, accountIDsForStatus(accounts), scope, time.Now())
+	blocked, _, err := quota.AccountWideBlocker(db, accountIDsForStatus(accounts), scope, now)
 	if err != nil {
 		return false, "ledger_unavailable"
 	}

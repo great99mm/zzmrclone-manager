@@ -28,9 +28,9 @@ func IsValidLeaseToken(value string) bool { return IsValidOwnerToken(value) }
 
 const (
 	DefaultRotationQuotaLimitBytes int64 = 700 * 1024 * 1024 * 1024
+	DefaultQuotaWindowSeconds            = 86400
+	FixedWindowMigrationVersion          = 1
 	DefaultRcloneConfigPath              = "/root/.config/rclone/rclone.conf"
-	DefaultQuotaRecoveryProbeDelay       = 30 * time.Minute
-	DefaultQuotaRecoveryClaimLease       = 5 * time.Minute
 
 	BatchStatePlanned                      = "planned"
 	BatchStateReserved                     = "reserved"
@@ -422,7 +422,7 @@ type QuotaAccount struct {
 	RemoteName           string     `json:"remote_name"`
 	ConfigIdentity       string     `json:"config_identity"`
 	BudgetBytes          int64      `json:"budget_bytes" gorm:"not null;default:751619276800;check:quota_account_budget_nonnegative,budget_bytes >= 0"`
-	WindowSeconds        int        `json:"window_seconds" gorm:"default:86400"`
+	WindowSeconds        int        `json:"window_seconds" gorm:"not null;default:86400"`
 	ProviderBlockedUntil *time.Time `json:"provider_blocked_until"`
 	RecoveryState        string     `json:"recovery_state" gorm:"not null;default:'available';check:quota_account_recovery_state_valid,recovery_state IN ('available','exhausted')"`
 	FirstExhaustedAt     *time.Time `json:"first_exhausted_at"`
@@ -431,33 +431,32 @@ type QuotaAccount struct {
 	ProbeClaimToken      string     `json:"-"`
 	ProbeClaimUntil      *time.Time `json:"-" gorm:"index"`
 	Enabled              bool       `json:"enabled" gorm:"not null;default:true"`
-	// WindowStartedAt is anchored to the first moment the account's
-	// reservation usage reached zero. While non-nil, the next quota reset
-	// is WindowStartedAt + WindowSeconds. Cleared on refill so a fresh
-	// 24h cycle restarts on the next zero transition.
+	// WindowStartedAt is the durable start of this account's fixed rolling
+	// 24-hour quota window. It is never cleared when usage changes.
 	WindowStartedAt *time.Time `json:"window_started_at"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	// FixedWindowMigrationVersion records one-time cleanup of legacy quota
+	// reservations before fixed-window accounting began.
+	FixedWindowMigrationVersion int       `json:"fixed_window_migration_version" gorm:"not null;default:0;check:quota_account_fixed_window_migration_version_nonnegative,fixed_window_migration_version >= 0"`
+	CreatedAt                   time.Time `json:"created_at"`
+	UpdatedAt                   time.Time `json:"updated_at"`
 }
 
 // IsUnavailableForProactiveTransfers is the single account-level gate for
-// proactive reservation and execution. ProviderBlockedUntil remains a legacy
-// temporary block, while exhausted recovery state is durable until a later
-// recovery probe clears it.
+// proactive reservation and execution. Provider-limit exhaustion remains
+// durable until the shared fixed window rolls over.
 func IsUnavailableForProactiveTransfers(account QuotaAccount, now time.Time) bool {
 	return !account.Enabled || account.RecoveryState == QuotaRecoveryStateExhausted ||
 		(account.ProviderBlockedUntil != nil && account.ProviderBlockedUntil.After(now))
 }
 
-// QuotaProbeAttemptKey returns the deterministic identity used by a future
-// probe creator to make account-generation creation idempotent.
+// QuotaProbeAttemptKey remains for historical probe rows and migration
+// compatibility. The runtime no longer creates probe attempts.
 func QuotaProbeAttemptKey(accountID uint, generation, scheduledSlot int64) string {
 	return fmt.Sprintf("quota-probe:%d:%d:%d", accountID, generation, scheduledSlot)
 }
 
-// QuotaProbeAttempt is a durable future recovery-probe attempt. Its identity
-// fields are snapshots so later polling does not depend on mutable account or
-// task configuration.
+// QuotaProbeAttempt is a historical recovery-probe record retained for schema
+// and migration compatibility. The fixed-window runtime does not execute it.
 type QuotaProbeAttempt struct {
 	ID                   uint       `json:"id" gorm:"primaryKey"`
 	QuotaAccountID       uint       `json:"quota_account_id" gorm:"not null;uniqueIndex:uq_quota_probe_attempts_account_generation_slot,priority:1;index:idx_quota_probe_attempts_account_state_due,priority:1"`

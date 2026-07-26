@@ -8,6 +8,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 	"rclone-manager/internal/models"
+	"rclone-manager/internal/quota"
 )
 
 const migrationValidOwner = "0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -45,7 +46,7 @@ func TestRotationQuotaSchemaMigration(t *testing.T) {
 			t.Fatalf("migrated table for %T is missing", model)
 		}
 	}
-	for _, column := range []string{"recovery_state", "first_exhausted_at", "recovery_generation", "next_probe_at", "probe_claim_token", "probe_claim_until"} {
+	for _, column := range []string{"recovery_state", "first_exhausted_at", "recovery_generation", "next_probe_at", "probe_claim_token", "probe_claim_until", "fixed_window_migration_version"} {
 		if !db.Migrator().HasColumn(&models.QuotaAccount{}, column) {
 			t.Fatalf("quota account recovery column %q is missing", column)
 		}
@@ -193,7 +194,7 @@ func TestRotationQuotaSchemaMigration(t *testing.T) {
 	}
 }
 
-func TestQuotaRecoveryBackfillsCurrentlyProviderBlockedAccounts(t *testing.T) {
+func TestQuotaWindowInitializationRetiresLegacyRecoveryScheduling(t *testing.T) {
 	dir := t.TempDir()
 	legacyDB, err := openMigrationTestDB(dir)
 	if err != nil {
@@ -210,7 +211,6 @@ func TestQuotaRecoveryBackfillsCurrentlyProviderBlockedAccounts(t *testing.T) {
 	legacySQL, _ := legacyDB.DB()
 	_ = legacySQL.Close()
 
-	before := time.Now()
 	if err := InitDB(dir); err != nil {
 		t.Fatalf("migrate legacy blocked account: %v", err)
 	}
@@ -234,25 +234,18 @@ func TestQuotaRecoveryBackfillsCurrentlyProviderBlockedAccounts(t *testing.T) {
 	if err := db.Where("quota_key = ?", account.QuotaKey).First(&migrated).Error; err != nil {
 		t.Fatal(err)
 	}
-	if migrated.RecoveryState != models.QuotaRecoveryStateExhausted || migrated.RecoveryGeneration != 1 {
-		t.Fatalf("backfilled recovery state = %q generation %d", migrated.RecoveryState, migrated.RecoveryGeneration)
+	if migrated.RecoveryState != models.QuotaRecoveryStateAvailable || migrated.RecoveryGeneration != 0 || migrated.NextProbeAt != nil || migrated.WindowStartedAt == nil || migrated.ProviderBlockedUntil == nil || !migrated.ProviderBlockedUntil.Equal(migrated.WindowStartedAt.Add(24*time.Hour)) {
+		t.Fatalf("legacy recovery scheduling was not retired: %#v", migrated)
 	}
-	if migrated.FirstExhaustedAt == nil || migrated.FirstExhaustedAt.Before(before) || migrated.FirstExhaustedAt.After(time.Now()) {
-		t.Fatalf("backfilled first exhaustion = %v", migrated.FirstExhaustedAt)
-	}
-	if migrated.NextProbeAt == nil || migrated.NextProbeAt.Before(before) || migrated.NextProbeAt.After(time.Now()) || !migrated.NextProbeAt.Before(blockedUntil) {
-		t.Fatalf("backfilled next probe = %v, block until %v", migrated.NextProbeAt, blockedUntil)
-	}
-	firstExhaustedAt := *migrated.FirstExhaustedAt
-	firstProbeAt := *migrated.NextProbeAt
+	firstWindow := *migrated.WindowStartedAt
 	if err := backfillQuotaRecoveryState(db, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.First(&migrated, account.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if migrated.RecoveryGeneration != 1 || migrated.FirstExhaustedAt == nil || !migrated.FirstExhaustedAt.Equal(firstExhaustedAt) || migrated.NextProbeAt == nil || !migrated.NextProbeAt.Equal(firstProbeAt) {
-		t.Fatalf("backfill was not idempotent: %#v", migrated)
+	if migrated.RecoveryGeneration != 0 || migrated.NextProbeAt != nil || migrated.WindowStartedAt == nil || !migrated.WindowStartedAt.Equal(firstWindow) {
+		t.Fatalf("window initialization was not idempotent: %#v", migrated)
 	}
 
 	knownAt := time.Unix(123, 0)
@@ -267,8 +260,8 @@ func TestQuotaRecoveryBackfillsCurrentlyProviderBlockedAccounts(t *testing.T) {
 	if err := db.First(&repaired, repair.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if repaired.RecoveryGeneration != 7 || repaired.FirstExhaustedAt == nil || !repaired.FirstExhaustedAt.Equal(knownAt) || repaired.NextProbeAt == nil || repaired.NextProbeAt.Before(time.Now().Add(-time.Second)) {
-		t.Fatalf("missing probe repair changed known recovery data: %#v", repaired)
+	if repaired.RecoveryGeneration != 7 || repaired.FirstExhaustedAt == nil || !repaired.FirstExhaustedAt.Equal(knownAt) || repaired.NextProbeAt != nil || repaired.WindowStartedAt == nil {
+		t.Fatalf("historical recovery data was not retained as inert metadata: %#v", repaired)
 	}
 }
 
@@ -279,6 +272,7 @@ type oldQuotaAccount struct {
 	BudgetBytes          int64
 	WindowSeconds        int
 	ProviderBlockedUntil *time.Time
+	WindowStartedAt      *time.Time
 	Enabled              bool
 }
 
@@ -380,7 +374,7 @@ func TestQuotaProbeAttemptUpgradesLegacyGenerationIndex(t *testing.T) {
 	assertNoMigrationIndex(t, &models.QuotaProbeAttempt{}, quotaProbeAttemptLegacyGenerationIndex)
 }
 
-func TestQuotaRecoveryMigratesExpiredLegacyAccount(t *testing.T) {
+func TestQuotaWindowMigratesExpiredLegacyAccount(t *testing.T) {
 	dir := t.TempDir()
 	legacyDB, err := openMigrationTestDB(dir)
 	if err != nil {
@@ -397,7 +391,6 @@ func TestQuotaRecoveryMigratesExpiredLegacyAccount(t *testing.T) {
 	legacySQL, _ := legacyDB.DB()
 	_ = legacySQL.Close()
 
-	before := time.Now()
 	if err := InitDB(dir); err != nil {
 		t.Fatalf("migrate expired legacy account: %v", err)
 	}
@@ -421,7 +414,7 @@ func TestQuotaRecoveryMigratesExpiredLegacyAccount(t *testing.T) {
 	if err := db.Where("quota_key = ?", legacy.QuotaKey).First(&migrated).Error; err != nil {
 		t.Fatal(err)
 	}
-	if migrated.RecoveryState != models.QuotaRecoveryStateExhausted || migrated.RecoveryGeneration != 1 || migrated.NextProbeAt == nil || migrated.NextProbeAt.Before(before) || migrated.NextProbeAt.After(time.Now()) {
+	if migrated.RecoveryState != models.QuotaRecoveryStateAvailable || migrated.RecoveryGeneration != 0 || migrated.NextProbeAt != nil || migrated.WindowStartedAt == nil || migrated.ProviderBlockedUntil != nil {
 		t.Fatalf("expired legacy recovery state = %#v", migrated)
 	}
 }
@@ -445,9 +438,97 @@ type oldQuotaReservation struct {
 	Bytes          int64
 	State          string
 	IdempotencyKey string
+	ReleasedAt     *time.Time
+	ExpiresAt      *time.Time
 }
 
 func (oldQuotaReservation) TableName() string { return "quota_reservations" }
+
+func TestQuotaWindowMigratesLegacyCommittedRowsOnce(t *testing.T) {
+	dir := t.TempDir()
+	legacyDB, err := openMigrationTestDB(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := legacyDB.AutoMigrate(&oldQuotaAccount{}, &oldQuotaReservation{}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	anchor := now.Add(-time.Hour)
+	legacy := oldQuotaAccount{QuotaKey: "legacy-committed", RemoteName: "remote", BudgetBytes: 100, WindowSeconds: 86400, WindowStartedAt: &anchor, Enabled: true}
+	if err := legacyDB.Create(&legacy).Error; err != nil {
+		t.Fatal(err)
+	}
+	expiredAt := now.Add(-time.Minute)
+	futureAt := now.Add(6 * time.Hour)
+	expired := oldQuotaReservation{QuotaAccountID: legacy.ID, BatchFileID: 1, Bytes: 7, State: models.ReservationStateCommitted, IdempotencyKey: "legacy-expired", ExpiresAt: &expiredAt}
+	future := oldQuotaReservation{QuotaAccountID: legacy.ID, BatchFileID: 2, Bytes: 11, State: models.ReservationStateCommitted, IdempotencyKey: "legacy-future", ExpiresAt: &futureAt}
+	if err := legacyDB.Create(&expired).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := legacyDB.Create(&future).Error; err != nil {
+		t.Fatal(err)
+	}
+	legacySQL, _ := legacyDB.DB()
+	_ = legacySQL.Close()
+
+	if err := InitDB(dir); err != nil {
+		t.Fatalf("migrate legacy committed rows: %v", err)
+	}
+	stopMaintenance := maintenanceStop
+	t.Cleanup(func() {
+		if stopMaintenance != nil {
+			close(stopMaintenance)
+			if maintenanceStop == stopMaintenance {
+				maintenanceStop = nil
+			}
+		}
+		if db != nil {
+			if sqlDB, err := db.DB(); err == nil {
+				_ = sqlDB.Close()
+			}
+			db = nil
+		}
+	})
+
+	var migrated models.QuotaAccount
+	if err := db.First(&migrated, legacy.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if migrated.FixedWindowMigrationVersion != models.FixedWindowMigrationVersion || migrated.WindowStartedAt == nil || !migrated.WindowStartedAt.Equal(anchor) {
+		t.Fatalf("legacy migration changed account identity: %#v", migrated)
+	}
+	var expiredRow, futureRow models.QuotaReservation
+	if err := db.First(&expiredRow, "id = ?", expired.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if expiredRow.State != models.ReservationStateExpired || expiredRow.ReleasedAt == nil {
+		t.Fatalf("expired legacy committed row was not retired: %#v", expiredRow)
+	}
+	releasedAt := *expiredRow.ReleasedAt
+	if err := db.First(&futureRow, "id = ?", future.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if futureRow.State != models.ReservationStateCommitted {
+		t.Fatalf("future legacy committed row was changed: %#v", futureRow)
+	}
+
+	if err := quota.InitializeAccountWindows(db, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.First(&migrated, legacy.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if migrated.FixedWindowMigrationVersion != models.FixedWindowMigrationVersion || migrated.WindowStartedAt == nil || !migrated.WindowStartedAt.Equal(anchor) {
+		t.Fatalf("rerun changed migration marker or anchor: %#v", migrated)
+	}
+	if err := db.First(&expiredRow, "id = ?", expired.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if expiredRow.State != models.ReservationStateExpired || expiredRow.ReleasedAt == nil || !expiredRow.ReleasedAt.Equal(releasedAt) {
+		t.Fatalf("rerun was not idempotent: %#v", expiredRow)
+	}
+}
 
 func openMigrationTestDB(dir string) (*gorm.DB, error) {
 	dsn := filepath.Join(dir, "rclone-manager.db") + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(FULL)"
