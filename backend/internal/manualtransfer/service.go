@@ -929,7 +929,7 @@ func manualDestinationMatches(value string, task *models.Task) bool {
 	if task == nil {
 		return false
 	}
-	return value == task.RemoteDir || value == manualTaskDestination(task)
+	return value == task.RemoteDir
 }
 
 func (s *Service) resolveAccounts(inputs []AccountInput, defaultConfig string) ([]frozenAccount, error) {

@@ -50,6 +50,25 @@ func manualRequest(taskID uint, key string) AnalyzeRequest {
 	return AnalyzeRequest{TaskID: taskID, SourcePath: "", DestinationPath: "/dest", TransferMode: models.TransferModeCopy, ConfigIdentity: "config-identity", IdempotencyKey: key, Accounts: []AccountInput{{AccountID: 1, AccountIdentity: "account-a"}, {AccountID: 2, AccountIdentity: "account-b"}}}
 }
 
+func TestManualDestinationMatchesTaskRemoteDirOnly(t *testing.T) {
+	task := &models.Task{RemoteName: "team-1", RemoteDir: "/media"}
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "remote directory", value: "/media", want: true},
+		{name: "remote prefixed directory", value: "team-1:/media", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := manualDestinationMatches(tc.value, task); got != tc.want {
+				t.Fatalf("manualDestinationMatches(%q) = %v, want %v", tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
 func waitManualRun(t *testing.T, service *Service, runID uint, want string) ManualTransferRun {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

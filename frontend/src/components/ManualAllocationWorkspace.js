@@ -162,7 +162,7 @@ const ManualAllocationWorkspace = ({ taskId, task }) => {
 
   const runId = runIdOf(run);
   const runStatus = statusOf(run);
-  const destinationPath = task.dest_type === 'remote' ? `${task.remote_name}:${task.remote_dir}` : task.remote_dir;
+  const destinationPath = task.remote_dir;
   const runConfigRevision = Number(run?.manual_config_revision);
   const loadedConfigRevision = Number(accountRevision);
   const configRevisionChanged = Boolean(run && Number.isFinite(runConfigRevision) && Number.isFinite(loadedConfigRevision) && runConfigRevision !== loadedConfigRevision);
