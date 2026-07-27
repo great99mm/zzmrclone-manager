@@ -59,6 +59,11 @@ const (
 	localBrowserStart = "/"
 )
 
+type taskCreateRequest struct {
+	models.Task
+	ManualAccountIDs []uint `json:"manual_account_ids"`
+}
+
 func SetupRouter(cfg *config.Config) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
@@ -165,6 +170,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		api.POST("/login", handleLogin)
 		api.POST("/register", handleRegister)
 		api.POST("/change-password", handleChangePassword)
+		api.GET("/manual-accounts", requireAdminStrictTokenOrSession, listManualAvailableAccounts)
 
 		// Token management (read/update)
 		api.GET("/token", requireTokenQuery, getTokenInfo)
@@ -548,9 +554,11 @@ func validateAndNormalizeTask(task *models.Task) error {
 		if task.SourceType != "local" || task.DestType != "remote" {
 			return fmt.Errorf("手动分配任务只支持本地源和远程目标")
 		}
-		if strings.TrimSpace(task.SourceDir) == "" || !filepath.IsAbs(task.SourceDir) || filepath.Clean(task.SourceDir) != task.SourceDir {
+		sourceDir := strings.TrimSpace(task.SourceDir)
+		if sourceDir == "" || !filepath.IsAbs(sourceDir) {
 			return fmt.Errorf("手动分配任务需要有效的本地源路径")
 		}
+		task.SourceDir = filepath.Clean(sourceDir)
 		if task.TransferMode != models.TransferModeCopy && task.TransferMode != models.TransferModeMove {
 			return fmt.Errorf("手动分配任务只支持复制或移动模式")
 		}
@@ -679,11 +687,12 @@ func listQuickTasks(c *gin.Context) {
 }
 
 func createTask(c *gin.Context) {
-	var task models.Task
-	if err := c.ShouldBindBodyWith(&task, binding.JSON); err != nil {
+	var request taskCreateRequest
+	if err := c.ShouldBindBodyWith(&request, binding.JSON); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	task := request.Task
 	// AutoDedupe is retained only for database compatibility; dedupe requires
 	// an explicit manual endpoint click.
 	task.AutoDedupe = false
@@ -694,6 +703,16 @@ func createTask(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if task.TaskType == models.TaskTypeManual {
+		if len(request.ManualAccountIDs) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "手动分配任务至少需要选择一个可信账号"})
+			return
+		}
+		if manualTransferService == nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "手动分配服务暂时不可用"})
+			return
+		}
+	}
 
 	if err := db.Create(&task).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -701,6 +720,21 @@ func createTask(c *gin.Context) {
 	}
 
 	if task.TaskType == models.TaskTypeManual {
+		actorIdentity, actorType := manualActor(c)
+		result, err := manualTransferService.UpdateTaskAccounts(c.Request.Context(), manualtransfer.UpdateTaskAccountsRequest{
+			TaskID:           task.ID,
+			AccountIDs:       request.ManualAccountIDs,
+			ExpectedRevision: task.ManualAccountRevision,
+			IdempotencyKey:   fmt.Sprintf("manual-task-create-%d", task.ID),
+			ActorIdentity:    actorIdentity,
+			ActorType:        actorType,
+		})
+		if err != nil {
+			_ = db.Delete(&task).Error
+			c.JSON(http.StatusBadRequest, gin.H{"error": sanitizeManualAPIError(err.Error())})
+			return
+		}
+		task.ManualAccountRevision = result.Page.Revision
 		c.JSON(http.StatusCreated, task)
 		return
 	}

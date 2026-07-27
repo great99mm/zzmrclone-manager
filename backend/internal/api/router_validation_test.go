@@ -37,6 +37,16 @@ func TestManualValidationClearsAllLegacyRegistrationFlags(t *testing.T) {
 	}
 }
 
+func TestManualValidationNormalizesWhitespaceAndTrailingSlashInSourceDirectory(t *testing.T) {
+	task := models.Task{TaskType: models.TaskTypeManual, ManualStrategy: models.ManualStrategyAllocation, SourceType: "local", SourceDir: "  /src/media/  ", DestType: "remote", RemoteDir: "/dest", TransferMode: models.TransferModeCopy}
+	if err := validateAndNormalizeTask(&task); err != nil {
+		t.Fatal(err)
+	}
+	if task.SourceDir != "/src/media" {
+		t.Fatalf("normalized source directory = %q", task.SourceDir)
+	}
+}
+
 func TestProactiveMoveGateDefaultsEnabledAndPreservesExplicitDisable(t *testing.T) {
 	database := proactiveStatusTestDB(t)
 	previous := db

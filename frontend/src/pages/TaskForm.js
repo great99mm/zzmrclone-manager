@@ -13,7 +13,7 @@ import {
   Home,
   HardDrive,
 } from 'lucide-react';
-import { createTask, updateTask, getTask, getRemotes, listRemoteDir } from '../services/api';
+import { createTask, updateTask, getTask, getManualAvailableAccounts, getRemotes, listRemoteDir } from '../services/api';
 import toast from 'react-hot-toast';
 
 const TaskForm = () => {
@@ -51,6 +51,10 @@ const TaskForm = () => {
   });
 
   const [remotes, setRemotes] = useState([]);
+  const [manualAccounts, setManualAccounts] = useState([]);
+  const [manualAccountIds, setManualAccountIds] = useState([]);
+  const [manualAccountsLoading, setManualAccountsLoading] = useState(false);
+  const [manualAccountsError, setManualAccountsError] = useState('');
 
   const [loading, setLoading] = useState(isEdit);
   const [saving, setSaving] = useState(false);
@@ -102,6 +106,25 @@ const TaskForm = () => {
       loadTask();
     }
   }, [isEdit, loadRemotes, loadTask]);
+
+  useEffect(() => {
+    if (!isManualTask || isEdit) return undefined;
+    let active = true;
+    const loadManualAccounts = async () => {
+      setManualAccountsLoading(true);
+      setManualAccountsError('');
+      try {
+        const res = await getManualAvailableAccounts();
+        if (active) setManualAccounts(res.data.accounts || []);
+      } catch (err) {
+        if (active) setManualAccountsError(err.response?.data?.error || '可信账号列表加载失败');
+      } finally {
+        if (active) setManualAccountsLoading(false);
+      }
+    };
+    loadManualAccounts();
+    return () => { active = false; };
+  }, [isEdit, isManualTask]);
 
   // Directory browser functions
   const parseRemotePath = (input) => {
@@ -227,9 +250,13 @@ const TaskForm = () => {
         return;
       }
       if (submitForm.transfer_mode !== 'copy' && submitForm.transfer_mode !== 'move') {
-        toast.error('手动分配任务只支持复制或移动模式');
-        return;
-      }
+		toast.error('手动分配任务只支持复制或移动模式');
+		return;
+	  }
+	  if (!isEdit && manualAccountIds.length === 0) {
+		toast.error('请至少选择一个分配账号');
+		return;
+	  }
       submitForm = {
         ...submitForm,
         source_type: 'local',
@@ -242,6 +269,7 @@ const TaskForm = () => {
         qb_password: '',
         qb_poll_interval: 60,
         qb_delete_files: false,
+		...(isEdit ? {} : { manual_account_ids: manualAccountIds }),
       };
     }
 
@@ -375,8 +403,36 @@ const TaskForm = () => {
 
             {isManualTask && (
               <div className="border-t pt-4 text-sm text-gray-600">
-                手动分配任务不会自动执行；保存后在任务详情中选择有序账号、分析文件并生成预览。
+                手动分配任务不会自动执行；创建时选择账号，保存后可在任务详情中调整顺序、分析文件并生成预览。
               </div>
+            )}
+
+            {isManualTask && !isEdit && (
+              <fieldset className="border-t pt-4" aria-describedby="manual-accounts-help">
+                <legend className="text-sm font-medium text-gray-700">分配账号 <span className="text-red-500">*</span></legend>
+                <p id="manual-accounts-help" className="mt-1 text-xs text-gray-500">选择本次手动分配会使用的可信账号。创建后可在任务详情调整顺序。</p>
+                {manualAccountsLoading && <div className="py-3 text-sm text-gray-500">正在加载可信账号...</div>}
+                {manualAccountsError && <div className="py-3 text-sm text-red-600" role="alert">{manualAccountsError}</div>}
+                {!manualAccountsLoading && !manualAccountsError && manualAccounts.length === 0 && <div className="py-3 text-sm text-amber-700">没有可用的可信账号。</div>}
+                {!manualAccountsLoading && manualAccounts.length > 0 && (
+                  <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    {manualAccounts.map(account => {
+                      const checked = manualAccountIds.includes(account.account_id);
+                      return (
+                        <label key={account.account_id} className={`flex cursor-pointer items-center gap-3 border px-3 py-2 text-sm transition-colors ${checked ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`}>
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(e) => setManualAccountIds(previous => e.target.checked ? [...previous, account.account_id] : previous.filter(id => id !== account.account_id))}
+                            className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                          />
+                          <span className="min-w-0"><span className="block truncate font-medium text-gray-800">{account.remote_name}</span><span className="block text-xs text-gray-500">账号 ID {account.account_id}</span></span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </fieldset>
             )}
 
             {/* Transfer mode */}

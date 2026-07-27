@@ -193,6 +193,43 @@ func TestManualAccountAPIRequiresExplicitRevisionAndIdempotency(t *testing.T) {
 	}
 }
 
+func TestCreateManualTaskBindsSelectedAccounts(t *testing.T) {
+	database := proactiveStatusTestDB(t)
+	if err := database.AutoMigrate(&manualtransfer.ManualTaskAccount{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Create(&models.QuotaAccount{QuotaKey: "created-manual-account", RemoteName: "drive-account", ConfigIdentity: "/config", Enabled: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+	previousDB, previousService, previousConfig := db, manualTransferService, cfgGlobal
+	db, manualTransferService, cfgGlobal = database, manualtransfer.NewService(database), &config.Config{}
+	defer func() { db, manualTransferService, cfgGlobal = previousDB, previousService, previousConfig }()
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(http.MethodPost, "/tasks", strings.NewReader(`{"name":"manual","task_type":"manual","manual_strategy":"allocation_v1","source_type":"local","source_dir":" /source/ ","dest_type":"remote","remote_name":"drive","remote_dir":"/dest","transfer_mode":"copy","manual_account_ids":[1]}`))
+	context.Request.Header.Set("Content-Type", "application/json")
+	createTask(context)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var task models.Task
+	if err := database.Order("id DESC").First(&task).Error; err != nil {
+		t.Fatal(err)
+	}
+	if task.SourceDir != "/source" {
+		t.Fatalf("source directory = %q", task.SourceDir)
+	}
+	var account manualtransfer.ManualTaskAccount
+	if err := database.Where("task_id = ?", task.ID).First(&account).Error; err != nil {
+		t.Fatal(err)
+	}
+	if account.AccountID != 1 {
+		t.Fatalf("bound account = %d", account.AccountID)
+	}
+}
+
 func callManualAnalyzeAPI(t *testing.T, router *gin.Engine, taskID uint, body, authorization string) (int, string) {
 	t.Helper()
 	recorder := httptest.NewRecorder()

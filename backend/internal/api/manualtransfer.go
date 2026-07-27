@@ -12,6 +12,7 @@ import (
 	"gorm.io/gorm"
 	"rclone-manager/internal/auth"
 	"rclone-manager/internal/manualtransfer"
+	"rclone-manager/internal/models"
 )
 
 type manualAnalyzeHTTPRequest struct {
@@ -34,6 +35,11 @@ type manualTaskAccountsHTTPRequest struct {
 	AccountIDs       []uint `json:"account_ids"`
 	ExpectedRevision int64  `json:"expected_revision"`
 	IdempotencyKey   string `json:"idempotency_key"`
+}
+
+type manualAccountOption struct {
+	AccountID  uint   `json:"account_id"`
+	RemoteName string `json:"remote_name"`
 }
 
 // UnmarshalJSON keeps the finalized envelope contract while accepting the
@@ -204,6 +210,22 @@ func listManualTaskAccounts(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, page)
+}
+
+func listManualAvailableAccounts(c *gin.Context) {
+	var accounts []models.QuotaAccount
+	if err := db.Select("id", "remote_name").
+		Where("enabled = ? AND quota_key <> '' AND remote_name <> ''", true).
+		Order("remote_name ASC, id ASC").
+		Find(&accounts).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load manual accounts"})
+		return
+	}
+	options := make([]manualAccountOption, 0, len(accounts))
+	for _, account := range accounts {
+		options = append(options, manualAccountOption{AccountID: account.ID, RemoteName: account.RemoteName})
+	}
+	c.JSON(http.StatusOK, gin.H{"accounts": options})
 }
 
 func updateManualTaskAccounts(c *gin.Context) {

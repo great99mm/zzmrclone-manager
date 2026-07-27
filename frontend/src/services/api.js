@@ -41,6 +41,7 @@ export const dedupeTask = (id) => api.post(`/tasks/${id}/dedupe`);
 export const getTaskLogs = (id, lines = 100) => api.get(`/tasks/${id}/logs?lines=${lines}`);
 export const getTaskStatus = (id) => api.get(`/tasks/${id}/status`);
 export const getManualAccounts = (taskId) => api.get(`/tasks/${taskId}/manual-accounts`);
+export const getManualAvailableAccounts = () => api.get('/manual-accounts');
 export const saveManualAccounts = (taskId, data) => api.put(`/tasks/${taskId}/manual-accounts`, data);
 export const analyzeManualRun = (taskId, data) => api.post(`/tasks/${taskId}/manual-runs/analyze`, data);
 export const getManualRuns = (taskId) => api.get(`/tasks/${taskId}/manual-runs`);
