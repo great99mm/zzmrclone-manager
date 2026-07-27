@@ -76,21 +76,8 @@ const Tasks = () => {
     }
   };
 
-  const parseRotationRemotes = (value) => {
-    try {
-      const parsed = JSON.parse(value || '[]');
-      return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
-    } catch {
-      return (value || '').split(',').map(item => item.trim()).filter(Boolean);
-    }
-  };
-
   const formatTaskDest = (task) => {
     if (task.dest_type === 'local') return task.remote_dir || '';
-    if (task.task_type === 'rotation') {
-      const remotes = parseRotationRemotes(task.rotation_remotes);
-      return `${(remotes.length ? remotes.join(' / ') : task.remote_name || '')}:${task.remote_dir || ''}`;
-    }
     return `${task.remote_name || ''}:${task.remote_dir || ''}`;
   };
 
@@ -98,7 +85,6 @@ const Tasks = () => {
     const matchesSearch = task.name.toLowerCase().includes(search.toLowerCase()) ||
                          task.source_dir.toLowerCase().includes(search.toLowerCase()) ||
                          (task.remote_name || '').toLowerCase().includes(search.toLowerCase()) ||
-                         (task.rotation_remotes || '').toLowerCase().includes(search.toLowerCase()) ||
                          (task.remote_dir || '').toLowerCase().includes(search.toLowerCase());
     const matchesFilter = filter === 'all' || task.status === filter;
     return matchesSearch && matchesFilter;
@@ -194,9 +180,6 @@ const Tasks = () => {
                     <td className="px-6 py-4">
                       <div className="flex items-center gap-2">
                         <div className="font-medium text-gray-900">{task.name}</div>
-                        {task.task_type === 'rotation' && (
-                          <span className="px-2 py-0.5 bg-amber-100 text-amber-700 text-xs rounded-full">轮转</span>
-                        )}
                       </div>
                       <div className="text-xs text-gray-500 mt-0.5">ID: {task.id}</div>
                     </td>
@@ -218,7 +201,7 @@ const Tasks = () => {
                       </div>
                     </td>
                     <td className="px-6 py-4">
-                      <StatusBadge status={task.status} />
+                      <StatusBadge status={task.task_type === 'rotation' ? 'unavailable' : task.status} />
                     </td>
                     <td className="px-6 py-4">
                       <div className="flex flex-wrap gap-1">
@@ -234,7 +217,9 @@ const Tasks = () => {
                       </div>
                     </td>
                     <td className="px-6 py-4">
-                      <div className="flex items-center justify-end gap-1">
+                      <div className="flex items-center justify-end gap-2">
+                        {task.task_type === 'rotation' && <span className="text-xs text-amber-700">不可用</span>}
+                        {task.task_type !== 'rotation' && <>
                         {task.status !== 'running' ? (
                           <button
                             onClick={() => handleStart(task.id)}
@@ -266,6 +251,7 @@ const Tasks = () => {
                         >
                           <Pencil className="w-4 h-4" />
                         </Link>
+                        </>}
                         <button
                           onClick={() => handleDelete(task.id)}
                           className="p-1.5 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
@@ -297,10 +283,7 @@ const Tasks = () => {
                 <div className="min-w-0 flex-1 mr-2">
                   <div className="flex items-center gap-2 flex-wrap">
                     <h3 className="font-semibold text-gray-900 truncate">{task.name}</h3>
-                    {task.task_type === 'rotation' && (
-                      <span className="px-2 py-0.5 bg-amber-100 text-amber-700 text-xs rounded-full">轮转</span>
-                    )}
-                    <StatusBadge status={task.status} />
+                    <StatusBadge status={task.task_type === 'rotation' ? 'unavailable' : task.status} />
                   </div>
                   <p className="text-xs text-gray-500 mt-0.5">ID: {task.id}</p>
                 </div>
@@ -346,6 +329,8 @@ const Tasks = () => {
 
               {/* Card Footer: Actions */}
               <div className="flex items-center gap-2 pt-3 border-t border-gray-100">
+                {task.task_type === 'rotation' && <span className="flex-1 text-center text-xs text-amber-700">不可用</span>}
+                {task.task_type !== 'rotation' && <>
                 {task.status !== 'running' ? (
                   <button
                     onClick={() => handleStart(task.id)}
@@ -363,6 +348,7 @@ const Tasks = () => {
                     停止
                   </button>
                 )}
+                </>}
                 <Link
                   to={`/tasks/${task.id}`}
                   className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-gray-50 text-gray-600 rounded-lg hover:bg-gray-100 transition-colors text-sm font-medium"
@@ -370,13 +356,13 @@ const Tasks = () => {
                   <Eye className="w-3.5 h-3.5" />
                   详情
                 </Link>
-                <Link
+                {task.task_type !== 'rotation' && <Link
                   to={`/tasks/${task.id}/edit`}
                   className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100 transition-colors text-sm font-medium"
                 >
                   <Pencil className="w-3.5 h-3.5" />
                   编辑
-                </Link>
+                </Link>}
                 <button
                   onClick={() => handleDelete(task.id)}
                   className="inline-flex items-center justify-center p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
@@ -399,6 +385,7 @@ const StatusBadge = ({ status }) => {
     idle: { icon: Clock, text: '待机', class: 'bg-gray-100 text-gray-600' },
     paused: { icon: Clock, text: '暂停', class: 'bg-amber-100 text-amber-700' },
     error: { icon: XCircle, text: '异常', class: 'bg-red-100 text-red-700' },
+    unavailable: { icon: XCircle, text: '不可用', class: 'bg-amber-100 text-amber-700' },
   };
 
   const config = configs[status] || configs.idle;

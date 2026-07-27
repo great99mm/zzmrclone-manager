@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -95,10 +94,8 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	// Init executor (pass db so rclone can persist structured logs)
 	executor = rclone.NewExecutor(hub, db)
 
-	// Automatic rolling-quota execution is disabled. Keep the legacy task
-	// adapter on the generic runner so normal and legacy_error tasks retain
-	// their scheduler/watcher behavior, while historical proactive tasks are
-	// skipped below and never reach this launch path.
+	// Rotation execution is disabled. Keep the generic runner for normal tasks;
+	// persisted rotation rows are skipped below and never reach this launch path.
 	proactiveDispatcher = nil
 	taskRunner = taskdispatch.New(db, executor, nil)
 	executor.LaunchFence = taskRunner
@@ -131,18 +128,12 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	db.Where("enabled = ?", true).Find(&tasks)
 	for _, task := range tasks {
 		normalizeTaskDefaults(&task)
-		if task.TaskType == models.TaskTypeManual || isProactiveQuotaTask(&task) {
+		if task.TaskType == models.TaskTypeManual || task.TaskType == "rotation" {
 			continue
 		}
 		startupError := ""
 		if task.Status == "running" {
 			startupError = "服务重启中断了任务运行，任务未自动恢复"
-		}
-		if task.TaskType == "rotation" && task.QBEnabled {
-			if startupError != "" {
-				startupError += "; "
-			}
-			startupError += "轮转任务不支持 qBittorrent 触发，请修正任务配置"
 		}
 		if startupError != "" {
 			task.Status = "error"
@@ -156,9 +147,6 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			}
 			continue
 		}
-		if task.TaskType == "rotation" && task.QBEnabled {
-			continue
-		}
 		if task.WatchEnabled {
 			watch.StartTaskWatch(&task, executor)
 		}
@@ -167,9 +155,6 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		}
 		if task.QBEnabled {
 			qbWatch.StartTaskWatch(&task)
-		}
-		if task.TaskType == "rotation" && task.RotationStrategy == "legacy_error" && task.Status == "paused" && task.RotationPausedUntil != nil {
-			executor.ScheduleRotationResume(task.ID, *task.RotationPausedUntil)
 		}
 	}
 
@@ -540,21 +525,6 @@ func normalizeTaskDefaults(task *models.Task) {
 	if task.ManualInputRevision < 1 {
 		task.ManualInputRevision = 1
 	}
-	if task.TaskType == "rotation" && strings.TrimSpace(task.RotationStrategy) == "" {
-		task.RotationStrategy = "legacy_error"
-	}
-	if task.RotationMaxRounds <= 0 {
-		task.RotationMaxRounds = 3
-	}
-	if strings.TrimSpace(task.RotationResumeTime) == "" {
-		task.RotationResumeTime = "01:00"
-	}
-	if task.RotationCurrentIndex < 0 {
-		task.RotationCurrentIndex = 0
-	}
-	if task.RotationCurrentRound < 0 {
-		task.RotationCurrentRound = 0
-	}
 	if task.MinAge == "" {
 		task.MinAge = "10s"
 	}
@@ -564,21 +534,11 @@ func normalizeTaskDefaults(task *models.Task) {
 	if task.QBPollInterval <= 0 {
 		task.QBPollInterval = 60
 	}
-	if task.RotationBatchFiles == 0 {
-		task.RotationBatchFiles = 5
-	}
-	if task.RotationConcurrentBatches == 0 {
-		task.RotationConcurrentBatches = 1
-	}
-}
-
-func isProactiveQuotaTask(task *models.Task) bool {
-	return task != nil && task.TaskType == "rotation" && task.RotationStrategy == "proactive_quota"
 }
 
 func validateAndNormalizeTask(task *models.Task) error {
 	normalizeTaskDefaults(task)
-	if task.TaskType != "normal" && task.TaskType != "rotation" && task.TaskType != models.TaskTypeManual {
+	if task.TaskType != "normal" && task.TaskType != models.TaskTypeManual {
 		return fmt.Errorf("任务类型无效")
 	}
 	if task.TaskType == models.TaskTypeManual {
@@ -600,16 +560,6 @@ func validateAndNormalizeTask(task *models.Task) error {
 		task.AutoDedupe = false
 		return nil
 	}
-	if task.TaskType == "rotation" && task.RotationStrategy == "proactive_quota" {
-		return fmt.Errorf("proactive_quota rotation strategy is disabled")
-	}
-	if task.TaskType == "rotation" && task.RotationStrategy != "legacy_error" {
-		return fmt.Errorf("轮转策略无效")
-	}
-	if task.TaskType == "rotation" && task.RotationStrategy == "legacy_error" && task.QBEnabled {
-		return fmt.Errorf("异常触发轮转不支持 qBittorrent 触发，请关闭 qBittorrent 后再保存")
-	}
-
 	if task.OpenlistURL != "" {
 		task.OpenlistURL = strings.TrimRight(task.OpenlistURL, "/")
 	}
@@ -620,52 +570,6 @@ func validateAndNormalizeTask(task *models.Task) error {
 		return err
 	}
 
-	if task.TaskType != "rotation" {
-		if task.QBEnabled {
-			return validateQBTask(task)
-		}
-		return nil
-	}
-	if task.DestType == "local" {
-		return fmt.Errorf("调度轮转任务只支持云盘目标目录")
-	}
-	if task.RotationQuotaLimitBytes < 0 || task.RotationQuotaLimitBytes > models.DefaultRotationQuotaLimitBytes {
-		return fmt.Errorf("轮转额度上限必须在 0 到 %d 字节之间", models.DefaultRotationQuotaLimitBytes)
-	}
-	remotes := models.ParseRotationRemotes(task.RotationRemotes)
-	if len(remotes) == 0 {
-		return fmt.Errorf("请选择至少一个轮转网盘")
-	}
-	if task.RotationMaxRounds <= 0 {
-		return fmt.Errorf("轮数必须大于 0")
-	}
-	if task.RotationResumeTime == "" || !isValidHHMM(task.RotationResumeTime) {
-		return fmt.Errorf("恢复时间格式应为 HH:MM")
-	}
-	if strings.TrimSpace(task.RotationQuotaKeys) != "" {
-		quotaKeys, err := models.ParseRotationQuotaKeys(task.RotationQuotaKeys)
-		if err != nil {
-			return fmt.Errorf("轮转 quota keys 无效: %w", err)
-		}
-		remoteSet := make(map[string]struct{}, len(remotes))
-		for _, remote := range remotes {
-			remoteSet[remote] = struct{}{}
-		}
-		for remote := range quotaKeys {
-			if _, ok := remoteSet[remote]; !ok {
-				return fmt.Errorf("轮转 quota key 指向未知网盘 %q", remote)
-			}
-		}
-		task.RotationQuotaKeys = models.EncodeRotationQuotaKeys(quotaKeys)
-	}
-	task.RotationRemotes = models.EncodeRotationRemotes(remotes)
-	if task.RotationCurrentIndex >= len(remotes) {
-		task.RotationCurrentIndex = 0
-	}
-	if task.RotationCurrentRound >= task.RotationMaxRounds {
-		task.RotationCurrentRound = 0
-	}
-	task.RemoteName = remotes[task.RotationCurrentIndex]
 	if task.QBEnabled {
 		return validateQBTask(task)
 	}
@@ -719,19 +623,6 @@ func validateQBTask(task *models.Task) error {
 	return nil
 }
 
-func isValidHHMM(value string) bool {
-	parts := strings.Split(value, ":")
-	if len(parts) != 2 {
-		return false
-	}
-	hour, err := strconv.Atoi(parts[0])
-	if err != nil || hour < 0 || hour > 23 {
-		return false
-	}
-	minute, err := strconv.Atoi(parts[1])
-	return err == nil && minute >= 0 && minute <= 59
-}
-
 // parseSize converts human-readable sizes like "512M" or "1G" to a comparable
 // numeric value (megabytes).  Used only for clamping.
 func parseSize(s string) int64 {
@@ -755,7 +646,7 @@ func applyRuntimeStatus(task *models.Task) {
 	if task == nil {
 		return
 	}
-	if executor.IsRunning(task.ID) || proactiveIsActive(task) {
+	if executor.IsRunning(task.ID) {
 		task.Status = "running"
 		return
 	}
@@ -767,16 +658,6 @@ func applyRuntimeStatus(task *models.Task) {
 		return
 	}
 	task.Status = "idle"
-}
-
-func proactiveIsActive(task *models.Task) bool {
-	if task == nil || proactiveDispatcher == nil {
-		return false
-	}
-	if task.TaskType != "rotation" || task.RotationStrategy != "proactive_quota" {
-		return false
-	}
-	return proactiveDispatcher.IsActive(task.ID)
 }
 
 func listTasks(c *gin.Context) {
@@ -806,16 +687,6 @@ func createTask(c *gin.Context) {
 	// AutoDedupe is retained only for database compatibility; dedupe requires
 	// an explicit manual endpoint click.
 	task.AutoDedupe = false
-	var quotaFields struct {
-		RotationQuotaLimitBytes *int64 `json:"rotation_quota_limit_bytes"`
-	}
-	if err := c.ShouldBindBodyWith(&quotaFields, binding.JSON); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	if quotaFields.RotationQuotaLimitBytes == nil {
-		task.RotationQuotaLimitBytes = models.DefaultRotationQuotaLimitBytes
-	}
 
 	// Enforce safe memory defaults / caps before the task ever reaches rclone.
 	clampRcloneParams(&task)
@@ -1018,16 +889,6 @@ func updateTaskUnsafe(c *gin.Context) {
 		return
 	}
 	updates.AutoDedupe = false
-	var quotaFields struct {
-		RotationQuotaLimitBytes *int64 `json:"rotation_quota_limit_bytes"`
-	}
-	if err := c.ShouldBindBodyWith(&quotaFields, binding.JSON); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	if quotaFields.RotationQuotaLimitBytes == nil {
-		updates.RotationQuotaLimitBytes = task.RotationQuotaLimitBytes
-	}
 
 	// Clamp memory params on updates as well
 	clampRcloneParams(&updates)
@@ -1059,66 +920,52 @@ func updateTaskUnsafe(c *gin.Context) {
 	watch.StopTaskWatch(uint(id))
 	sched.RemoveTask(uint(id))
 	qbWatch.StopTaskWatch(uint(id))
-	executor.CancelRotationResume(uint(id))
 
 	status := task.Status
 	lastError := task.LastError
-	if task.TaskType == "rotation" || updates.TaskType == "rotation" {
+	if task.TaskType != updates.TaskType {
 		status = "idle"
 		lastError = ""
-		updates.RotationCurrentIndex = 0
-		updates.RotationCurrentRound = 0
 	}
 
 	if err := db.Model(&task).Updates(map[string]interface{}{
-		"name":                        updates.Name,
-		"source_type":                 updates.SourceType,
-		"source_dir":                  updates.SourceDir,
-		"dest_type":                   updates.DestType,
-		"remote_name":                 updates.RemoteName,
-		"remote_dir":                  updates.RemoteDir,
-		"transfer_mode":               updates.TransferMode,
-		"transfers":                   updates.Transfers,
-		"checkers":                    updates.Checkers,
-		"bind_ip":                     updates.BindIP,
-		"rclone_config":               updates.RcloneConfig,
-		"enabled":                     updates.Enabled,
-		"auto_dedupe":                 false,
-		"min_age":                     updates.MinAge,
-		"drive_chunk_size":            updates.DriveChunkSize,
-		"buffer_size":                 updates.BufferSize,
-		"retries":                     updates.Retries,
-		"schedule_enabled":            updates.ScheduleEnabled,
-		"schedule_interval":           updates.ScheduleInterval,
-		"watch_enabled":               updates.WatchEnabled,
-		"qb_enabled":                  updates.QBEnabled,
-		"qb_url":                      updates.QBURL,
-		"qb_username":                 updates.QBUsername,
-		"qb_password":                 updates.QBPassword,
-		"qb_poll_interval":            updates.QBPollInterval,
-		"qb_delete_files":             updates.QBDeleteFiles,
-		"status":                      status,
-		"last_error":                  lastError,
-		"openlist_enabled":            updates.OpenlistEnabled,
-		"openlist_config_id":          updates.OpenlistConfigID,
-		"openlist_url":                updates.OpenlistURL,
-		"openlist_token":              updates.OpenlistToken,
-		"openlist_mapping":            updates.OpenlistMapping,
-		"openlist_refresh_dir":        updates.OpenlistRefreshDir,
-		"task_type":                   updates.TaskType,
-		"manual_strategy":             updates.ManualStrategy,
-		"manual_input_revision":       nextManualInputRevision(task, updates),
-		"rotation_strategy":           updates.RotationStrategy,
-		"rotation_quota_limit_bytes":  updates.RotationQuotaLimitBytes,
-		"rotation_quota_keys":         updates.RotationQuotaKeys,
-		"rotation_batch_files":        updates.RotationBatchFiles,
-		"rotation_concurrent_batches": updates.RotationConcurrentBatches,
-		"rotation_remotes":            updates.RotationRemotes,
-		"rotation_max_rounds":         updates.RotationMaxRounds,
-		"rotation_resume_time":        updates.RotationResumeTime,
-		"rotation_current_index":      updates.RotationCurrentIndex,
-		"rotation_current_round":      updates.RotationCurrentRound,
-		"rotation_paused_until":       nil,
+		"name":                  updates.Name,
+		"source_type":           updates.SourceType,
+		"source_dir":            updates.SourceDir,
+		"dest_type":             updates.DestType,
+		"remote_name":           updates.RemoteName,
+		"remote_dir":            updates.RemoteDir,
+		"transfer_mode":         updates.TransferMode,
+		"transfers":             updates.Transfers,
+		"checkers":              updates.Checkers,
+		"bind_ip":               updates.BindIP,
+		"rclone_config":         updates.RcloneConfig,
+		"enabled":               updates.Enabled,
+		"auto_dedupe":           false,
+		"min_age":               updates.MinAge,
+		"drive_chunk_size":      updates.DriveChunkSize,
+		"buffer_size":           updates.BufferSize,
+		"retries":               updates.Retries,
+		"schedule_enabled":      updates.ScheduleEnabled,
+		"schedule_interval":     updates.ScheduleInterval,
+		"watch_enabled":         updates.WatchEnabled,
+		"qb_enabled":            updates.QBEnabled,
+		"qb_url":                updates.QBURL,
+		"qb_username":           updates.QBUsername,
+		"qb_password":           updates.QBPassword,
+		"qb_poll_interval":      updates.QBPollInterval,
+		"qb_delete_files":       updates.QBDeleteFiles,
+		"status":                status,
+		"last_error":            lastError,
+		"openlist_enabled":      updates.OpenlistEnabled,
+		"openlist_config_id":    updates.OpenlistConfigID,
+		"openlist_url":          updates.OpenlistURL,
+		"openlist_token":        updates.OpenlistToken,
+		"openlist_mapping":      updates.OpenlistMapping,
+		"openlist_refresh_dir":  updates.OpenlistRefreshDir,
+		"task_type":             updates.TaskType,
+		"manual_strategy":       updates.ManualStrategy,
+		"manual_input_revision": nextManualInputRevision(task, updates),
 	}).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -1156,12 +1003,6 @@ func deleteTask(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "task destination scope is owned by an active manual merge"})
 		return
 	}
-	if existing.TaskType == "rotation" && existing.RotationStrategy == "proactive_quota" {
-		if err := taskRunner.StopAndWait(c.Request.Context(), uint(id)); err != nil {
-			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
-			return
-		}
-	}
 	if err := taskRunner.WithTaskExclusive(c.Request.Context(), uint(id), func(_ *models.Task) error {
 		var current models.Task
 		if err := db.First(&current, id).Error; err != nil {
@@ -1197,8 +1038,8 @@ func startTask(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "manual tasks use analyze and allocate; they cannot be started directly"})
 		return
 	}
-	if isProactiveQuotaTask(&task) {
-		c.JSON(http.StatusConflict, gin.H{"error": "automatic rolling-quota execution is disabled for proactive_quota tasks"})
+	if task.TaskType == "rotation" {
+		c.JSON(http.StatusConflict, gin.H{"error": "rotation tasks are no longer supported"})
 		return
 	}
 	if task.IsQuickTask {
@@ -1245,38 +1086,9 @@ func pauseTask(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "manual tasks use analyze and allocate; legacy pause is unavailable"})
 		return
 	}
-	if task.TaskType == "rotation" && task.RotationStrategy == "proactive_quota" {
-		var request struct {
-			Mode string `json:"mode"`
-		}
-		if err := c.ShouldBindJSON(&request); err != nil && !errors.Is(err, io.EOF) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-		if request.Mode == "" {
-			request.Mode = "after_current"
-		}
-		switch request.Mode {
-		case "after_current":
-			if err := taskRunner.PauseAfterCurrent(uint(id)); err != nil {
-				c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
-				return
-			}
-			db.Model(&task).Updates(map[string]interface{}{"status": "pausing", "last_error": ""})
-			c.JSON(http.StatusOK, gin.H{"message": "current batches will finish before pausing"})
-			return
-		case "immediate":
-			if err := taskRunner.StopAndWait(c.Request.Context(), uint(id)); err != nil {
-				c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
-				return
-			}
-			db.Model(&task).Updates(map[string]interface{}{"status": "paused", "last_error": "", "rotation_paused_until": nil})
-			c.JSON(http.StatusOK, gin.H{"message": "task paused immediately"})
-			return
-		default:
-			c.JSON(http.StatusBadRequest, gin.H{"error": "pause mode must be after_current or immediate"})
-			return
-		}
+	if task.TaskType == "rotation" {
+		c.JSON(http.StatusConflict, gin.H{"error": "rotation tasks are no longer supported"})
+		return
 	}
 	if !task.IsQuickTask {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "only quick task supports pause"})
@@ -1307,6 +1119,10 @@ func cancelTask(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "manual tasks use analyze and allocate; legacy cancel is unavailable"})
 		return
 	}
+	if task.TaskType == "rotation" {
+		c.JSON(http.StatusConflict, gin.H{"error": "rotation tasks are no longer supported"})
+		return
+	}
 	if !task.IsQuickTask {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "only quick task supports stop"})
 		return
@@ -1332,18 +1148,14 @@ func stopTask(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "manual tasks use analyze and allocate; legacy stop is unavailable"})
 		return
 	}
-	if task.TaskType == "rotation" && task.RotationStrategy == "proactive_quota" {
-		if err := taskRunner.StopAndWait(c.Request.Context(), uint(id)); err != nil {
-			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
-			return
-		}
-	} else {
-		executor.StopTask(uint(id))
+	if task.TaskType == "rotation" {
+		c.JSON(http.StatusConflict, gin.H{"error": "rotation tasks are no longer supported"})
+		return
 	}
+	executor.StopTask(uint(id))
 	db.Model(&task).Updates(map[string]interface{}{
-		"status":                "idle",
-		"last_error":            "",
-		"rotation_paused_until": nil,
+		"status":     "idle",
+		"last_error": "",
 	})
 
 	hub.Broadcast(fmt.Sprintf(`{"type":"task_stopped","task_id":%d}`, id))
@@ -1362,8 +1174,8 @@ func dedupeTask(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "manual tasks do not use legacy dedupe"})
 		return
 	}
-	if task.TaskType == "rotation" && task.RotationStrategy == "proactive_quota" {
-		c.JSON(http.StatusConflict, gin.H{"error": "automatic rolling-quota tasks are disabled"})
+	if task.TaskType == "rotation" {
+		c.JSON(http.StatusConflict, gin.H{"error": "rotation tasks are no longer supported"})
 		return
 	}
 

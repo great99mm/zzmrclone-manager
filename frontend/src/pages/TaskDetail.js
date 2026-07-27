@@ -27,21 +27,8 @@ import toast from 'react-hot-toast';
 import { QuotaAccountBar, QuotaExhaustedNotice } from '../components/QuotaAccountBar';
 import ManualAllocationWorkspace from '../components/ManualAllocationWorkspace';
 
-const parseRotationRemotes = (value) => {
-  try {
-    const parsed = JSON.parse(value || '[]');
-    return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
-  } catch {
-    return (value || '').split(',').map(item => item.trim()).filter(Boolean);
-  }
-};
-
 const formatTaskDest = (task) => {
   if (task.dest_type === 'local') return `📂 ${task.remote_dir || ''}`;
-  if (task.task_type === 'rotation') {
-    const remotes = parseRotationRemotes(task.rotation_remotes);
-    return `☁ ${(remotes.length ? remotes.join(' / ') : task.remote_name || '')}:${task.remote_dir || ''}`;
-  }
   return `☁ ${task.remote_name || ''}:${task.remote_dir || ''}`;
 };
 
@@ -128,9 +115,6 @@ const TaskDetail = () => {
       setTask(prev => prev ? {
         ...prev,
         remote_name: res.data.remote_name ?? prev.remote_name,
-        rotation_current_index: res.data.rotation_current_index ?? prev.rotation_current_index,
-        rotation_current_round: res.data.rotation_current_round ?? prev.rotation_current_round,
-        rotation_paused_until: res.data.rotation_paused_until ?? prev.rotation_paused_until,
       } : prev);
     } catch (err) {
       console.error('Failed to load status');
@@ -273,9 +257,27 @@ const TaskDetail = () => {
 
   const isQuickTask = !!task.is_quick_task;
   const isManualTask = task.task_type === 'manual';
+  const isLegacyRotationTask = task.task_type === 'rotation';
   const canContinueQuickTask = isQuickTask && (status.status === 'paused' || status.status === 'error');
-  const rotationRemotes = parseRotationRemotes(task.rotation_remotes);
-  const rotationCurrentRemote = rotationRemotes[task.rotation_current_index || 0] || rotationRemotes[0] || '-';
+
+  if (isLegacyRotationTask) {
+    return (
+      <div className="max-w-2xl mx-auto">
+        <div className="flex items-center gap-4 mb-6">
+          <button type="button" onClick={() => navigate('/tasks')} className="p-2 hover:bg-gray-100 rounded-lg transition-colors" aria-label="返回任务列表">
+            <ArrowLeft className="w-5 h-5" />
+          </button>
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">任务类型不可用</h1>
+            <p className="text-gray-500 mt-1">此历史任务使用已停止支持的任务类型。</p>
+          </div>
+        </div>
+        <div className="bg-white rounded-xl shadow-sm border border-amber-200 p-6" role="status">
+          <p className="text-sm text-gray-700">该任务不能从前端启动、停止或编辑。请返回任务列表。</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -464,27 +466,6 @@ const TaskDetail = () => {
             value={task.qb_url || '-'}
             sub={task.qb_delete_files ? '单种子转移后删种并删除文件' : '单种子转移后只删除种子'}
           />
-        )}
-        {task.task_type === 'rotation' && (
-          <>
-            <InfoCard
-              icon={Upload}
-              label="轮转网盘"
-              value={rotationRemotes.join(' / ') || '-'}
-              sub={`目标目录: ${task.remote_dir || '/'}`}
-            />
-            <InfoCard
-              icon={RotateCcw}
-              label="当前轮转"
-              value={`第 ${(task.rotation_current_round || 0) + 1} 轮 / ${rotationCurrentRemote}`}
-              sub={`当前账号序号: ${(task.rotation_current_index || 0) + 1}`}
-            />
-            <InfoCard
-              icon={Clock}
-              label="恢复信息"
-              sub={`暂停至: ${task.rotation_paused_until || '未暂停'}`}
-            />
-          </>
         )}
       </div>
 

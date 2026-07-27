@@ -6,24 +6,24 @@ import (
 	"testing"
 )
 
-func TestValidateProactiveQuotaStrategyIsDisabled(t *testing.T) {
+func TestValidateRotationTaskTypeIsDisabled(t *testing.T) {
 	task := models.Task{TaskType: "rotation", RotationStrategy: "proactive_quota"}
 	if err := validateAndNormalizeTask(&task); err == nil {
 		t.Fatal("proactive_quota strategy was accepted")
 	}
 }
 
-func TestProactiveQuotaStrategyIsRejectedBeforeTaskSpecificValidation(t *testing.T) {
+func TestRotationTaskTypeIsRejectedBeforeTaskSpecificValidation(t *testing.T) {
 	task := models.Task{TaskType: "rotation", RotationStrategy: "proactive_quota", TransferMode: "sync", QBEnabled: true}
 	if err := validateAndNormalizeTask(&task); err == nil {
 		t.Fatal("proactive_quota strategy was accepted")
 	}
 }
 
-func TestLegacyRotationQBRemainsRejected(t *testing.T) {
-	task := models.Task{TaskType: "rotation", RotationStrategy: "legacy_error", QBEnabled: true}
+func TestRotationTaskTypeRemainsRejected(t *testing.T) {
+	task := models.Task{TaskType: "rotation", RotationStrategy: "legacy_error"}
 	if err := validateAndNormalizeTask(&task); err == nil {
-		t.Fatal("legacy rotation qB was accepted")
+		t.Fatal("rotation task type was accepted")
 	}
 }
 
@@ -89,8 +89,8 @@ func TestProactiveMoveGateUpgradesLegacyDefaultFalseOnce(t *testing.T) {
 	}
 }
 
-func TestValidateLegacyRotationPreservesZeroCapacity(t *testing.T) {
-	task := models.Task{TaskType: "rotation", RotationStrategy: "legacy_error", SourceType: "local", SourceDir: "/src", DestType: "remote", RemoteName: "drive", RemoteDir: "dst", TransferMode: models.TransferModeCopy, RotationRemotes: `["drive"]`, RotationQuotaLimitBytes: 0}
+func TestValidateNormalTaskLeavesHistoricalRotationCapacityUntouched(t *testing.T) {
+	task := models.Task{TaskType: "normal", SourceType: "local", SourceDir: "/src", DestType: "remote", RemoteName: "drive", RemoteDir: "dst", TransferMode: models.TransferModeCopy, RotationQuotaLimitBytes: 0}
 	if err := validateAndNormalizeTask(&task); err != nil {
 		t.Fatal(err)
 	}

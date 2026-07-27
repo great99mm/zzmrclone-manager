@@ -24,14 +24,14 @@ func (r *cutoverLegacyRunner) ExecuteMove(*models.Task) error {
 func (*cutoverLegacyRunner) IsRunning(uint) bool { return false }
 func (*cutoverLegacyRunner) StopTask(uint) error { return nil }
 
-func TestCreateTaskRejectsProactiveQuotaStrategy(t *testing.T) {
+func TestCreateTaskRejectsRotationTaskType(t *testing.T) {
 	database := proactiveStatusTestDB(t)
 	previousDB, previousConfig := db, cfgGlobal
 	db, cfgGlobal = database, &config.Config{}
 	t.Cleanup(func() { db, cfgGlobal = previousDB, previousConfig })
 
 	gin.SetMode(gin.TestMode)
-	request := httptest.NewRequest(http.MethodPost, "/tasks", strings.NewReader(`{"name":"legacy proactive","task_type":"rotation","rotation_strategy":"proactive_quota","source_type":"local","source_dir":"/source","dest_type":"remote","remote_name":"remote","remote_dir":"/dest","transfer_mode":"copy","rotation_remotes":"[\"remote\"]"}`))
+	request := httptest.NewRequest(http.MethodPost, "/tasks", strings.NewReader(`{"name":"legacy rotation","task_type":"rotation","rotation_strategy":"legacy_error","source_type":"local","source_dir":"/source","dest_type":"remote","remote_name":"remote","remote_dir":"/dest","transfer_mode":"copy"}`))
 	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	context, _ := gin.CreateTestContext(recorder)
@@ -50,9 +50,9 @@ func TestCreateTaskRejectsProactiveQuotaStrategy(t *testing.T) {
 	}
 }
 
-func TestUpdateTaskRejectsProactiveQuotaStrategyWithoutMutatingHistoricalTask(t *testing.T) {
+func TestUpdateTaskRejectsRotationTaskTypeWithoutMutatingHistoricalTask(t *testing.T) {
 	database := proactiveStatusTestDB(t)
-	original := models.Task{ID: 1, Name: "historical proactive", TaskType: "rotation", RotationStrategy: "proactive_quota", SourceType: "local", SourceDir: "/source", DestType: "remote", RemoteName: "remote", RemoteDir: "/dest", TransferMode: models.TransferModeCopy, RotationRemotes: `["remote"]`, Enabled: true}
+	original := models.Task{ID: 1, Name: "historical rotation", TaskType: "rotation", RotationStrategy: "legacy_error", SourceType: "local", SourceDir: "/source", DestType: "remote", RemoteName: "remote", RemoteDir: "/dest", TransferMode: models.TransferModeCopy, Enabled: true}
 	if err := database.Create(&original).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestUpdateTaskRejectsProactiveQuotaStrategyWithoutMutatingHistoricalTask(t 
 	t.Cleanup(func() { db, cfgGlobal, taskRunner = previousDB, previousConfig, previousRunner })
 
 	gin.SetMode(gin.TestMode)
-	request := httptest.NewRequest(http.MethodPut, "/tasks/1", strings.NewReader(`{"name":"changed","task_type":"rotation","rotation_strategy":"proactive_quota","source_type":"local","source_dir":"/source","dest_type":"remote","remote_name":"remote","remote_dir":"/dest","transfer_mode":"copy","rotation_remotes":"[\"remote\"]","enabled":true}`))
+	request := httptest.NewRequest(http.MethodPut, "/tasks/1", strings.NewReader(`{"name":"changed","task_type":"rotation","rotation_strategy":"legacy_error","source_type":"local","source_dir":"/source","dest_type":"remote","remote_name":"remote","remote_dir":"/dest","transfer_mode":"copy","enabled":true}`))
 	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
 	context, _ := gin.CreateTestContext(recorder)
@@ -82,9 +82,9 @@ func TestUpdateTaskRejectsProactiveQuotaStrategyWithoutMutatingHistoricalTask(t 
 	}
 }
 
-func TestStartTaskRejectsHistoricalProactiveTaskWithoutLaunchingIt(t *testing.T) {
+func TestStartTaskRejectsHistoricalRotationTaskWithoutLaunchingIt(t *testing.T) {
 	database := proactiveStatusTestDB(t)
-	if err := database.Create(&models.Task{ID: 1, Name: "historical proactive", TaskType: "rotation", RotationStrategy: "proactive_quota", Status: "idle", Enabled: true}).Error; err != nil {
+	if err := database.Create(&models.Task{ID: 1, Name: "historical rotation", TaskType: "rotation", RotationStrategy: "legacy_error", Status: "idle", Enabled: true}).Error; err != nil {
 		t.Fatal(err)
 	}
 	runner := &cutoverLegacyRunner{}
@@ -105,11 +105,43 @@ func TestStartTaskRejectsHistoricalProactiveTaskWithoutLaunchingIt(t *testing.T)
 		t.Fatalf("start status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 	if runner.launches != 0 {
-		t.Fatalf("historical proactive task reached generic runner: %d launches", runner.launches)
+		t.Fatalf("historical rotation task reached generic runner: %d launches", runner.launches)
 	}
 }
 
-func TestSetupRouterSkipsProactiveRuntimeAndRoutes(t *testing.T) {
+func TestLegacyRotationActionsAreRejectedWithoutExecution(t *testing.T) {
+	database := proactiveStatusTestDB(t)
+	if err := database.Create(&models.Task{ID: 1, Name: "historical rotation", TaskType: "rotation", RotationStrategy: "legacy_error", Status: "idle", Enabled: true, IsQuickTask: true}).Error; err != nil {
+		t.Fatal(err)
+	}
+	previousDB := db
+	db = database
+	t.Cleanup(func() { db = previousDB })
+
+	for _, testCase := range []struct {
+		name    string
+		method  string
+		handler gin.HandlerFunc
+	}{
+		{name: "pause", method: http.MethodPost, handler: pauseTask},
+		{name: "stop", method: http.MethodPost, handler: stopTask},
+		{name: "cancel", method: http.MethodPost, handler: cancelTask},
+		{name: "dedupe", method: http.MethodPost, handler: dedupeTask},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			context, _ := gin.CreateTestContext(recorder)
+			context.Request = httptest.NewRequest(testCase.method, "/tasks/1/"+testCase.name, nil)
+			context.Params = gin.Params{{Key: "id", Value: "1"}}
+			testCase.handler(context)
+			if recorder.Code != http.StatusConflict {
+				t.Fatalf("%s status=%d body=%s", testCase.name, recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestSetupRouterSkipsLegacyRotationRuntimeAndRoutes(t *testing.T) {
 	dataDir := t.TempDir()
 	previousDB, previousExecutor, previousDispatcher, previousRunner := db, executor, proactiveDispatcher, taskRunner
 	previousWake, previousScheduler, previousWatcher, previousQBWatcher := wakeConsumer, sched, watch, qbWatch
@@ -118,12 +150,12 @@ func TestSetupRouterSkipsProactiveRuntimeAndRoutes(t *testing.T) {
 	if err := InitDB(dataDir); err != nil {
 		t.Fatal(err)
 	}
-	proactiveTask := models.Task{ID: 1, Name: "historical proactive", TaskType: "rotation", RotationStrategy: "proactive_quota", Enabled: true, ScheduleEnabled: true, ScheduleInterval: 1, WatchEnabled: true}
-	legacyTask := models.Task{ID: 2, Name: "legacy rotation", TaskType: "rotation", RotationStrategy: "legacy_error", Enabled: true, ScheduleEnabled: true, ScheduleInterval: 1}
-	if err := db.Create(&proactiveTask).Error; err != nil {
+	rotationTask := models.Task{ID: 1, Name: "historical rotation", TaskType: "rotation", RotationStrategy: "legacy_error", Enabled: true, ScheduleEnabled: true, ScheduleInterval: 1, WatchEnabled: true, QBEnabled: true}
+	normalTask := models.Task{ID: 2, Name: "normal task", TaskType: "normal", Enabled: true, ScheduleEnabled: true, ScheduleInterval: 1}
+	if err := db.Create(&rotationTask).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Create(&legacyTask).Error; err != nil {
+	if err := db.Create(&normalTask).Error; err != nil {
 		t.Fatal(err)
 	}
 
@@ -139,11 +171,21 @@ func TestSetupRouterSkipsProactiveRuntimeAndRoutes(t *testing.T) {
 	if proactiveDispatcher != nil || wakeConsumer != nil {
 		t.Fatalf("proactive runtime was registered: dispatcher=%v wake=%v", proactiveDispatcher != nil, wakeConsumer != nil)
 	}
-	if sched.GetNextRun(proactiveTask.ID) != nil {
-		t.Fatal("historical proactive task was registered with the scheduler")
+	if sched.GetNextRun(rotationTask.ID) != nil {
+		t.Fatal("historical rotation task was registered with the scheduler")
 	}
-	if sched.GetNextRun(legacyTask.ID) == nil {
-		t.Fatal("legacy rotation was not registered with the generic scheduler")
+	if sched.GetNextRun(normalTask.ID) == nil {
+		t.Fatal("normal task was not registered with the generic scheduler")
+	}
+	if qbWatch.Status(&rotationTask).Watching {
+		t.Fatal("historical rotation task was registered with qBittorrent")
+	}
+	var storedRotation models.Task
+	if err := db.First(&storedRotation, rotationTask.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if storedRotation.TaskType != "rotation" || storedRotation.RotationStrategy != "legacy_error" {
+		t.Fatalf("historical rotation row was mutated: %#v", storedRotation)
 	}
 
 	for _, disabledPath := range []string{

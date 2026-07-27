@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { 
   ArrowLeft, 
@@ -29,10 +29,6 @@ const TaskForm = () => {
     dest_type: 'remote',
     remote_name: '',
     remote_dir: '',
-    rotation_remotes: '[]',
-    rotation_current_index: 0,
-    rotation_current_round: 0,
-    rotation_paused_until: null,
     transfer_mode: 'move',
     transfers: 16,
     checkers: 32,
@@ -70,26 +66,8 @@ const TaskForm = () => {
   const [browserLoading, setBrowserLoading] = useState(false);
   const [browserBreadcrumbs, setBrowserBreadcrumbs] = useState([{ name: '/', path: '/' }]);
 
-  const isRotationTask = form.task_type === 'rotation';
   const isManualTask = form.task_type === 'manual';
-
-  const parseRotationRemotes = useCallback((value = form.rotation_remotes) => {
-    try {
-      const parsed = JSON.parse(value || '[]');
-      return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
-    } catch {
-      return [];
-    }
-  }, [form.rotation_remotes]);
-
-  const selectedRotationRemotes = useMemo(() => parseRotationRemotes(), [parseRotationRemotes]);
-
-  const rotationLogicText = useMemo(() => {
-    if (!isRotationTask) return null;
-    const remotesText = selectedRotationRemotes.length > 0 ? selectedRotationRemotes.join(' → ') : 'A → B → C';
-    const destPath = form.remote_dir || '/目标目录';
-    return `按 ${remotesText} 顺序上传到 ${destPath}，遇到额度限制自动切换下一账号。`;
-  }, [isRotationTask, selectedRotationRemotes, form.remote_dir]);
+  const isLegacyRotationTask = form.task_type === 'rotation';
 
   const loadRemotes = useCallback(async () => {
     try {
@@ -109,7 +87,6 @@ const TaskForm = () => {
         source_type: res.data.task_type === 'manual' ? 'local' : res.data.source_type,
         dest_type: res.data.task_type === 'manual' ? 'remote' : res.data.dest_type,
         transfer_mode: res.data.task_type === 'manual' && res.data.transfer_mode === 'sync' ? 'copy' : res.data.transfer_mode,
-        rotation_remotes: res.data.rotation_remotes || '[]',
       });
     } catch (err) {
       toast.error('加载任务失败');
@@ -155,7 +132,7 @@ const TaskForm = () => {
       currentPath = parsed.path;
     } else {
       if (form.dest_type !== 'remote') return;
-      remote = isRotationTask ? selectedRotationRemotes[0] : form.remote_name;
+      remote = form.remote_name;
       currentPath = form.remote_dir || '/';
     }
     if (!remote) {
@@ -268,25 +245,6 @@ const TaskForm = () => {
       };
     }
 
-    if (isRotationTask) {
-      if (submitForm.dest_type !== 'remote') {
-        toast.error('调度轮转任务的目标必须是云盘');
-        return;
-      }
-
-      const normalizedRemotes = parseRotationRemotes(submitForm.rotation_remotes);
-      if (normalizedRemotes.length === 0) {
-        toast.error('调度轮转任务至少选择一个网盘');
-        return;
-      }
-
-      submitForm = {
-        ...submitForm,
-        rotation_remotes: JSON.stringify(normalizedRemotes),
-        remote_name: normalizedRemotes[0],
-      };
-    }
-
     setSaving(true);
 
     try {
@@ -314,37 +272,37 @@ const TaskForm = () => {
       ...prev,
       task_type: taskType,
       source_type: taskType === 'manual' ? 'local' : prev.source_type,
-      dest_type: taskType === 'rotation' || taskType === 'manual' ? 'remote' : prev.dest_type,
+      dest_type: taskType === 'manual' ? 'remote' : prev.dest_type,
       transfer_mode: taskType === 'manual' && prev.transfer_mode === 'sync' ? 'copy' : prev.transfer_mode,
-      rotation_remotes: taskType === 'rotation' && parseRotationRemotes(prev.rotation_remotes).length === 0 && prev.remote_name
-        ? JSON.stringify([prev.remote_name])
-        : prev.rotation_remotes,
-      remote_name: taskType === 'rotation' ? (parseRotationRemotes(prev.rotation_remotes)[0] || prev.remote_name) : prev.remote_name,
       watch_enabled: taskType === 'manual' ? false : prev.watch_enabled,
       schedule_enabled: taskType === 'manual' ? false : prev.schedule_enabled,
       qb_enabled: taskType === 'manual' ? false : prev.qb_enabled,
     }));
   };
 
-  const toggleRotationRemote = (remote) => {
-    const current = parseRotationRemotes();
-    const next = current.includes(remote)
-      ? current.filter(item => item !== remote)
-      : [...current, remote];
-
-    setForm(prev => ({
-      ...prev,
-      rotation_remotes: JSON.stringify(next),
-      remote_name: next[0] || '',
-    }));
-  };
-
-
-
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+      </div>
+    );
+  }
+
+  if (isLegacyRotationTask) {
+    return (
+      <div className="max-w-2xl mx-auto">
+        <div className="flex items-center gap-4 mb-6">
+          <button type="button" onClick={() => navigate('/tasks')} className="p-2 hover:bg-gray-100 rounded-lg transition-colors" aria-label="返回任务列表">
+            <ArrowLeft className="w-5 h-5" />
+          </button>
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">任务配置不可用</h1>
+            <p className="text-gray-500 mt-1">此任务使用已停止支持的任务类型，无法在此编辑。</p>
+          </div>
+        </div>
+        <div className="bg-white rounded-xl shadow-sm border border-amber-200 p-6" role="status">
+          <p className="text-sm text-gray-700">请返回任务列表。现有任务只能使用普通任务或手动分配任务。</p>
+        </div>
       </div>
     );
   }
@@ -399,7 +357,6 @@ const TaskForm = () => {
                 {[
                   { value: 'normal', label: '普通任务', desc: '普通任务保持现在逻辑' },
                   { value: 'manual', label: '手动分配任务', desc: '分析、分配并按账号独立运行' },
-                  { value: 'rotation', label: '调度轮转任务', desc: '用于 Google Drive 多子账号顺序上传' },
                 ].map(type => (
                   <button
                     key={type.value}
@@ -563,17 +520,17 @@ const TaskForm = () => {
                     </button>
                     <button
                       type="button"
-                      onClick={() => !isRotationTask && !isManualTask && handleChange('dest_type', 'local')}
-                      disabled={isRotationTask || isManualTask}
+                      onClick={() => !isManualTask && handleChange('dest_type', 'local')}
+                      disabled={isManualTask}
                       className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
                         form.dest_type === 'local' ? 'bg-white shadow text-blue-600' : 'text-gray-500'
-                      } ${isRotationTask || isManualTask ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      } ${isManualTask ? 'opacity-50 cursor-not-allowed' : ''}`}
                     >
                       <HardDrive className="w-3 h-3 inline mr-1" />本地
                     </button>
                   </div>
-                  {(isRotationTask || isManualTask) && (
-                    <p className="text-xs text-amber-600 mt-2">{isManualTask ? '手动分配任务目标固定为云盘。' : '调度轮转任务目标固定为云盘，避免误配置到本地目录。'}</p>
+                  {isManualTask && (
+                    <p className="text-xs text-amber-600 mt-2">手动分配任务目标固定为云盘。</p>
                   )}
                 </div>
 
@@ -582,27 +539,8 @@ const TaskForm = () => {
                     <div className="space-y-2">
                       <div className="grid grid-cols-1 md:grid-cols-[220px_minmax(0,1fr)_92px] gap-2 items-start">
                         <div>
-                          <div className="text-xs text-gray-500 mb-1">{isRotationTask ? '轮转网盘' : '远程盘符'}</div>
-                          {isRotationTask ? (
-                            <div className="border border-gray-300 rounded-lg p-2 max-h-40 overflow-y-auto space-y-1 bg-white">
-                              {remotes.length === 0 ? (
-                                <div className="text-xs text-gray-400">暂无可选网盘</div>
-                              ) : (
-                                remotes.map(remote => (
-                                  <label key={remote} className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-gray-50 cursor-pointer text-sm text-gray-700">
-                                    <input
-                                      type="checkbox"
-                                      checked={selectedRotationRemotes.includes(remote)}
-                                      onChange={() => toggleRotationRemote(remote)}
-                                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                                    />
-                                    <span>{remote}</span>
-                                  </label>
-                                ))
-                              )}
-                            </div>
-                          ) : (
-                            <div className="relative">
+                          <div className="text-xs text-gray-500 mb-1">远程盘符</div>
+                          <div className="relative">
                               <select
                                 required
                                 value={form.remote_name}
@@ -616,9 +554,8 @@ const TaskForm = () => {
                               </select>
                               <Cloud className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
                             </div>
-                          )}
-                        </div>
-                        <div>
+                          </div>
+                         <div>
                           <div className="text-xs text-gray-500 mb-1">云盘路径</div>
                           <input
                             type="text"
@@ -640,16 +577,8 @@ const TaskForm = () => {
                           </button>
                         </div>
                       </div>
-                      {isRotationTask && (
-                        <div className="grid grid-cols-1 gap-4">
-
-                        </div>
-                      )}
                       {remotes.length === 0 && (
                         <p className="text-xs text-orange-500">未检测到 rclone 配置，请确保配置文件已挂载</p>
-                      )}
-                      {isRotationTask && rotationLogicText && (
-                        <p className="text-xs text-blue-700 bg-blue-50 border border-blue-100 rounded-lg px-3 py-2">{rotationLogicText}</p>
                       )}
                     </div>
                   ) : (
