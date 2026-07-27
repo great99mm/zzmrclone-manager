@@ -966,7 +966,29 @@ func (s *Service) processMoveWorker(ctx context.Context, worker ManualRunWorker,
 		finishBeforeStart(state, fmt.Errorf("worker launch CAS rejected: %w", err))
 		return
 	}
-	process, err := moveRunner.StartMove(ctx, proactive.MoveSpec{ConfigPath: worker.ConfigIdentity, ManifestPath: manifestPath, SourceRoot: quarantine.File(), DestinationRemote: worker.RemoteName, DestinationPath: run.DestinationPath, Transfers: 4})
+	processCtx, processCancel := context.WithCancel(ctx)
+	defer processCancel()
+	redactors := newWorkerStreamRedactors()
+	progressState := newWorkerProgressState(worker)
+	var streamErrorMu sync.Mutex
+	var streamError error
+	recordStreamError := func(err error) {
+		if err == nil {
+			return
+		}
+		streamErrorMu.Lock()
+		streamError = errors.Join(streamError, err)
+		streamErrorMu.Unlock()
+		processCancel()
+	}
+	readStreamError := func() error {
+		streamErrorMu.Lock()
+		defer streamErrorMu.Unlock()
+		return streamError
+	}
+	process, err := moveRunner.StartMove(processCtx, proactive.MoveSpec{ConfigPath: worker.ConfigIdentity, ManifestPath: manifestPath, SourceRoot: quarantine.File(), DestinationRemote: worker.RemoteName, DestinationPath: run.DestinationPath, Transfers: 4, OutputSink: func(chunk proactive.ProcessOutputChunk) {
+		recordStreamError(s.consumeWorkerOutput(worker.ID, worker.AssignedBytes, redactors, progressState, chunk.Stream, chunk.Data))
+	}})
 	if err != nil {
 		launchLock.Unlock()
 		var identityErr *proactive.StartedProcessIdentityError
@@ -997,7 +1019,7 @@ func (s *Service) processMoveWorker(ctx context.Context, worker ManualRunWorker,
 	s.workerMu.Unlock()
 	if process == nil || process.PID() <= 0 || process.StartToken() == "" {
 		launchLock.Unlock()
-		cleanup := s.stopAndDrainWorkerProcess(ctx, worker, attempt, process, heartbeat, newWorkerStreamRedactors(), newWorkerProgressState(worker), errors.New("move process identity is unavailable"), nil)
+		cleanup := s.stopAndDrainWorkerProcess(ctx, worker, attempt, process, heartbeat, redactors, progressState, errors.New("move process identity is unavailable"), readStreamError)
 		if cleanup.stopErr != nil {
 			_ = s.markWorkerNeedsAttention(worker.ID, attempt.ID, errors.Join(cleanup.err, fmt.Errorf("move process identity could not be stopped safely: %w", cleanup.stopErr)))
 			return
@@ -1014,7 +1036,7 @@ func (s *Service) processMoveWorker(ctx context.Context, worker ManualRunWorker,
 			persistErr = errors.Join(persistErr, fmt.Errorf("process ownership fallback persistence failed: %w", fallbackErr))
 		}
 		launchLock.Unlock()
-		cleanup := s.stopAndDrainWorkerProcess(ctx, worker, attempt, process, heartbeat, newWorkerStreamRedactors(), newWorkerProgressState(worker), persistErr, nil)
+		cleanup := s.stopAndDrainWorkerProcess(ctx, worker, attempt, process, heartbeat, redactors, progressState, persistErr, readStreamError)
 		if cleanup.stopErr != nil {
 			_ = s.markWorkerNeedsAttention(worker.ID, attempt.ID, errors.Join(cleanup.err, fmt.Errorf("move process identity persistence failed and process could not be stopped safely: %w", cleanup.stopErr)))
 			return
@@ -1024,7 +1046,10 @@ func (s *Service) processMoveWorker(ctx context.Context, worker ManualRunWorker,
 	}
 	launchLock.Unlock()
 
-	result, waitErr, heartbeatFailure, stopErr := s.waitWorkerProcess(ctx, worker, attempt, process, heartbeat, newWorkerStreamRedactors(), newWorkerProgressState(worker))
+	result, waitErr, heartbeatFailure, stopErr := s.waitWorkerProcess(ctx, worker, attempt, process, heartbeat, redactors, progressState)
+	if heartbeatFailure == nil {
+		heartbeatFailure = readStreamError()
+	}
 	var resultLogErr error
 	if _, streaming := process.(proactive.ProcessOutput); !streaming {
 		resultLogErr = appendWorkerResultLogs(s, worker.ID, result)

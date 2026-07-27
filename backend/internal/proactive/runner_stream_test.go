@@ -12,6 +12,19 @@ import (
 )
 
 func TestExecRunnerCopySinkIsLosslessUnderBackpressure(t *testing.T) {
+	testExecRunnerSinkIsLosslessUnderBackpressure(t, func(ctx context.Context, runner ExecRunner, config, manifest string, source *quota.SourceRootHandle, sink func(ProcessOutputChunk)) (ProcessHandle, error) {
+		return runner.StartCopy(ctx, CopySpec{ConfigPath: config, ManifestPath: manifest, SourceRoot: source.File(), DestinationRemote: "remote", DestinationPath: "/dest", OutputSink: sink})
+	})
+}
+
+func TestExecRunnerMoveSinkIsLosslessUnderBackpressure(t *testing.T) {
+	testExecRunnerSinkIsLosslessUnderBackpressure(t, func(ctx context.Context, runner ExecRunner, config, manifest string, source *quota.SourceRootHandle, sink func(ProcessOutputChunk)) (ProcessHandle, error) {
+		return runner.StartMove(ctx, MoveSpec{ConfigPath: config, ManifestPath: manifest, SourceRoot: source.File(), DestinationRemote: "remote", DestinationPath: "/dest", OutputSink: sink})
+	})
+}
+
+func testExecRunnerSinkIsLosslessUnderBackpressure(t *testing.T, start func(context.Context, ExecRunner, string, string, *quota.SourceRootHandle, func(ProcessOutputChunk)) (ProcessHandle, error)) {
+	t.Helper()
 	root := t.TempDir()
 	config := filepath.Join(root, "rclone.conf")
 	if err := os.WriteFile(config, []byte("[remote]\n"), 0600); err != nil {
@@ -33,11 +46,11 @@ func TestExecRunnerCopySinkIsLosslessUnderBackpressure(t *testing.T) {
 	defer source.Close()
 	var mu sync.Mutex
 	var output strings.Builder
-	process, err := (ExecRunner{Binary: script}).StartCopy(context.Background(), CopySpec{ConfigPath: config, ManifestPath: manifest, SourceRoot: source.File(), DestinationRemote: "remote", DestinationPath: "/dest", OutputSink: func(chunk ProcessOutputChunk) {
+	process, err := start(context.Background(), ExecRunner{Binary: script}, config, manifest, source, func(chunk ProcessOutputChunk) {
 		mu.Lock()
 		defer mu.Unlock()
 		output.WriteString(chunk.Data)
-	}})
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

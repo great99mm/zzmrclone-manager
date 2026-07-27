@@ -248,6 +248,13 @@ func (r *manualWorkerFakeRunner) StartMove(_ context.Context, spec proactive.Mov
 	defer r.mu.Unlock()
 	process := &manualWorkerFakeProcess{result: proactive.ProcessResult{ExitCode: 0, PID: 200 + len(r.processes), ProcessStartToken: "move-token"}, done: make(chan struct{})}
 	r.processes = append(r.processes, process)
+	if r.streamed && spec.OutputSink != nil {
+		streamedOutput := r.streamedOutput
+		if streamedOutput == "" {
+			streamedOutput = "token=move-stream-secret token=move-stream-secret\n"
+		}
+		go spec.OutputSink(proactive.ProcessOutputChunk{Stream: "stderr", Data: streamedOutput})
+	}
 	if r.started == nil {
 		process.release()
 	}
@@ -886,6 +893,33 @@ func TestManualWorkerStreamsLogsAndProgressBeforeCompletion(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("streamed log was not visible before process completion")
+}
+
+func TestManualMoveWorkerStreamsLogsBeforeCompletion(t *testing.T) {
+	fixture := newManualWorkerFixture(t, models.TransferModeMove, map[string]string{"a.txt": "a"})
+	fixture.runner.streamed = true
+	fixture.runner.started = make(chan struct{})
+	result := startFixture(t, fixture, "move-streamed-output")
+	select {
+	case <-fixture.runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("move process did not start")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		page, err := fixture.service.GetWorkerLogs(result.WorkerIDs[0], 0, 64<<10)
+		if err == nil && strings.Contains(page.Data, "[redacted]") {
+			fixture.runner.mu.Lock()
+			for _, process := range fixture.runner.processes {
+				process.release()
+			}
+			fixture.runner.mu.Unlock()
+			waitWorkerState(t, fixture.service, result.WorkerIDs[0], ManualWorkerStateSucceeded)
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("move worker log was not visible before process completion")
 }
 
 func TestManualWorkerRunStateTerminalMatrix(t *testing.T) {

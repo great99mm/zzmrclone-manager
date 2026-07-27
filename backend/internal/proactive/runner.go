@@ -34,6 +34,7 @@ type MoveSpec struct {
 	DestinationRemote string
 	DestinationPath   string
 	Transfers         int
+	OutputSink        func(ProcessOutputChunk)
 }
 
 type DedupeSpec struct {
@@ -178,11 +179,20 @@ func (r ExecRunner) StartMove(ctx context.Context, spec MoveSpec) (ProcessHandle
 	}
 	cmd := exec.CommandContext(ctx, binary, "--config", spec.ConfigPath, "move", "--transfers", strconv.Itoa(normalizeTransfers(spec.Transfers)), "--files-from-raw", spec.ManifestPath, "--no-traverse", "--drive-stop-on-upload-limit", "--stats-log-level", "INFO", "/proc/self/fd/3", destination)
 	cmd.ExtraFiles = []*os.File{spec.SourceRoot}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	process := &execProcess{cmd: cmd, stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}, outputSink: spec.OutputSink}
+	process.startReader("stdout", stdoutPipe, process.stdout)
+	process.startReader("stderr", stderrPipe, process.stderr)
 	readToken := r.ProcessStartToken
 	if readToken == nil {
 		readToken = processStartToken
@@ -190,14 +200,16 @@ func (r ExecRunner) StartMove(ctx context.Context, spec MoveSpec) (ProcessHandle
 	token := readToken(cmd.Process.Pid)
 	if cmd.Process.Pid <= 0 || token == "" {
 		_ = cmd.Process.Kill()
-		waitErr := cmd.Wait()
-		result := ProcessResult{PID: cmd.Process.Pid, ProcessStartToken: token, Stdout: stdout.String(), Stderr: stderr.String()}
+		result, waitErr := process.Wait()
+		result.PID = cmd.Process.Pid
+		result.ProcessStartToken = token
 		if cmd.ProcessState != nil {
 			result.ExitCode = cmd.ProcessState.ExitCode()
 		}
 		return nil, &StartedProcessIdentityError{PID: cmd.Process.Pid, Cause: errors.New("unable to read rclone process identity"), Result: result, WaitErr: waitErr}
 	}
-	return &execProcess{cmd: cmd, stdout: &stdout, stderr: &stderr, token: token}, nil
+	process.token = token
+	return process, nil
 }
 
 func normalizeTransfers(value int) int {
