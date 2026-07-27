@@ -520,7 +520,7 @@ const ManualWorkerConsole = ({ run, onRunChange, accountRevision }) => {
   const [logs, setLogs] = useState({});
   const [workerActions, setWorkerActions] = useState({});
   const runId = runIdOf(run);
-  const isCopyRun = run?.transfer_mode === 'copy';
+  const isSupportedRun = ['copy', 'move'].includes(run?.transfer_mode);
   const isAllocated = statusOf(run) === 'allocated' || run?.allocated === true;
   const succeededWorkers = workers.filter(worker => workerStatusOf(worker) === 'succeeded').length;
   const runDisplayStatus = statusOf(run) === 'failed' && succeededWorkers > 0 ? '部分完成 · 有失败' : statusOf(run) === 'cancelled' && succeededWorkers > 0 ? '部分完成 · 已取消剩余' : statusOf(run) === 'needs_attention' ? '需要人工处理' : statusOf(run) === 'succeeded' ? '已完成' : statusOf(run) === 'failed' ? '失败' : statusOf(run) === 'cancelled' ? '已取消' : statusOf(run) || '待启动';
@@ -629,7 +629,7 @@ const ManualWorkerConsole = ({ run, onRunChange, accountRevision }) => {
   };
 
   const startWorkers = async () => {
-    if (!runId || !isAllocated || !isCopyRun || startState.loading) return;
+    if (!runId || !isAllocated || !isSupportedRun || startState.loading) return;
     if (Number(run.unassigned_count) > 0 && !window.confirm(`仍有 ${run.unassigned_count} 个文件未分配。只启动已分配账号的 worker？`)) return;
     setStartState({ loading: true, error: '' });
     try {
@@ -672,7 +672,7 @@ const ManualWorkerConsole = ({ run, onRunChange, accountRevision }) => {
     <section className="mt-4 border-t border-gray-200 pt-4" aria-labelledby="manual-workers-heading">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div><h3 id="manual-workers-heading" className="text-sm font-semibold text-gray-900">Worker 控制台</h3><p className="text-xs text-gray-500 mt-0.5">运行状态：{runDisplayStatus} · 每个已分配账号一个独立 worker；不会自动续跑。</p></div>
-        {isCopyRun ? <button type="button" onClick={startWorkers} disabled={!isAllocated || startState.loading} title={!isAllocated ? '只有已分配的运行才能启动' : '显式启动已分配账号的 worker'} className="inline-flex min-h-11 w-full sm:w-auto items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-indigo-500">{startState.loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}开始运行</button> : <span className="w-full sm:w-auto text-center text-xs font-medium text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-2">移动模式暂不可运行</span>}
+        {isSupportedRun ? <button type="button" onClick={startWorkers} disabled={!isAllocated || startState.loading} title={!isAllocated ? '只有已分配的运行才能启动' : run?.transfer_mode === 'move' ? '开始运行；成功传输后删除源文件' : '显式启动已分配账号的 worker'} className="inline-flex min-h-11 w-full sm:w-auto items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-indigo-500">{startState.loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}开始运行</button> : <span className="w-full sm:w-auto text-center text-xs font-medium text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-2">当前传输模式不可运行</span>}
       </div>
       <div className="mt-2 min-h-[1.25rem]" aria-live="polite">{startState.error && <StateNotice tone="error" icon={AlertTriangle} text={startState.error} />}{workersError && <StateNotice tone="error" icon={AlertTriangle} text={workersError} />}</div>
       {workersLoading && workers.length === 0 ? <InlineLoading text="正在获取 worker 状态..." /> : workers.length === 0 ? <div className="py-3 text-xs text-gray-500">尚未创建 worker。开始运行后，已分配账号会独立显示。</div> : <div className="mt-2 space-y-2" role="list" aria-label="手动传输 worker 列表">{workers.map(worker => <ManualWorkerRow key={workerIdOf(worker)} worker={mergeWorkerData(worker, details[workerIdOf(worker)])} expanded={expanded[workerIdOf(worker)]} onToggle={() => toggleWorker(worker)} onAction={workerAction} onRetryLogs={() => loadWorkerLogs(workerIdOf(worker))} action={workerActions[workerIdOf(worker)]} logs={logs[workerIdOf(worker)]} />)}</div>}
