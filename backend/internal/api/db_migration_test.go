@@ -7,6 +7,7 @@ import (
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
+	"rclone-manager/internal/manualtransfer"
 	"rclone-manager/internal/models"
 	"rclone-manager/internal/quota"
 )
@@ -42,6 +43,12 @@ func TestRotationQuotaSchemaMigration(t *testing.T) {
 		&models.RotationQuotaBatchFile{},
 		&models.QuotaReservation{},
 		&models.QuotaManualResetEvent{},
+		&manualtransfer.ManualTaskAccount{},
+		&manualtransfer.ManualTransferRun{},
+		&manualtransfer.ManualRunAccount{},
+		&manualtransfer.ManualRunFile{},
+		&manualtransfer.ManualRunAllocation{},
+		&manualtransfer.ManualRunEvent{},
 	} {
 		if !db.Migrator().HasTable(model) {
 			t.Fatalf("migrated table for %T is missing", model)
@@ -90,6 +97,10 @@ func TestRotationQuotaSchemaMigration(t *testing.T) {
 	assertMigrationIndex(t, &models.QuotaProbeAttempt{}, quotaProbeAttemptObjectPathIndex)
 	assertMigrationIndex(t, &models.QuotaProbeAttempt{}, quotaProbeAttemptAccountPollIndex)
 	assertMigrationIndex(t, &models.QuotaProbeAttempt{}, quotaProbeAttemptStateDueIndex)
+	assertMigrationIndex(t, &manualtransfer.ManualTransferRun{}, manualtransfer.ManualRunIdempotencyIndex)
+	assertMigrationIndexColumns(t, manualtransfer.ManualRunIdempotencyIndex, []string{"task_id", "idempotency_key"})
+	assertMigrationIndex(t, &manualtransfer.ManualTransferRun{}, manualtransfer.ManualRunActiveIndex)
+	assertMigrationIndexColumns(t, manualtransfer.ManualRunActiveIndex, []string{"task_id"})
 	assertNoMigrationIndex(t, &models.QuotaProbeAttempt{}, quotaProbeAttemptLegacyGenerationIndex)
 	assertMigrationIndexColumns(t, quotaProbeAttemptGenerationSlotIndex, []string{"quota_account_id", "recovery_generation", "scheduled_slot"})
 	assertMigrationIndexColumns(t, quotaProbeAttemptAccountPollIndex, []string{"quota_account_id", "recovery_generation", "state", "due_at"})

@@ -14,6 +14,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
+	"rclone-manager/internal/manualtransfer"
 	"rclone-manager/internal/models"
 	"rclone-manager/internal/quota"
 )
@@ -85,9 +86,27 @@ func InitDB(dataDir string) error {
 		&models.NetworkTelemetrySample{},
 		&models.DestinationScopeMaintenance{},
 		&models.DestinationScopeCoordinator{},
+		&manualtransfer.ManualTaskAccount{},
+		&manualtransfer.ManualTransferRun{},
+		&manualtransfer.ManualRunAccount{},
+		&manualtransfer.ManualRunFile{},
+		&manualtransfer.ManualRunAllocation{},
+		&manualtransfer.ManualRunEvent{},
+		&manualtransfer.ManualRunWorker{},
+		&manualtransfer.ManualWorkerAttempt{},
+		&manualtransfer.ManualWorkerFile{},
+		&manualtransfer.ManualWorkerEvent{},
+		&manualtransfer.ManualWorkerProgress{},
+		&manualtransfer.ManualWorkerLog{},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to migrate database: %v", err)
+	}
+	if err := manualtransfer.EnsureSchema(db); err != nil {
+		return fmt.Errorf("failed to upgrade manual transfer schema: %v", err)
+	}
+	if err := disableLegacyManualRegistrations(db); err != nil {
+		return fmt.Errorf("failed to disable legacy manual registrations: %v", err)
 	}
 	if err := ensureQuotaProbeAttemptIndexes(db); err != nil {
 		return fmt.Errorf("failed to upgrade quota probe attempt indexes: %v", err)
@@ -265,6 +284,16 @@ func normalizeProactiveTaskQuotaLimits(database *gorm.DB) error {
 
 func disableLegacyAutoDedupe(database *gorm.DB) error {
 	return database.Model(&models.Task{}).Where("auto_dedupe = ?", true).Update("auto_dedupe", false).Error
+}
+
+func disableLegacyManualRegistrations(database *gorm.DB) error {
+	return database.Model(&models.Task{}).Where("task_type = ?", models.TaskTypeManual).Updates(map[string]interface{}{
+		"manual_strategy":  models.ManualStrategyAllocation,
+		"watch_enabled":    false,
+		"schedule_enabled": false,
+		"qb_enabled":       false,
+		"auto_dedupe":      false,
+	}).Error
 }
 
 func validateQuotaLedgerMigration(database *gorm.DB) error {

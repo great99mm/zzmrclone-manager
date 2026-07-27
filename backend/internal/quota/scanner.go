@@ -51,6 +51,11 @@ type ScanOutcome struct {
 	NextEligibleAt *time.Time
 }
 
+// SnapshotConsumer receives one stable regular-file observation at a time.
+// Implementations can persist the observation immediately instead of retaining
+// the complete source tree in memory.
+type SnapshotConsumer func(LocalSnapshot) error
+
 func unsupportedTraversalError() error {
 	return fmt.Errorf("secure descriptor-relative scanner is unsupported on this platform")
 }

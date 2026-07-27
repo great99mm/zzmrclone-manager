@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Plus,
@@ -14,18 +14,14 @@ import {
   FolderOpen,
   HardDrive
 } from 'lucide-react';
-import { getTasks, getProactiveStatus, deleteTask, startTask, stopTask } from '../services/api';
+import { getTasks, deleteTask, startTask, stopTask } from '../services/api';
 import toast from 'react-hot-toast';
-import { QuotaAccountBar, QuotaExhaustedNotice } from '../components/QuotaAccountBar';
 
 const Tasks = () => {
   const [tasks, setTasks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('all');
-  const [poolSummaries, setPoolSummaries] = useState({});
-  const [poolSummaryLoading, setPoolSummaryLoading] = useState({});
-  const [poolSummaryErrors, setPoolSummaryErrors] = useState({});
 
   useEffect(() => {
     loadTasks();
@@ -107,60 +103,6 @@ const Tasks = () => {
     const matchesFilter = filter === 'all' || task.status === filter;
     return matchesSearch && matchesFilter;
   });
-
-  const visibleProactiveTasks = useMemo(
-    () => filteredTasks.filter(task => task.task_type === 'rotation' && task.rotation_strategy === 'proactive_quota').slice(0, 20),
-    [filteredTasks]
-  );
-  const visibleProactiveTaskKey = visibleProactiveTasks.map(task => task.id).join(',');
-
-  useEffect(() => {
-    if (!visibleProactiveTasks.length) return undefined;
-    let active = true;
-    let timer;
-
-    const loadVisiblePoolSummaries = async () => {
-      const queue = [...visibleProactiveTasks];
-      const results = [];
-      const worker = async () => {
-        while (active) {
-          const task = queue.shift();
-          if (!task) return;
-          setPoolSummaryLoading(prev => ({ ...prev, [task.id]: true }));
-          try {
-            const response = await getProactiveStatus(task.id, 20, true);
-            results.push({ id: task.id, data: response.data });
-          } catch (error) {
-            results.push({ id: task.id, error: error.response?.data?.error || '状态暂时无法获取' });
-          } finally {
-            setPoolSummaryLoading(prev => ({ ...prev, [task.id]: false }));
-          }
-        }
-      };
-
-      await Promise.all(Array.from({ length: Math.min(3, queue.length) }, worker));
-      if (!active) return;
-      setPoolSummaries(prev => results.reduce((next, item) => {
-        if (item.data) next[item.id] = item.data;
-        return next;
-      }, { ...prev }));
-      setPoolSummaryErrors(prev => results.reduce((next, item) => {
-        if (item.error) next[item.id] = item.error;
-        else delete next[item.id];
-        return next;
-      }, { ...prev }));
-    };
-
-    const poll = async () => {
-      await loadVisiblePoolSummaries();
-      if (active) timer = setTimeout(poll, 10000);
-    };
-    poll();
-    return () => {
-      active = false;
-      clearTimeout(timer);
-    };
-  }, [visibleProactiveTaskKey]);
 
   if (loading) {
     return (
@@ -255,9 +197,6 @@ const Tasks = () => {
                         {task.task_type === 'rotation' && (
                           <span className="px-2 py-0.5 bg-amber-100 text-amber-700 text-xs rounded-full">轮转</span>
                         )}
-                        {task.task_type === 'rotation' && task.rotation_strategy === 'proactive_quota' && (
-                          <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 text-xs rounded-full">主动额度</span>
-                        )}
                       </div>
                       <div className="text-xs text-gray-500 mt-0.5">ID: {task.id}</div>
                     </td>
@@ -280,13 +219,6 @@ const Tasks = () => {
                     </td>
                     <td className="px-6 py-4">
                       <StatusBadge status={task.status} />
-                      {task.task_type === 'rotation' && task.rotation_strategy === 'proactive_quota' && (
-                        <PoolTaskSummary
-                          summary={poolSummaries[task.id]}
-                          loading={poolSummaryLoading[task.id]}
-                          error={poolSummaryErrors[task.id]}
-                        />
-                      )}
                     </td>
                     <td className="px-6 py-4">
                       <div className="flex flex-wrap gap-1">
@@ -368,17 +300,7 @@ const Tasks = () => {
                     {task.task_type === 'rotation' && (
                       <span className="px-2 py-0.5 bg-amber-100 text-amber-700 text-xs rounded-full">轮转</span>
                     )}
-                    {task.task_type === 'rotation' && task.rotation_strategy === 'proactive_quota' && (
-                      <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 text-xs rounded-full">主动额度</span>
-                    )}
                     <StatusBadge status={task.status} />
-                    {task.task_type === 'rotation' && task.rotation_strategy === 'proactive_quota' && (
-                      <PoolTaskSummary
-                        summary={poolSummaries[task.id]}
-                        loading={poolSummaryLoading[task.id]}
-                        error={poolSummaryErrors[task.id]}
-                      />
-                    )}
                   </div>
                   <p className="text-xs text-gray-500 mt-0.5">ID: {task.id}</p>
                 </div>
@@ -469,90 +391,6 @@ const Tasks = () => {
       </div>
     </div>
   );
-};
-
-const PoolTaskSummary = ({ summary, loading, error }) => {
-  if (loading && !summary) {
-    return <div className="mt-1 text-xs text-gray-400" aria-live="polite">正在获取账号池状态...</div>;
-  }
-  if (error && !summary) {
-    return <div className="mt-1 text-xs text-red-700" role="status">账号池状态不可用：{error}</div>;
-  }
-  if (!summary) return null;
-
-  const batches = summary.batches || [];
-  const queue = summary.queue || {};
-  const runningBatch = batches.find(batch => batch.state === 'running' && batch.process?.active === true);
-  const queuedCount = (queue.pending?.count || 0) + (queue.planned?.count || 0);
-  const reconcilingCount = batches.filter(batch => batch.state === 'reconciling').length;
-  const failedCount = batches.filter(batch => batch.state === 'failed').length;
-  const failedFileCount = queue.failed?.count || 0;
-  const unknownCount = batches.filter(batch => batch.state === 'unknown').length;
-  const transferMode = summary.task?.transfer_mode || runningBatch?.transfer_mode || 'copy';
-  const unknownMoveCount = batches.filter(batch => batch.state === 'unknown' && (batch.transfer_mode || transferMode) === 'move').length;
-  const evidenceBatch = batches.find(batch => batch.state === 'succeeded' && batch.completion_evidence) || runningBatch;
-  const accountName = runningBatch?.remote || runningBatch?.account || batches[0]?.remote || batches[0]?.account;
-  const account = (summary.accounts || []).find(item => item.remote_name === accountName || item.quota_key === accountName);
-  const accountReady = account?.budget_bytes != null && account?.remaining_bytes != null;
-  const blocked = isFutureTimestamp(account?.provider_blocked_until);
-  const stateParts = [];
-  if (runningBatch) stateParts.push('运行中');
-  if (queuedCount > 0) stateParts.push(`排队 ${queuedCount}`);
-  if (reconcilingCount > 0) stateParts.push(`对账 ${reconcilingCount}`);
-  if (failedCount > 0) stateParts.push(`失败 ${failedCount}`);
-  else if (failedFileCount > 0) stateParts.push(`失败文件 ${failedFileCount}`);
-  if (unknownCount > 0) stateParts.push(`待确认 ${unknownCount}`);
-  if (!stateParts.length) stateParts.push(POOL_STATUS_LABELS[summary.task?.status] || '待机');
-
-  return (
-    <div className="mt-1 space-y-0.5 text-xs text-gray-500" aria-label="主动额度运行摘要">
-      <div className="flex flex-wrap gap-x-2 gap-y-0.5">
-        <span>{stateParts.join(' · ')}</span>
-        {accountName && <span>{runningBatch ? '运行账号' : '选定账号'}: {accountName}</span>}
-        <span>{transferMode === 'move' ? '移动' : '复制'}</span>
-      </div>
-      {evidenceBatch && <div>{evidenceBatch.completion_evidence === 'local_move' ? '本地 / rclone 已完成' : evidenceBatch.completion_evidence === 'remote_verified' ? '远端已核验' : unknownMoveCount > 0 ? '移动结果待处理' : '处理中'}</div>}
-      {accountReady ? (
-        <div className="break-words">
-          剩余 {formatBytes(account.remaining_bytes)} / {formatBytes(account.budget_bytes)} · 预留 {formatBytes(account.active_reserved_bytes || 0)}
-          {blocked && <span className="text-red-700"> · Provider 阻断中</span>}
-        </div>
-      ) : accountName ? (
-        <div className="text-amber-700">quota account 未初始化</div>
-      ) : null}
-      {Array.isArray(summary.accounts) && summary.accounts.length > 0 && (
-        <div className="space-y-2 pt-1">
-          {summary.accounts.map((acct, idx) => (
-            <QuotaAccountBar key={acct.remote_name || idx} account={acct} />
-          ))}
-        </div>
-      )}
-      <QuotaExhaustedNotice status={summary} />
-      {error && <div className="text-red-700">状态刷新失败，显示最近一次成功数据</div>}
-      {unknownMoveCount > 0 && <div className="text-amber-700">移动批次需要在详情中处理</div>}
-    </div>
-  );
-};
-
-const POOL_STATUS_LABELS = {
-  idle: '待机',
-  running: '运行中',
-  paused: '暂停',
-  canceled: '已停止',
-  error: '异常',
-};
-
-const isFutureTimestamp = (value) => {
-  if (!value) return false;
-  const timestamp = new Date(value).getTime();
-  return Number.isFinite(timestamp) && timestamp > Date.now();
-};
-
-const formatBytes = (bytes) => {
-  if (!bytes) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  return `${parseFloat((bytes / (1024 ** exponent)).toFixed(2))} ${units[exponent]}`;
 };
 
 const StatusBadge = ({ status }) => {

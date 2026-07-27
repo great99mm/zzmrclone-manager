@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"gorm.io/gorm"
 	"rclone-manager/internal/logger"
 	"rclone-manager/internal/models"
 	"rclone-manager/internal/rclone"
@@ -21,6 +22,7 @@ import (
 
 type Watcher struct {
 	executor *rclone.Executor
+	database *gorm.DB
 	mu       sync.Mutex
 	stops    map[uint]chan struct{}
 	seen     map[uint]map[string]bool
@@ -73,9 +75,14 @@ type torrent struct {
 	SavePath    string  `json:"save_path"`
 }
 
-func NewWatcher(executor *rclone.Executor) *Watcher {
+func NewWatcher(executor *rclone.Executor, databases ...*gorm.DB) *Watcher {
+	var database *gorm.DB
+	if len(databases) > 0 {
+		database = databases[0]
+	}
 	return &Watcher{
 		executor: executor,
+		database: database,
 		stops:    make(map[uint]chan struct{}),
 		seen:     make(map[uint]map[string]bool),
 		queues:   make(map[uint][]queuedTorrent),
@@ -85,6 +92,10 @@ func NewWatcher(executor *rclone.Executor) *Watcher {
 }
 
 func (w *Watcher) StartTaskWatch(task *models.Task) error {
+	if task != nil && task.TaskType == models.TaskTypeManual {
+		w.StopTaskWatch(task.ID)
+		return nil
+	}
 	if task == nil || !task.QBEnabled {
 		return nil
 	}
@@ -300,6 +311,19 @@ func (tor queuedTorrent) toQueueItem() QueueItem {
 }
 
 func (w *Watcher) runNext(task *models.Task) {
+	if task == nil {
+		return
+	}
+	if w.database != nil {
+		var current models.Task
+		if err := w.database.First(&current, task.ID).Error; err != nil {
+			log.Printf("Unable to validate qBittorrent task %d before launch: %v", task.ID, err)
+			return
+		}
+		if current.TaskType == models.TaskTypeManual {
+			return
+		}
+	}
 	if w.executor == nil || w.executor.IsRunning(task.ID) {
 		return
 	}

@@ -26,6 +26,7 @@ func wakeClaim(ctx context.Context) string {
 var (
 	ErrTaskActive = errors.New("task is active")
 	ErrTaskClosed = errors.New("task launch is fenced")
+	ErrManualTask = errors.New("manual tasks are not dispatched by the legacy runner")
 )
 
 type LegacyRunner interface {
@@ -94,6 +95,12 @@ func (d *TaskDispatcher) Trigger(ctx context.Context, taskID uint, source string
 		g.cond.Broadcast()
 		g.mu.Unlock()
 		return err
+	}
+	if task.TaskType == models.TaskTypeManual {
+		g.entered--
+		g.cond.Broadcast()
+		g.mu.Unlock()
+		return ErrManualTask
 	}
 	proactiveTask := task.TaskType == "rotation" && task.RotationStrategy == "proactive_quota" && d.Proactive != nil
 	if proactiveTask && source == "start" {
@@ -326,4 +333,36 @@ func (d *TaskDispatcher) WithTaskExclusive(ctx context.Context, taskID uint, fn 
 	g.cond.Broadcast()
 	g.mu.Unlock()
 	return err
+}
+
+// WithTaskLaunchExclusive closes the task gate only for the final legacy
+// launch decision. It deliberately does not reject an adapter-owned run: the
+// caller may already be inside Trigger, and the purpose is to serialize the
+// current-task check with conversion/update mutations.
+func (d *TaskDispatcher) WithTaskLaunchExclusive(ctx context.Context, taskID uint, fn func(*models.Task) error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	g := d.gate(taskID)
+	g.mu.Lock()
+	for g.closed || g.entered != 0 {
+		g.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		g.mu.Lock()
+	}
+	g.closed = true
+	defer func() {
+		g.closed = false
+		g.cond.Broadcast()
+		g.mu.Unlock()
+	}()
+	var task models.Task
+	if err := d.DB.First(&task, taskID).Error; err != nil {
+		return err
+	}
+	return fn(&task)
 }

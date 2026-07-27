@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 type CopySpec struct {
@@ -21,6 +23,8 @@ type CopySpec struct {
 	DestinationRemote string
 	DestinationPath   string
 	Transfers         int
+	OutputSink        func(ProcessOutputChunk)
+	ProgressSink      func(ProcessProgress)
 }
 
 type MoveSpec struct {
@@ -49,6 +53,31 @@ type ProcessResult struct {
 	Stderr            string
 	PID               int
 	ProcessStartToken string
+}
+
+type ProcessOutputChunk struct {
+	Stream string
+	Data   string
+}
+
+type ProcessProgress struct {
+	RelativePath        string
+	CompletedCount      int64
+	CompletedBytes      int64
+	SpeedBytesPerSecond int64
+	ProgressPercent     float64
+}
+
+type ProcessOutput interface {
+	Output() <-chan ProcessOutputChunk
+}
+
+type ProcessProgressor interface {
+	Progress() <-chan ProcessProgress
+}
+
+type ProcessOutputState interface {
+	OutputWasStreamed() bool
 }
 
 type ProcessHandle interface {
@@ -100,13 +129,22 @@ func (r ExecRunner) StartCopy(ctx context.Context, spec CopySpec) (ProcessHandle
 	if binary == "" {
 		binary = "rclone"
 	}
-	cmd := exec.CommandContext(ctx, binary, "--config", spec.ConfigPath, "copy", "--transfers", strconv.Itoa(normalizeTransfers(spec.Transfers)), "--files-from-raw", spec.ManifestPath, "--no-traverse", "--drive-stop-on-upload-limit", "--stats-log-level", "INFO", "/proc/self/fd/3", destination)
+	cmd := exec.CommandContext(ctx, binary, "--config", spec.ConfigPath, "copy", "--transfers", strconv.Itoa(normalizeTransfers(spec.Transfers)), "--files-from-raw", spec.ManifestPath, "--no-traverse", "--drive-stop-on-upload-limit", "--stats-log-level", "INFO", "--stats", "1s", "/proc/self/fd/3", destination)
 	cmd.ExtraFiles = []*os.File{spec.SourceRoot}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	process := &execProcess{cmd: cmd, stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}, outputSink: spec.OutputSink, progressSink: spec.ProgressSink}
+	process.startReader("stdout", stdoutPipe, process.stdout)
+	process.startReader("stderr", stderrPipe, process.stderr)
 	readToken := r.ProcessStartToken
 	if readToken == nil {
 		readToken = processStartToken
@@ -114,15 +152,16 @@ func (r ExecRunner) StartCopy(ctx context.Context, spec CopySpec) (ProcessHandle
 	token := readToken(cmd.Process.Pid)
 	if cmd.Process.Pid <= 0 || token == "" {
 		_ = cmd.Process.Kill()
-		waitErr := error(nil)
-		waitErr = cmd.Wait()
-		result := ProcessResult{PID: cmd.Process.Pid, ProcessStartToken: token, Stdout: stdout.String(), Stderr: stderr.String()}
+		result, waitErr := process.Wait()
+		result.PID = cmd.Process.Pid
+		result.ProcessStartToken = token
 		if cmd.ProcessState != nil {
 			result.ExitCode = cmd.ProcessState.ExitCode()
 		}
 		return nil, &StartedProcessIdentityError{PID: cmd.Process.Pid, Cause: errors.New("unable to read rclone process identity"), Result: result, WaitErr: waitErr}
 	}
-	return &execProcess{cmd: cmd, stdout: &stdout, stderr: &stderr, token: token}, nil
+	process.token = token
+	return process, nil
 }
 
 func (r ExecRunner) StartMove(ctx context.Context, spec MoveSpec) (ProcessHandle, error) {
@@ -235,17 +274,95 @@ type execProcess struct {
 	cmd            *exec.Cmd
 	stdout, stderr *bytes.Buffer
 	token          string
+	outputCh       chan ProcessOutputChunk
+	progressCh     chan ProcessProgress
+	outputSink     func(ProcessOutputChunk)
+	progressSink   func(ProcessProgress)
+	readers        sync.WaitGroup
+	closeOnce      sync.Once
+	waitOnce       sync.Once
+	waitResult     ProcessResult
+	waitErr        error
 }
 
 func (p *execProcess) PID() int           { return p.cmd.Process.Pid }
 func (p *execProcess) StartToken() string { return p.token }
 func (p *execProcess) Wait() (ProcessResult, error) {
-	err := p.cmd.Wait()
-	result := ProcessResult{PID: p.cmd.Process.Pid, ProcessStartToken: p.token, Stdout: p.stdout.String(), Stderr: p.stderr.String()}
-	if p.cmd.ProcessState != nil {
-		result.ExitCode = p.cmd.ProcessState.ExitCode()
+	p.waitOnce.Do(func() {
+		// StdoutPipe and StderrPipe require their readers to drain before Wait.
+		// For writer-backed streams this is a no-op; Cmd.Wait waits for its copy
+		// goroutines before it returns.
+		p.readers.Wait()
+		p.waitErr = p.cmd.Wait()
+		p.waitResult = ProcessResult{PID: p.cmd.Process.Pid, ProcessStartToken: p.token, Stdout: p.stdout.String(), Stderr: p.stderr.String()}
+		if p.cmd.ProcessState != nil {
+			p.waitResult.ExitCode = p.cmd.ProcessState.ExitCode()
+		}
+		p.closeStreams()
+	})
+	return p.waitResult, p.waitErr
+}
+func (p *execProcess) Output() <-chan ProcessOutputChunk { return p.outputCh }
+func (p *execProcess) Progress() <-chan ProcessProgress  { return p.progressCh }
+func (p *execProcess) OutputWasStreamed() bool           { return p.outputSink != nil || p.progressSink != nil }
+
+func (p *execProcess) startReader(stream string, reader io.ReadCloser, target *bytes.Buffer) {
+	p.readers.Add(1)
+	go func() {
+		defer p.readers.Done()
+		defer reader.Close()
+		buffer := make([]byte, 32<<10)
+		for {
+			count, err := reader.Read(buffer)
+			if count > 0 {
+				_, _ = target.Write(buffer[:count])
+				chunk := ProcessOutputChunk{Stream: stream, Data: string(buffer[:count])}
+				if p.outputSink != nil {
+					p.outputSink(chunk)
+				} else if p.outputCh != nil {
+					p.outputCh <- chunk
+				}
+				if progress, ok := parseProgressChunk(chunk.Data); ok {
+					if p.progressSink != nil {
+						p.progressSink(progress)
+					} else if p.progressCh != nil {
+						p.progressCh <- progress
+					}
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+}
+
+func (p *execProcess) closeStreams() {
+	p.closeOnce.Do(func() {
+		if p.outputCh != nil {
+			close(p.outputCh)
+		}
+		if p.progressCh != nil {
+			close(p.progressCh)
+		}
+	})
+}
+
+func parseProgressChunk(value string) (ProcessProgress, bool) {
+	value = strings.TrimSpace(value)
+	percentIndex := strings.Index(value, "%")
+	if percentIndex <= 0 {
+		return ProcessProgress{}, false
 	}
-	return result, err
+	start := percentIndex - 1
+	for start >= 0 && ((value[start] >= '0' && value[start] <= '9') || value[start] == '.') {
+		start--
+	}
+	percent, err := strconv.ParseFloat(strings.TrimSpace(value[start+1:percentIndex]), 64)
+	if err != nil || percent < 0 || percent > 100 {
+		return ProcessProgress{}, false
+	}
+	return ProcessProgress{ProgressPercent: percent}, true
 }
 func (p *execProcess) Stop() error {
 	if p.cmd.Process == nil {

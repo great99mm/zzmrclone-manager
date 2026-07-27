@@ -1,9 +1,11 @@
 import axios from 'axios';
 
-const API_BASE = process.env.NODE_ENV === 'production' ? '/api' : 'http://localhost:7070/api';
-const WS_BASE = process.env.NODE_ENV === 'production' 
-  ? `ws://${window.location.host}/ws` 
-  : 'ws://localhost:7070/ws';
+const API_BASE = process.env.REACT_APP_API_BASE_URL
+  || (process.env.NODE_ENV === 'production' ? '/api' : 'http://localhost:7070/api');
+const WS_BASE = process.env.REACT_APP_WS_BASE_URL
+  || (process.env.NODE_ENV === 'production'
+    ? `ws://${window.location.host}/ws`
+    : 'ws://localhost:7070/ws');
 
 const api = axios.create({
   baseURL: API_BASE,
@@ -36,21 +38,24 @@ export const pauseTask = (id, mode) => api.post(`/tasks/${id}/pause`, mode ? { m
 export const cancelTask = (id) => api.post(`/tasks/${id}/cancel`);
 export const stopTask = (id) => api.post(`/tasks/${id}/stop`);
 export const dedupeTask = (id) => api.post(`/tasks/${id}/dedupe`);
-export const startProactiveManualMerge = (id) => api.post(`/tasks/${id}/proactive-manual-merge`);
-export const closeProactiveUnknownMaintenance = (epochId, data) => api.post(`/proactive-maintenance/${epochId}/close-unknown`, data);
 export const getTaskLogs = (id, lines = 100) => api.get(`/tasks/${id}/logs?lines=${lines}`);
 export const getTaskStatus = (id) => api.get(`/tasks/${id}/status`);
-export const getProactiveStatus = (id, limit = 100, summary = false) => {
-  const token = localStorage.getItem('apiToken') || localStorage.getItem('token') || '';
-  const summaryParam = summary ? '&summary=true' : '';
-  return api.get(`/tasks/${id}/proactive-status?limit=${limit}${summaryParam}&token=${encodeURIComponent(token)}`);
-};
-export const manualResetQuotaAccount = (taskId, accountId) =>
-  api.post(`/tasks/${taskId}/quota-accounts/${encodeURIComponent(accountId)}/manual-reset`, { confirmation: 'RESET' });
-export const resolveProactiveBatch = (taskId, resolution) => {
-  const token = localStorage.getItem('apiToken') || localStorage.getItem('token') || '';
-  return api.post(`/tasks/${taskId}/proactive-resolutions?token=${encodeURIComponent(token)}`, resolution);
-};
+export const getManualAccounts = (taskId) => api.get(`/tasks/${taskId}/manual-accounts`);
+export const saveManualAccounts = (taskId, data) => api.put(`/tasks/${taskId}/manual-accounts`, data);
+export const analyzeManualRun = (taskId, data) => api.post(`/tasks/${taskId}/manual-runs/analyze`, data);
+export const getManualRuns = (taskId) => api.get(`/tasks/${taskId}/manual-runs`);
+export const getManualRun = (runId) => api.get(`/manual-runs/${runId}`);
+export const getManualRunAccounts = (runId, cursor = '') => api.get(`/manual-runs/${runId}/accounts`, { params: cursor ? { cursor } : undefined });
+export const getManualRunFiles = (runId, { account_id: accountId, reason, cursor = '' } = {}) => api.get(`/manual-runs/${runId}/files`, {
+  params: { ...(accountId ? { account_id: accountId } : {}), ...(reason ? { reason } : {}), ...(cursor ? { cursor } : {}) },
+});
+export const allocateManualRun = (runId, data) => api.post(`/manual-runs/${runId}/allocate`, data);
+export const startManualRun = (runId, data) => api.post(`/manual-runs/${runId}/start`, data);
+export const getManualWorkers = (runId) => api.get(`/manual-runs/${runId}/workers`);
+export const getManualWorker = (workerId) => api.get(`/manual-workers/${workerId}`);
+export const cancelManualWorker = (workerId) => api.post(`/manual-workers/${workerId}/cancel`);
+export const retryManualWorker = (workerId) => api.post(`/manual-workers/${workerId}/retry`);
+export const getManualWorkerLogs = (workerId, offset = 0, limit = 200) => api.get(`/manual-workers/${workerId}/logs`, { params: { offset, limit } });
 
 export const getSystemStats = () => api.get('/system/stats');
 export const getRcloneStats = () => api.get('/system/rclone-stats');

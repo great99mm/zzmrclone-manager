@@ -3,6 +3,7 @@
 package quota
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -95,6 +96,202 @@ func (s Scanner) ScanWithOutcome(root string, minAge time.Duration) (ScanOutcome
 	}
 	sort.Slice(validated, func(i, j int) bool { return validated[i].RelativePath < validated[j].RelativePath })
 	return ScanOutcome{Snapshots: validated, NextEligibleAt: nextEligibleAt}, nil
+}
+
+// Stream traverses a source without accumulating snapshots. The consumer is
+// called from the traversal goroutine and may persist each bounded batch. The
+// final root identity checks ensure a pathname replacement cannot be accepted
+// as a successful analysis.
+func (s Scanner) Stream(root string, minAge time.Duration, consumer SnapshotConsumer) error {
+	return s.StreamContext(context.Background(), root, minAge, consumer)
+}
+
+// StreamContext is the fail-closed bounded traversal used by manual analysis.
+// Unlike the legacy Scan path, a candidate that disappears or changes between
+// observations aborts the stream instead of being silently omitted.
+func (s Scanner) StreamContext(ctx context.Context, root string, minAge time.Duration, consumer SnapshotConsumer) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if consumer == nil {
+		return fmt.Errorf("snapshot consumer is required")
+	}
+	if !filepath.IsAbs(root) {
+		return fmt.Errorf("source root must be absolute: %q", root)
+	}
+	rootFile, identity, err := openRoot(root)
+	if err != nil {
+		return err
+	}
+	defer rootFile.Close()
+
+	now := time.Now
+	if s.Now != nil {
+		now = s.Now
+	}
+	sleep := time.Sleep
+	if s.Sleep != nil {
+		sleep = s.Sleep
+	}
+	settle := s.SettleInterval
+	if settle < 0 {
+		settle = 0
+	}
+	if err := s.streamDirectory(ctx, rootFile, "", minAge, now, sleep, settle, identity, consumer); err != nil {
+		return err
+	}
+	if s.BeforeFinalValidation != nil {
+		s.BeforeFinalValidation()
+	}
+	boundRoot, boundIdentity, err := openRoot(root)
+	if err != nil {
+		return fmt.Errorf("source root identity drift during stream: %w", err)
+	}
+	_ = boundRoot.Close()
+	if boundIdentity != identity {
+		return fmt.Errorf("source root identity drift during stream")
+	}
+	finalRoot, finalIdentity, err := openRoot(root)
+	if err != nil {
+		return fmt.Errorf("source root identity drift during stream: %w", err)
+	}
+	_ = finalRoot.Close()
+	if finalIdentity != identity {
+		return fmt.Errorf("source root identity drift during stream")
+	}
+	return nil
+}
+
+func (s Scanner) streamDirectory(ctx context.Context, dir *os.File, prefix string, minAge time.Duration, now func() time.Time, sleep func(time.Duration), settle time.Duration, identity rootIdentity, consumer SnapshotConsumer) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		entries, readErr := dir.ReadDir(directoryBatchSize)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return fmt.Errorf("read directory %q: %w", prefix, readErr)
+		}
+		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if prefix == "" && (entry.Name() == ".rclone-manager-stage" || entry.Name() == ".rclone-manager-move") {
+				continue
+			}
+			relative := entry.Name()
+			if prefix != "" {
+				relative = filepath.Join(prefix, entry.Name())
+			}
+			if err := ValidateRelativePath(filepath.ToSlash(relative)); err != nil {
+				return err
+			}
+			childDir, kind, err := openDirectoryStrict(int(dir.Fd()), entry.Name())
+			if err != nil {
+				return err
+			}
+			if kind == directoryObject {
+				err = s.streamDirectory(ctx, childDir, relative, minAge, now, sleep, settle, identity, consumer)
+				_ = childDir.Close()
+				if err != nil {
+					return err
+				}
+				continue
+			}
+			if kind != regularCandidate {
+				continue
+			}
+			first, ok, err := s.observeStrict(int(dir.Fd()), entry.Name(), relative, 1)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				continue
+			}
+			if settle > 0 {
+				sleep(settle)
+			}
+			second, ok, err := s.observeStrict(int(dir.Fd()), entry.Name(), relative, 2)
+			if err != nil {
+				return err
+			}
+			if !ok || first != second {
+				return fmt.Errorf("source file %q changed during analysis", relative)
+			}
+			if now().Sub(time.Unix(0, second.mtimeNS)) < minAge {
+				continue
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := consumer(LocalSnapshot{RelativePath: filepath.ToSlash(relative), SizeBytes: second.size, MtimeNS: second.mtimeNS, Device: second.device, Inode: second.inode, RootDevice: identity.device, RootInode: identity.inode, SnapshotKey: makeSnapshotKey(filepath.ToSlash(relative), second)}); err != nil {
+				return err
+			}
+		}
+		if len(entries) == 0 || errors.Is(readErr, io.EOF) {
+			return nil
+		}
+	}
+}
+
+func openDirectoryStrict(parentFD int, name string) (*os.File, int, error) {
+	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err == nil {
+		var stat unix.Stat_t
+		if statErr := unix.Fstat(fd, &stat); statErr != nil {
+			_ = unix.Close(fd)
+			return nil, invalidObject, fmt.Errorf("stat directory %q: %w", name, statErr)
+		}
+		if stat.Mode&unix.S_IFMT == unix.S_IFDIR {
+			directory := os.NewFile(uintptr(fd), "manual-scanner-directory")
+			if directory == nil {
+				_ = unix.Close(fd)
+				return nil, invalidObject, fmt.Errorf("create directory %q", name)
+			}
+			return directory, directoryObject, nil
+		}
+		_ = unix.Close(fd)
+		return nil, invalidObject, nil
+	}
+	if !skippableLookupError(err) {
+		return nil, invalidObject, fmt.Errorf("open child %q: %w", name, err)
+	}
+	fd, err = unix.Openat(parentFD, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, invalidObject, fmt.Errorf("manual source candidate %q disappeared or is unreadable: %w", name, err)
+	}
+	var stat unix.Stat_t
+	if err = unix.Fstat(fd, &stat); err != nil {
+		_ = unix.Close(fd)
+		return nil, invalidObject, fmt.Errorf("stat source candidate %q: %w", name, err)
+	}
+	_ = unix.Close(fd)
+	switch stat.Mode & unix.S_IFMT {
+	case unix.S_IFREG:
+		return nil, regularCandidate, nil
+	case unix.S_IFLNK:
+		return nil, invalidObject, fmt.Errorf("source candidate %q is a symlink", name)
+	default:
+		return nil, invalidObject, nil
+	}
+}
+
+func (s Scanner) observeStrict(parentFD int, name, relative string, observation int) (fileMetadata, bool, error) {
+	if s.LookupHook != nil {
+		s.LookupHook(relative, observation)
+	}
+	fd, err := unix.Openat(parentFD, name, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fileMetadata{}, false, fmt.Errorf("source file %q disappeared or is unreadable: %w", relative, err)
+	}
+	defer unix.Close(fd)
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return fileMetadata{}, false, fmt.Errorf("observe file %q: %w", relative, err)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
+		return fileMetadata{}, false, fmt.Errorf("source file %q is no longer regular", relative)
+	}
+	return fileMetadata{size: stat.Size, mtimeNS: stat.Mtim.Sec*1e9 + stat.Mtim.Nsec, device: int64(stat.Dev), inode: int64(stat.Ino)}, true, nil
 }
 
 func openRoot(root string) (*os.File, rootIdentity, error) {

@@ -7,7 +7,10 @@ import (
 	"os"
 )
 
-type SourceRootHandle struct{}
+type SourceRootHandle struct {
+	Device int64
+	Inode  int64
+}
 type StageHandle struct{}
 type MoveQuarantine struct{}
 

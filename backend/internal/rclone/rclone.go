@@ -3,6 +3,7 @@ package rclone
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,6 +49,12 @@ var rotationHTTPStatusRegex = regexp.MustCompile(`\b(403|429)\b`)
 
 var errTaskStopped = errors.New("task stopped")
 
+var ErrManualTaskLaunch = errors.New("manual tasks cannot launch legacy transfers")
+
+type LaunchExclusive interface {
+	WithTaskLaunchExclusive(context.Context, uint, func(*models.Task) error) error
+}
+
 type runningTask struct {
 	cmd        *exec.Cmd
 	generation uint64
@@ -63,6 +70,7 @@ type Executor struct {
 	mu                sync.RWMutex
 	hub               *websocket.Hub
 	db                *gorm.DB
+	LaunchFence       LaunchExclusive
 	logQueue          chan *models.OutputLog // async log persistence queue
 	recentRefresh     map[string]time.Time   // dir -> last refresh time (dedup)
 	refreshMu         sync.Mutex
@@ -319,6 +327,43 @@ func (e *Executor) ExecuteMove(task *models.Task) error {
 }
 
 func (e *Executor) ExecuteMoveWithCallback(task *models.Task, callback CompletionCallback) error {
+	if task == nil {
+		return errors.New("task is required")
+	}
+	if e.LaunchFence != nil {
+		var launchErr error
+		err := e.LaunchFence.WithTaskLaunchExclusive(context.Background(), task.ID, func(current *models.Task) error {
+			if current.TaskType == models.TaskTypeManual {
+				launchErr = ErrManualTaskLaunch
+				return launchErr
+			}
+			launchErr = e.executeMoveWithCallback(task, callback)
+			return launchErr
+		})
+		if err != nil {
+			return err
+		}
+		return launchErr
+	}
+	return e.executeMoveWithCallback(task, callback)
+}
+
+func (e *Executor) executeMoveWithCallback(task *models.Task, callback CompletionCallback) error {
+	if task == nil {
+		return errors.New("task is required")
+	}
+	if task.TaskType == models.TaskTypeManual {
+		return ErrManualTaskLaunch
+	}
+	if e.db != nil {
+		var current models.Task
+		if err := e.db.First(&current, task.ID).Error; err != nil {
+			return err
+		}
+		if current.TaskType == models.TaskTypeManual {
+			return ErrManualTaskLaunch
+		}
+	}
 	if strings.TrimSpace(task.TaskType) == "rotation" {
 		strategy := strings.TrimSpace(task.RotationStrategy)
 		if strategy == "" {
@@ -327,7 +372,7 @@ func (e *Executor) ExecuteMoveWithCallback(task *models.Task, callback Completio
 		if strategy != "legacy_error" {
 			return fmt.Errorf("rotation strategy %q is unsupported or not yet enabled", strategy)
 		}
-		return e.ExecuteRotationWithCallback(task, callback)
+		return e.executeRotationWithCallback(task, callback)
 	}
 
 	if e.IsRunning(task.ID) {
@@ -503,6 +548,43 @@ func (e *Executor) ExecuteRotation(task *models.Task) error {
 }
 
 func (e *Executor) ExecuteRotationWithCallback(task *models.Task, callback CompletionCallback) error {
+	if task == nil {
+		return errors.New("task is required")
+	}
+	if e.LaunchFence != nil {
+		var launchErr error
+		err := e.LaunchFence.WithTaskLaunchExclusive(context.Background(), task.ID, func(current *models.Task) error {
+			if current.TaskType == models.TaskTypeManual {
+				launchErr = ErrManualTaskLaunch
+				return launchErr
+			}
+			launchErr = e.executeRotationWithCallback(task, callback)
+			return launchErr
+		})
+		if err != nil {
+			return err
+		}
+		return launchErr
+	}
+	return e.executeRotationWithCallback(task, callback)
+}
+
+func (e *Executor) executeRotationWithCallback(task *models.Task, callback CompletionCallback) error {
+	if task == nil {
+		return errors.New("task is required")
+	}
+	if task.TaskType == models.TaskTypeManual {
+		return ErrManualTaskLaunch
+	}
+	if e.db != nil {
+		var current models.Task
+		if err := e.db.First(&current, task.ID).Error; err != nil {
+			return err
+		}
+		if current.TaskType == models.TaskTypeManual {
+			return ErrManualTaskLaunch
+		}
+	}
 	if e.IsRunning(task.ID) {
 		return fmt.Errorf("task %d is already running", task.ID)
 	}
@@ -947,6 +1029,43 @@ func escapeJSON(value string) string {
 }
 
 func (e *Executor) ExecuteDedupe(task *models.Task) error {
+	if task == nil {
+		return errors.New("task is required")
+	}
+	if e.LaunchFence != nil {
+		var launchErr error
+		err := e.LaunchFence.WithTaskLaunchExclusive(context.Background(), task.ID, func(current *models.Task) error {
+			if current.TaskType == models.TaskTypeManual {
+				launchErr = ErrManualTaskLaunch
+				return launchErr
+			}
+			launchErr = e.executeDedupe(task)
+			return launchErr
+		})
+		if err != nil {
+			return err
+		}
+		return launchErr
+	}
+	return e.executeDedupe(task)
+}
+
+func (e *Executor) executeDedupe(task *models.Task) error {
+	if task == nil {
+		return errors.New("task is required")
+	}
+	if task.TaskType == models.TaskTypeManual {
+		return ErrManualTaskLaunch
+	}
+	if e.db != nil {
+		var current models.Task
+		if err := e.db.First(&current, task.ID).Error; err != nil {
+			return err
+		}
+		if current.TaskType == models.TaskTypeManual {
+			return ErrManualTaskLaunch
+		}
+	}
 	// Dedupe only makes sense for remote destinations
 	if task.DestType == "local" {
 		return nil

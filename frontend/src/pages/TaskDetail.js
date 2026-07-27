@@ -21,10 +21,11 @@ import {
   ChevronDown,
   Network
 } from 'lucide-react';
-import { getTask, getTaskStatus, getProactiveStatus, resolveProactiveBatch, manualResetQuotaAccount, startTask, stopTask, pauseTask, cancelTask, dedupeTask, startProactiveManualMerge, closeProactiveUnknownMaintenance, deleteTask } from '../services/api';
+import { getTask, getTaskStatus, startTask, stopTask, pauseTask, cancelTask, dedupeTask, deleteTask } from '../services/api';
 import { createWebSocket } from '../services/api';
 import toast from 'react-hot-toast';
 import { QuotaAccountBar, QuotaExhaustedNotice } from '../components/QuotaAccountBar';
+import ManualAllocationWorkspace from '../components/ManualAllocationWorkspace';
 
 const parseRotationRemotes = (value) => {
   try {
@@ -50,11 +51,16 @@ const TaskDetail = () => {
   const [task, setTask] = useState(null);
   const [status, setStatus] = useState({ status: 'idle', running: false });
   const [qbStatus, setQbStatus] = useState(null);
-  const [proactiveStatus, setProactiveStatus] = useState(null);
-  const [proactiveStatusLoading, setProactiveStatusLoading] = useState(false);
-  const [proactiveStatusError, setProactiveStatusError] = useState('');
-  const [resolutionState, setResolutionState] = useState({ batchId: null, action: '', loading: false, error: '', success: '' });
-  const [legacyRecoveryState, setLegacyRecoveryState] = useState({ loading: false, error: '' });
+  const proactiveStatus = null;
+  const proactiveStatusLoading = false;
+  const proactiveStatusError = '';
+  const resolutionState = { batchId: null, action: '', loading: false, error: '', success: '' };
+  const loadProactiveStatus = async () => false;
+  const handleProactiveManualMerge = () => {};
+  const handleManualReset = async () => {};
+  const handleResolveBatch = () => {};
+  const legacyRecoveryState = { loading: false, error: '' };
+  const handleLegacyRecovery = () => {};
   const [loading, setLoading] = useState(true);
   const [fileProgresses, setFileProgresses] = useState({});
 	const [pauseMenuOpen, setPauseMenuOpen] = useState(false);
@@ -131,52 +137,6 @@ const TaskDetail = () => {
     }
   }, [id]);
 
-  const loadProactiveStatus = useCallback(async () => {
-    setProactiveStatusLoading(true);
-    setProactiveStatusError('');
-    try {
-      const res = await getProactiveStatus(id);
-      setProactiveStatus(res.data);
-      return true;
-    } catch (err) {
-      setProactiveStatusError(err.response?.data?.error || '主动额度状态暂时无法获取');
-      return false;
-    } finally {
-      setProactiveStatusLoading(false);
-    }
-  }, [id]);
-
-  const handleResolveBatch = useCallback(async (batchId, action, resolution) => {
-    const actionText = action === 'accept_moved' ? '确认本地文件已由 rclone 移动完成' : '恢复本地文件并释放额度';
-    if (!window.confirm(`${actionText}？此操作会改变批次状态。`)) return;
-    setResolutionState({ batchId, fileId: resolution.fileId, action, loading: true, error: '', success: '' });
-    try {
-      await resolveProactiveBatch(id, {
-        batch_id: batchId,
-        file_id: resolution.fileId,
-        action,
-        expected_state: resolution.expectedState,
-        expected_updated_at: resolution.expectedUpdatedAt,
-      });
-      setResolutionState({ batchId, fileId: resolution.fileId, action, loading: false, error: '', success: '处理已提交，状态正在刷新。' });
-      await loadProactiveStatus();
-      await loadStatus();
-    } catch (err) {
-      if (err.response?.status === 409) {
-        await loadProactiveStatus();
-        await loadStatus();
-        setResolutionState({ batchId, fileId: resolution.fileId, action, loading: false, error: '批次状态已变化，已刷新最新状态。请重新查看该批次后再处理。', success: '' });
-      } else {
-        setResolutionState({ batchId, fileId: resolution.fileId, action, loading: false, error: err.response?.data?.error || '处理失败，请稍后重试。', success: '' });
-      }
-    }
-  }, [id, loadProactiveStatus, loadStatus]);
-
-  const handleManualReset = useCallback(async (accountId) => {
-    await manualResetQuotaAccount(id, accountId);
-    await loadProactiveStatus();
-  }, [id, loadProactiveStatus]);
-
   useEffect(() => {
     loadTask();
     loadStatus();
@@ -236,21 +196,6 @@ const TaskDetail = () => {
     };
   }, [id, cleanupStaleProgresses, parseLogProgress, loadTask, loadStatus]);
 
-  useEffect(() => {
-    if (!task || task.task_type !== 'rotation' || task.rotation_strategy !== 'proactive_quota') return undefined;
-    let active = true;
-    let timer;
-    const poll = async () => {
-      const succeeded = await loadProactiveStatus();
-      if (active) timer = setTimeout(poll, succeeded ? 2000 : 10000);
-    };
-    poll();
-    return () => {
-      active = false;
-      clearTimeout(timer);
-    };
-  }, [task?.task_type, task?.rotation_strategy, loadProactiveStatus]);
-
   const handleStart = async () => {
     try {
       await startTask(id);
@@ -307,48 +252,6 @@ const TaskDetail = () => {
     }
   };
 
-  const handleProactiveManualMerge = async () => {
-    if (!window.confirm('确定开始合并吗？这会在目标位置执行去重，可能改变远端文件。')) return;
-    try {
-      await startProactiveManualMerge(id);
-      toast.success('合并已提交，状态正在刷新。');
-      await loadProactiveStatus();
-    } catch (err) {
-      if (err.response?.status === 409) {
-        await loadProactiveStatus();
-        toast.error('当前无法开始合并，已刷新最新状态。');
-      } else {
-        toast.error(err.response?.data?.error || '开始合并失败');
-      }
-    }
-  };
-
-  const handleLegacyRecovery = async (recovery) => {
-    if (!recovery?.epoch_id || recovery.dedupe_state !== 'unknown' || !recovery.process_identity_available) return;
-    if (!window.confirm('确认相关处理已经停止，并关闭这条待确认状态吗？')) return;
-    setLegacyRecoveryState({ loading: true, error: '' });
-    try {
-      await closeProactiveUnknownMaintenance(recovery.epoch_id, {
-        reason: recovery.reason,
-        expected_state: 'unknown',
-        expected_revision: recovery.revision,
-      });
-      toast.success('恢复已完成，状态正在刷新。');
-      await loadProactiveStatus();
-    } catch (err) {
-      if (err.response?.status === 409) {
-        await loadProactiveStatus();
-        toast.error('状态已变化，已刷新最新状态。');
-      } else {
-        const message = '恢复失败，请稍后重试。';
-        setLegacyRecoveryState({ loading: false, error: message });
-        toast.error(message);
-        return;
-      }
-    }
-    setLegacyRecoveryState({ loading: false, error: '' });
-  };
-
   const handleDelete = async () => {
     if (!window.confirm('确定要删除这个任务吗？此操作不可恢复。')) return;
     try {
@@ -369,7 +272,7 @@ const TaskDetail = () => {
   }
 
   const isQuickTask = !!task.is_quick_task;
-  const isProactiveQuotaTask = task.task_type === 'rotation' && task.rotation_strategy === 'proactive_quota';
+  const isManualTask = task.task_type === 'manual';
   const canContinueQuickTask = isQuickTask && (status.status === 'paused' || status.status === 'error');
   const rotationRemotes = parseRotationRemotes(task.rotation_remotes);
   const rotationCurrentRemote = rotationRemotes[task.rotation_current_index || 0] || rotationRemotes[0] || '-';
@@ -437,10 +340,15 @@ const TaskDetail = () => {
                 </>
               ) : null}
             </>
+          ) : isManualTask ? (
+            <span className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-indigo-50 text-indigo-700 rounded-lg font-medium text-sm md:text-base" title="手动分配任务需要在下方工作区操作">
+              <ShieldCheck className="w-3.5 h-3.5 md:w-4 md:h-4" />
+              <span>手动分配</span>
+            </span>
           ) : (
             <>
               {status.running ? (
-                isProactiveQuotaTask ? (
+                false ? (
                   <div className="relative inline-flex">
                     <button
                       onClick={() => handlePause('after_current')}
@@ -483,7 +391,7 @@ const TaskDetail = () => {
                   <span className="hidden xs:inline">启动</span>
                 </button>
               )}
-              {isProactiveQuotaTask ? (
+              {false ? (
                 proactiveStatus?.maintenance?.manual_merge_available && (
                   <button
                     onClick={handleProactiveManualMerge}
@@ -546,10 +454,10 @@ const TaskDetail = () => {
         <InfoCard
           icon={CheckCircle2}
           label="自动化"
-          value={task.qb_enabled && !isProactiveQuotaTask ? 'qB完成触发' : (task.watch_enabled ? '监控' : '手动')}
-          sub={task.qb_enabled && !isProactiveQuotaTask ? `轮询 ${task.qb_poll_interval || 60}秒` : (task.schedule_enabled ? `定时 ${task.schedule_interval}分` : '无定时')}
+          value={task.qb_enabled ? 'qB完成触发' : (task.watch_enabled ? '监控' : '手动')}
+          sub={task.qb_enabled ? `轮询 ${task.qb_poll_interval || 60}秒` : (task.schedule_enabled ? `定时 ${task.schedule_interval}分` : '无定时')}
         />
-        {task.qb_enabled && !isProactiveQuotaTask && (
+        {task.qb_enabled && (
           <InfoCard
             icon={CheckCircle2}
             label="qBittorrent"
@@ -580,9 +488,11 @@ const TaskDetail = () => {
         )}
       </div>
 
-      {task.qb_enabled && !isProactiveQuotaTask && <QBQueuePanel status={qbStatus} />}
+      {isManualTask && <ManualAllocationWorkspace taskId={id} task={task} />}
 
-      {task.task_type === 'rotation' && task.rotation_strategy === 'proactive_quota' && (
+      {task.qb_enabled && !isManualTask && <QBQueuePanel status={qbStatus} />}
+
+      {false && (
         <ProactiveQuotaPanel
           status={proactiveStatus}
           loading={proactiveStatusLoading}
@@ -611,7 +521,7 @@ const TaskDetail = () => {
           </div>
         </div>
         <div className="p-4 md:p-6 space-y-4">
-          {isProactiveQuotaTask && proactiveStatus ? (
+          {false && proactiveStatus ? (
             (() => {
               const running = (proactiveStatus.batches || []).filter(b => b.state === 'running' && b.process?.active === true);
               if (running.length === 0) {
@@ -904,7 +814,7 @@ const ProactiveQuotaPanel = ({ status, loading, error, onRetry, taskId, onManual
       <section className="bg-white rounded-xl shadow-sm border border-emerald-200 p-6" aria-live="polite" aria-busy="true">
         <div className="flex items-center gap-3 text-sm text-gray-600">
           <div className="h-4 w-4 rounded-full border-2 border-emerald-600 border-t-transparent animate-spin" />
-          正在获取主动额度账号池状态...
+          正在获取账号池状态...
         </div>
       </section>
     );
@@ -915,7 +825,7 @@ const ProactiveQuotaPanel = ({ status, loading, error, onRetry, taskId, onManual
       <section className="bg-white rounded-xl shadow-sm border border-red-200 p-6" role="alert">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
-            <h2 className="font-semibold text-gray-900">主动额度账号池状态不可用</h2>
+            <h2 className="font-semibold text-gray-900">账号池状态不可用</h2>
             <p className="text-sm text-red-700 mt-1">{error}</p>
           </div>
           <button type="button" onClick={onRetry} className="inline-flex items-center justify-center px-3 py-2 min-h-10 bg-red-50 text-red-700 rounded-lg hover:bg-red-100 focus:outline-none focus:ring-2 focus:ring-red-500 font-medium text-sm">
@@ -958,7 +868,7 @@ const ProactiveQuotaPanel = ({ status, loading, error, onRetry, taskId, onManual
         <div className="flex items-start gap-2">
           <ShieldCheck className="w-5 h-5 text-emerald-600 mt-0.5" />
           <div>
-            <h2 id="proactive-quota-heading" className="font-semibold text-gray-900">主动额度账号池</h2>
+            <h2 id="proactive-quota-heading" className="font-semibold text-gray-900">账号池</h2>
             <p className="text-xs text-gray-600 mt-0.5">{TRANSFER_MODE_LABELS[transferMode] || transferMode}模式 · {transferMode === 'move' ? '完成以本地 / rclone 证据为准' : '完成后远端已核验'}</p>
           </div>
         </div>

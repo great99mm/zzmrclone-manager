@@ -6,50 +6,17 @@ import (
 	"testing"
 )
 
-func TestValidateProactiveQuotaContract(t *testing.T) {
-	base := models.Task{TaskType: "rotation", RotationStrategy: "proactive_quota", SourceType: "local", SourceDir: "/src", DestType: "remote", RemoteName: "drive", RemoteDir: "dst", TransferMode: models.TransferModeCopy, RotationRemotes: "[\"drive\"]", RotationQuotaLimitBytes: models.DefaultRotationQuotaLimitBytes}
-	if err := validateAndNormalizeTask(&base); err != nil {
-		t.Fatalf("valid proactive task rejected: %v", err)
-	}
-	for name, mutate := range map[string]func(*models.Task){"remote source": func(x *models.Task) { x.SourceType = "remote" }, "move": func(x *models.Task) { x.TransferMode = "move" }, "sync": func(x *models.Task) { x.TransferMode = "sync" }, "no remotes": func(x *models.Task) { x.RotationRemotes = "[]" }, "budget": func(x *models.Task) { x.RotationQuotaLimitBytes = models.DefaultRotationQuotaLimitBytes + 1 }, "batch files": func(x *models.Task) { x.RotationBatchFiles = 129 }, "negative batch files": func(x *models.Task) { x.RotationBatchFiles = -1 }, "concurrent batches": func(x *models.Task) { x.RotationConcurrentBatches = 2 }} {
-		candidate := base
-		mutate(&candidate)
-		if err := validateAndNormalizeTask(&candidate); err == nil {
-			t.Fatalf("%s accepted", name)
-		}
+func TestValidateProactiveQuotaStrategyIsDisabled(t *testing.T) {
+	task := models.Task{TaskType: "rotation", RotationStrategy: "proactive_quota"}
+	if err := validateAndNormalizeTask(&task); err == nil {
+		t.Fatal("proactive_quota strategy was accepted")
 	}
 }
 
-func TestProactiveValidationPreservesQBAndHonorsMoveGate(t *testing.T) {
-	previousDB, previousCfg := db, cfgGlobal
-	db = proactiveStatusTestDB(t)
-	cfgGlobal = nil
-	defer func() { db, cfgGlobal = previousDB, previousCfg }()
-	if proactiveMoveEnabled() {
-		t.Fatal("missing proactive move setting unexpectedly enabled the feature")
-	}
-
-	task := models.Task{TaskType: "rotation", RotationStrategy: "proactive_quota", SourceType: "local", SourceDir: "/src", DestType: "remote", RemoteName: "drive", RemoteDir: "dst", TransferMode: models.TransferModeCopy, RotationRemotes: `["drive"]`, QBEnabled: true, QBURL: "http://qb", QBUsername: "user", QBPassword: "secret", QBPollInterval: 30, QBDeleteFiles: true, RotationQuotaLimitBytes: models.DefaultRotationQuotaLimitBytes}
-	if err := validateAndNormalizeTask(&task); err != nil {
-		t.Fatal(err)
-	}
-	if !task.QBEnabled || task.QBURL != "http://qb" || task.QBUsername != "user" || task.QBPassword != "secret" || task.QBPollInterval != 30 || !task.QBDeleteFiles {
-		t.Fatalf("proactive qB config was not preserved: %#v", task)
-	}
-
-	task.TransferMode = models.TransferModeMove
+func TestProactiveQuotaStrategyIsRejectedBeforeTaskSpecificValidation(t *testing.T) {
+	task := models.Task{TaskType: "rotation", RotationStrategy: "proactive_quota", TransferMode: "sync", QBEnabled: true}
 	if err := validateAndNormalizeTask(&task); err == nil {
-		t.Fatal("move accepted while feature gate is disabled")
-	}
-	if err := db.Create(&models.SystemSetting{Key: models.ProactiveMoveSettingKey, Value: "true"}).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := validateAndNormalizeTask(&task); err != nil {
-		t.Fatalf("move rejected with enabled gate: %v", err)
-	}
-	task.TransferMode = "sync"
-	if err := validateAndNormalizeTask(&task); err == nil {
-		t.Fatal("sync accepted for proactive task")
+		t.Fatal("proactive_quota strategy was accepted")
 	}
 }
 
@@ -57,6 +24,16 @@ func TestLegacyRotationQBRemainsRejected(t *testing.T) {
 	task := models.Task{TaskType: "rotation", RotationStrategy: "legacy_error", QBEnabled: true}
 	if err := validateAndNormalizeTask(&task); err == nil {
 		t.Fatal("legacy rotation qB was accepted")
+	}
+}
+
+func TestManualValidationClearsAllLegacyRegistrationFlags(t *testing.T) {
+	task := models.Task{TaskType: models.TaskTypeManual, ManualStrategy: models.ManualStrategyAllocation, SourceType: "local", SourceDir: "/src", DestType: "remote", RemoteDir: "/dest", TransferMode: models.TransferModeCopy, WatchEnabled: true, ScheduleEnabled: true, QBEnabled: true, AutoDedupe: true}
+	if err := validateAndNormalizeTask(&task); err != nil {
+		t.Fatal(err)
+	}
+	if task.WatchEnabled || task.ScheduleEnabled || task.QBEnabled || task.AutoDedupe {
+		t.Fatalf("manual task retained legacy registration flags: %#v", task)
 	}
 }
 
@@ -112,8 +89,8 @@ func TestProactiveMoveGateUpgradesLegacyDefaultFalseOnce(t *testing.T) {
 	}
 }
 
-func TestValidateProactiveQuotaPreservesZeroCapacity(t *testing.T) {
-	task := models.Task{TaskType: "rotation", RotationStrategy: "proactive_quota", SourceType: "local", SourceDir: "/src", DestType: "remote", RemoteName: "drive", RemoteDir: "dst", TransferMode: models.TransferModeCopy, RotationRemotes: `["drive"]`, RotationQuotaLimitBytes: 0}
+func TestValidateLegacyRotationPreservesZeroCapacity(t *testing.T) {
+	task := models.Task{TaskType: "rotation", RotationStrategy: "legacy_error", SourceType: "local", SourceDir: "/src", DestType: "remote", RemoteName: "drive", RemoteDir: "dst", TransferMode: models.TransferModeCopy, RotationRemotes: `["drive"]`, RotationQuotaLimitBytes: 0}
 	if err := validateAndNormalizeTask(&task); err != nil {
 		t.Fatal(err)
 	}

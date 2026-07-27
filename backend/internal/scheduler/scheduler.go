@@ -42,6 +42,13 @@ func (s *Scheduler) Stop() {
 }
 
 func (s *Scheduler) AddTask(task *models.Task) error {
+	if task == nil {
+		return nil
+	}
+	if task.TaskType == models.TaskTypeManual {
+		s.RemoveTask(task.ID)
+		return nil
+	}
 	if !task.ScheduleEnabled || task.ScheduleInterval <= 0 {
 		return nil
 	}

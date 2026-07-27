@@ -8,13 +8,10 @@ import {
   Settings2,
   Clock,
   X,
-  Trash2,
   Folder,
   ChevronRight,
   Home,
   HardDrive,
-  ShieldCheck,
-  ListChecks
 } from 'lucide-react';
 import { createTask, updateTask, getTask, getRemotes, listRemoteDir } from '../services/api';
 import toast from 'react-hot-toast';
@@ -33,11 +30,6 @@ const TaskForm = () => {
     remote_name: '',
     remote_dir: '',
     rotation_remotes: '[]',
-    rotation_strategy: 'proactive_quota',
-    rotation_quota_limit_bytes: 700 * 1000 * 1000 * 1000,
-    rotation_quota_keys: '{}',
-    rotation_batch_files: 5,
-    rotation_concurrent_batches: 1,
     rotation_current_index: 0,
     rotation_current_round: 0,
     rotation_paused_until: null,
@@ -66,7 +58,6 @@ const TaskForm = () => {
 
   const [loading, setLoading] = useState(isEdit);
   const [saving, setSaving] = useState(false);
-  const [legacyRotationValues, setLegacyRotationValues] = useState(null);
 
 
 
@@ -80,7 +71,7 @@ const TaskForm = () => {
   const [browserBreadcrumbs, setBrowserBreadcrumbs] = useState([{ name: '/', path: '/' }]);
 
   const isRotationTask = form.task_type === 'rotation';
-  const isProactiveQuota = isRotationTask && form.rotation_strategy === 'proactive_quota';
+  const isManualTask = form.task_type === 'manual';
 
   const parseRotationRemotes = useCallback((value = form.rotation_remotes) => {
     try {
@@ -96,10 +87,9 @@ const TaskForm = () => {
   const rotationLogicText = useMemo(() => {
     if (!isRotationTask) return null;
     const remotesText = selectedRotationRemotes.length > 0 ? selectedRotationRemotes.join(' → ') : 'A → B → C';
-    const sourceText = form.source_dir || '/x';
     const destPath = form.remote_dir || '/目标目录';
     return `按 ${remotesText} 顺序上传到 ${destPath}，遇到额度限制自动切换下一账号。`;
-  }, [isRotationTask, selectedRotationRemotes, form.source_dir, form.remote_dir]);
+  }, [isRotationTask, selectedRotationRemotes, form.remote_dir]);
 
   const loadRemotes = useCallback(async () => {
     try {
@@ -116,14 +106,10 @@ const TaskForm = () => {
       setForm({
         ...res.data,
         task_type: res.data.task_type || 'normal',
+        source_type: res.data.task_type === 'manual' ? 'local' : res.data.source_type,
+        dest_type: res.data.task_type === 'manual' ? 'remote' : res.data.dest_type,
+        transfer_mode: res.data.task_type === 'manual' && res.data.transfer_mode === 'sync' ? 'copy' : res.data.transfer_mode,
         rotation_remotes: res.data.rotation_remotes || '[]',
-        rotation_strategy: res.data.rotation_strategy || 'proactive_quota',
-        rotation_quota_limit_bytes: res.data.rotation_quota_limit_bytes == null
-          ? 700 * 1000 * 1000 * 1000
-          : res.data.rotation_quota_limit_bytes,
-        rotation_quota_keys: res.data.rotation_quota_keys || '{}',
-        rotation_batch_files: res.data.rotation_batch_files || 5,
-        rotation_concurrent_batches: res.data.rotation_concurrent_batches || 1,
       });
     } catch (err) {
       toast.error('加载任务失败');
@@ -241,7 +227,7 @@ const TaskForm = () => {
 
 
 
-    if (form.qb_enabled) {
+    if (form.qb_enabled && !isManualTask) {
       if (form.source_type !== 'local') {
         toast.error('qBittorrent 完成触发只支持本地源目录');
         return;
@@ -254,19 +240,35 @@ const TaskForm = () => {
 
     let submitForm = { ...form };
 
-    if (isRotationTask) {
-      if (submitForm.rotation_strategy === 'proactive_quota') {
-        submitForm = {
-          ...submitForm,
-          source_type: 'local',
-          qb_enabled: false,
-          qb_url: '',
-          qb_username: '',
-          qb_password: '',
-          qb_poll_interval: 60,
-          qb_delete_files: false,
-        };
+    if (isManualTask) {
+      if (submitForm.source_type !== 'local') {
+        toast.error('手动分配任务只支持本地源目录');
+        return;
       }
+      if (submitForm.dest_type !== 'remote') {
+        toast.error('手动分配任务只支持云盘目标');
+        return;
+      }
+      if (submitForm.transfer_mode !== 'copy' && submitForm.transfer_mode !== 'move') {
+        toast.error('手动分配任务只支持复制或移动模式');
+        return;
+      }
+      submitForm = {
+        ...submitForm,
+        source_type: 'local',
+        dest_type: 'remote',
+        watch_enabled: false,
+        schedule_enabled: false,
+        qb_enabled: false,
+        qb_url: '',
+        qb_username: '',
+        qb_password: '',
+        qb_poll_interval: 60,
+        qb_delete_files: false,
+      };
+    }
+
+    if (isRotationTask) {
       if (submitForm.dest_type !== 'remote') {
         toast.error('调度轮转任务的目标必须是云盘');
         return;
@@ -276,45 +278,6 @@ const TaskForm = () => {
       if (normalizedRemotes.length === 0) {
         toast.error('调度轮转任务至少选择一个网盘');
         return;
-      }
-
-      if (submitForm.rotation_strategy === 'proactive_quota') {
-        if (submitForm.source_type !== 'local') {
-          toast.error('主动额度轮转只支持本地源目录');
-          return;
-        }
-        if (submitForm.transfer_mode !== 'copy' && submitForm.transfer_mode !== 'move') {
-          toast.error('主动额度轮转只支持复制或移动模式');
-          return;
-        }
-        const quotaLimitBytes = Number(submitForm.rotation_quota_limit_bytes);
-        const maxQuotaBytes = 700 * 1000 * 1000 * 1000;
-        if (!Number.isFinite(quotaLimitBytes) || quotaLimitBytes < 0 || quotaLimitBytes > maxQuotaBytes) {
-          toast.error('每账号滚动 24 小时本地安全额度必须在 0 到 700 GB 之间');
-          return;
-        }
-        const batchFiles = Number(submitForm.rotation_batch_files);
-        if (!Number.isInteger(batchFiles) || batchFiles < 1 || batchFiles > 128) {
-          toast.error('每批文件数必须在 1 到 128 之间');
-          return;
-        }
-        const concurrentBatches = Number(submitForm.rotation_concurrent_batches);
-        if (!Number.isInteger(concurrentBatches) || concurrentBatches < 1 || concurrentBatches > normalizedRemotes.length) {
-          toast.error('并行账号批次数必须在 1 到已选账号数之间');
-          return;
-        }
-        try {
-          const quotaKeys = JSON.parse(submitForm.rotation_quota_keys || '{}');
-          const selected = new Set(normalizedRemotes);
-          const unknown = Object.keys(quotaKeys).some(remote => !selected.has(remote));
-          if (unknown || Object.values(quotaKeys).some(key => typeof key !== 'string' || !key.trim())) {
-            toast.error('请检查账号池中的 quota key，且只能填写已选择的远程账号');
-            return;
-          }
-        } catch {
-          toast.error('账号池 quota key 配置无效');
-          return;
-        }
       }
 
       submitForm = {
@@ -350,11 +313,16 @@ const TaskForm = () => {
     setForm(prev => ({
       ...prev,
       task_type: taskType,
-      dest_type: taskType === 'rotation' ? 'remote' : prev.dest_type,
+      source_type: taskType === 'manual' ? 'local' : prev.source_type,
+      dest_type: taskType === 'rotation' || taskType === 'manual' ? 'remote' : prev.dest_type,
+      transfer_mode: taskType === 'manual' && prev.transfer_mode === 'sync' ? 'copy' : prev.transfer_mode,
       rotation_remotes: taskType === 'rotation' && parseRotationRemotes(prev.rotation_remotes).length === 0 && prev.remote_name
         ? JSON.stringify([prev.remote_name])
         : prev.rotation_remotes,
       remote_name: taskType === 'rotation' ? (parseRotationRemotes(prev.rotation_remotes)[0] || prev.remote_name) : prev.remote_name,
+      watch_enabled: taskType === 'manual' ? false : prev.watch_enabled,
+      schedule_enabled: taskType === 'manual' ? false : prev.schedule_enabled,
+      qb_enabled: taskType === 'manual' ? false : prev.qb_enabled,
     }));
   };
 
@@ -368,49 +336,7 @@ const TaskForm = () => {
       ...prev,
       rotation_remotes: JSON.stringify(next),
       remote_name: next[0] || '',
-      rotation_quota_keys: JSON.stringify(next.reduce((keys, item) => {
-        if (parseRotationQuotaKeys[item]) keys[item] = parseRotationQuotaKeys[item];
-        return keys;
-      }, {})),
     }));
-  };
-
-  const parseRotationQuotaKeys = useMemo(() => {
-    try {
-      const parsed = JSON.parse(form.rotation_quota_keys || '{}');
-      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-    } catch {
-      return {};
-    }
-  }, [form.rotation_quota_keys]);
-
-  const setRotationQuotaKey = (remote, value) => {
-    const next = { ...parseRotationQuotaKeys };
-    if (value.trim()) next[remote] = value;
-    else delete next[remote];
-    handleChange('rotation_quota_keys', JSON.stringify(next));
-  };
-
-  const handleRotationStrategyChange = (strategy) => {
-    setForm(prev => {
-      if (strategy === 'proactive_quota' && prev.rotation_strategy !== 'proactive_quota') {
-        setLegacyRotationValues({
-          source_type: prev.source_type,
-          source_dir: prev.source_dir,
-          transfer_mode: prev.transfer_mode,
-          qb_enabled: prev.qb_enabled,
-        });
-      }
-      if (strategy === 'legacy_error' && prev.rotation_strategy === 'proactive_quota' && legacyRotationValues) {
-        setLegacyRotationValues(null);
-        return { ...prev, rotation_strategy: strategy, ...legacyRotationValues };
-      }
-      return {
-        ...prev,
-        rotation_strategy: strategy,
-        transfer_mode: strategy === 'proactive_quota' ? 'copy' : prev.transfer_mode,
-      };
-    });
   };
 
 
@@ -438,7 +364,7 @@ const TaskForm = () => {
             {isEdit ? '编辑任务' : '新建任务'}
           </h1>
           <p className="text-gray-500 mt-1">
-            {isEdit ? '修改现有任务配置' : '配置新的 Rclone 自动化任务'}
+            {isEdit ? '修改现有任务配置' : (isManualTask ? '配置新的手动分配任务' : '配置新的 Rclone 自动化任务')}
           </p>
         </div>
       </div>
@@ -472,6 +398,7 @@ const TaskForm = () => {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                 {[
                   { value: 'normal', label: '普通任务', desc: '普通任务保持现在逻辑' },
+                  { value: 'manual', label: '手动分配任务', desc: '分析、分配并按账号独立运行' },
                   { value: 'rotation', label: '调度轮转任务', desc: '用于 Google Drive 多子账号顺序上传' },
                 ].map(type => (
                   <button
@@ -489,6 +416,12 @@ const TaskForm = () => {
               </div>
             </div>
 
+            {isManualTask && (
+              <div className="border-t pt-4 text-sm text-gray-600">
+                手动分配任务不会自动执行；保存后在任务详情中选择有序账号、分析文件并生成预览。
+              </div>
+            )}
+
             {/* Transfer mode */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">传输模式</label>
@@ -497,18 +430,18 @@ const TaskForm = () => {
                   { value: 'move', label: '移动', desc: '传输后删除源文件' },
                   { value: 'copy', label: '复制', desc: '保留源文件' },
                   { value: 'sync', label: '同步', desc: '目标与源一致，删除多余文件' },
-                ].filter(mode => !isProactiveQuota || mode.value !== 'sync').map(mode => (
+                ].filter(mode => !isManualTask || mode.value !== 'sync').map(mode => (
                   <button
                     key={mode.value}
                     type="button"
                     aria-pressed={form.transfer_mode === mode.value}
                     onClick={() => handleChange('transfer_mode', mode.value)}
-                    disabled={isProactiveQuota && mode.value === 'sync'}
+                    disabled={isManualTask && mode.value === 'sync'}
                     className={`flex-1 flex flex-col items-start p-3 rounded-lg border-2 text-left transition-colors ${
                       form.transfer_mode === mode.value
                         ? 'border-blue-500 bg-blue-50'
                         : 'border-gray-200 hover:border-gray-300'
-                    } ${isProactiveQuota && mode.value === 'sync' ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    } ${isManualTask && mode.value === 'sync' ? 'opacity-50 cursor-not-allowed' : ''}`}
                   >
                     <div className="font-medium text-sm">{mode.label}</div>
                     <div className="text-xs text-gray-500 mt-0.5">{mode.desc}</div>
@@ -526,9 +459,9 @@ const TaskForm = () => {
                     <button
                       type="button"
                       onClick={() => handleChange('source_type', 'local')}
-                      disabled={isRotationTask && form.rotation_strategy === 'proactive_quota'}
+                      disabled={isManualTask}
                       className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                        (isProactiveQuota ? 'local' : form.source_type) === 'local' ? 'bg-white shadow text-blue-600' : 'text-gray-500'
+                        (isManualTask ? 'local' : form.source_type) === 'local' ? 'bg-white shadow text-blue-600' : 'text-gray-500'
                       }`}
                     >
                       <HardDrive className="w-3 h-3 inline mr-1" />本地
@@ -536,9 +469,9 @@ const TaskForm = () => {
                     <button
                       type="button"
                       onClick={() => handleChange('source_type', 'remote')}
-                      disabled={isRotationTask && form.rotation_strategy === 'proactive_quota'}
+                      disabled={isManualTask}
                       className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-                        (isProactiveQuota ? 'local' : form.source_type) === 'remote' ? 'bg-white shadow text-blue-600' : 'text-gray-500'
+                        (isManualTask ? 'local' : form.source_type) === 'remote' ? 'bg-white shadow text-blue-600' : 'text-gray-500'
                       }`}
                     >
                       <Cloud className="w-3 h-3 inline mr-1" />云盘
@@ -547,7 +480,7 @@ const TaskForm = () => {
                 </div>
 
                 <div className="min-w-0">
-                  {(isProactiveQuota ? 'local' : form.source_type) === 'local' ? (
+                  {(isManualTask ? 'local' : form.source_type) === 'local' ? (
                     <div>
                       <div className="text-xs text-gray-500 mb-1">本地路径</div>
                       <input
@@ -630,17 +563,17 @@ const TaskForm = () => {
                     </button>
                     <button
                       type="button"
-                      onClick={() => !isRotationTask && handleChange('dest_type', 'local')}
-                      disabled={isRotationTask}
+                      onClick={() => !isRotationTask && !isManualTask && handleChange('dest_type', 'local')}
+                      disabled={isRotationTask || isManualTask}
                       className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
                         form.dest_type === 'local' ? 'bg-white shadow text-blue-600' : 'text-gray-500'
-                      } ${isRotationTask ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      } ${isRotationTask || isManualTask ? 'opacity-50 cursor-not-allowed' : ''}`}
                     >
                       <HardDrive className="w-3 h-3 inline mr-1" />本地
                     </button>
                   </div>
-                  {isRotationTask && (
-                    <p className="text-xs text-amber-600 mt-2">调度轮转任务目标固定为云盘，避免误配置到本地目录。</p>
+                  {(isRotationTask || isManualTask) && (
+                    <p className="text-xs text-amber-600 mt-2">{isManualTask ? '手动分配任务目标固定为云盘。' : '调度轮转任务目标固定为云盘，避免误配置到本地目录。'}</p>
                   )}
                 </div>
 
@@ -736,81 +669,6 @@ const TaskForm = () => {
               </div>
             </div>
 
-            {isRotationTask && (
-              <div className="border-t pt-4">
-                <div className="flex items-start gap-3 mb-3">
-                   <ShieldCheck className="w-5 h-5 text-emerald-600 mt-0.5" />
-                  <div>
-                    <h3 className="text-sm font-semibold text-gray-900">主动额度账号池</h3>
-                  </div>
-                </div>
-
-                {form.rotation_strategy === 'proactive_quota' && (
-                  <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50/70 p-4 space-y-4">
-                    <div className="flex items-start gap-2 text-sm text-emerald-900">
-                      <ListChecks className="w-4 h-4 mt-0.5 shrink-0" />
-                      <p>
-                        主动额度池的安全边界：每个账号滚动 24 小时最多 <strong>700 GB</strong>（十进制），达到本地上限后进入滚动冷却；Provider 阻断单独处理。
-                      </p>
-                    </div>
-
-                     <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
-                       <strong>重要：</strong>所有轮转网盘必须隶属到<b>同一个谷歌共享硬盘</b>。文件按顺序通过各服务账号上传到同一目标目录。
-                     </div>
-
-                      <div>
-                        <label htmlFor="rotation-quota-limit" className="block text-xs font-medium text-gray-700 mb-1">每账号滚动 24 小时本地安全额度</label>
-                      <div className="flex flex-col sm:flex-row sm:items-center gap-2 min-w-0">
-                        <input
-                          id="rotation-quota-limit"
-                          type="number"
-                          min="0"
-                          max="700"
-                          step="0.01"
-                          value={(Number(form.rotation_quota_limit_bytes || 0) / (1000 * 1000 * 1000)).toFixed(2).replace(/\.00$/, '')}
-                          onChange={(e) => {
-                            const gb = Number(e.target.value);
-                            handleChange('rotation_quota_limit_bytes', Number.isFinite(gb) ? Math.round(gb * 1000 * 1000 * 1000) : '');
-                          }}
-                          aria-describedby="quota-limit-help"
-                          className="w-36 h-10 px-3 border border-emerald-300 bg-white rounded-lg text-sm font-medium text-gray-800 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                        />
-                        <span className="text-sm text-gray-700">十进制 GB / 滚动 24 小时</span>
-                        <span id="quota-limit-help" className="text-xs text-gray-600">默认 700 GB（十进制）；可降低，不能超过 700 GB。达到本地上限后进入滚动冷却。</span>
-                        </div>
-                      </div>
-
-                      <div>
-                        <label htmlFor="rotation-batch-files" className="block text-xs font-medium text-gray-700 mb-1">每批文件数</label>
-                        <input
-                          id="rotation-batch-files"
-                          type="number"
-                          min="1"
-                          max="128"
-                          value={form.rotation_batch_files}
-                          onChange={(e) => handleChange('rotation_batch_files', parseInt(e.target.value, 10))}
-                          className="w-36 h-10 px-3 border border-emerald-300 bg-white rounded-lg text-sm font-medium text-gray-800 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                        />
-                      </div>
-
-                      <div>
-                        <label htmlFor="rotation-concurrent-batches" className="block text-xs font-medium text-gray-700 mb-1">并行账号批次</label>
-                        <input
-                          id="rotation-concurrent-batches"
-                          type="number"
-                          min="1"
-                          max={Math.max(1, selectedRotationRemotes.length)}
-                          value={form.rotation_concurrent_batches}
-                          onChange={(e) => handleChange('rotation_concurrent_batches', parseInt(e.target.value, 10))}
-                          className="w-36 h-10 px-3 border border-emerald-300 bg-white rounded-lg text-sm font-medium text-gray-800 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                        />
-                      </div>
-
-
-                  </div>
-                )}
-              </div>
-            )}
           </div>
         </div>
 
@@ -915,6 +773,8 @@ const TaskForm = () => {
           </div>
         </div>
 
+        {!isManualTask && (
+        <>
         {/* Automation */}
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
           <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
@@ -986,7 +846,7 @@ const TaskForm = () => {
               </label>
             </div>
 
-            {!isProactiveQuota && form.qb_enabled && (
+            {form.qb_enabled && (
               <div className="md:ml-4 p-4 border-l-2 border-green-200 space-y-4">
                 <p className="text-xs text-gray-500">
                   当前逻辑：轮询 qBittorrent，发现源目录下种子 100% 后只转移该种子的内容；多个完成种子会一个个排队处理；任务成功后删除该种子，默认不删除文件。
@@ -1060,6 +920,8 @@ const TaskForm = () => {
             </div>
           </div>
         </div>
+        </>
+        )}
 
 
 

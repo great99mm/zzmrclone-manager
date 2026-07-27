@@ -360,6 +360,25 @@ func TestProactiveTriggerFencedByActiveManualMaintenance(t *testing.T) {
 	}
 }
 
+func TestManualTaskNeverDispatchesLegacyRunner(t *testing.T) {
+	db := taskDB(t)
+	task := models.Task{Name: "manual", TaskType: models.TaskTypeManual, ManualStrategy: models.ManualStrategyAllocation, Enabled: true}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatal(err)
+	}
+	legacy := &fakeLegacy{}
+	d := New(db, legacy, nil)
+	if err := d.Trigger(context.Background(), task.ID, "schedule"); err != ErrManualTask {
+		t.Fatalf("manual trigger error = %v", err)
+	}
+	legacy.mu.Lock()
+	calls := len(legacy.calls)
+	legacy.mu.Unlock()
+	if calls != 0 {
+		t.Fatal("manual task reached legacy runner")
+	}
+}
+
 func TestProactiveTriggerIgnoresLedgerActiveWithoutRunOwner(t *testing.T) {
 	db := taskDB(t)
 	if err := db.AutoMigrate(&models.QuotaAccount{}, &models.RotationQuotaOversize{}, &models.RotationQuotaDirectoryAssignment{}, &models.RotationQuotaBatch{}, &models.RotationQuotaBatchFile{}, &models.QuotaReservation{}); err != nil {

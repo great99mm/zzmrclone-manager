@@ -22,11 +22,11 @@ import (
 	"rclone-manager/internal/auth"
 	"rclone-manager/internal/config"
 	"rclone-manager/internal/logger"
+	"rclone-manager/internal/manualtransfer"
 	"rclone-manager/internal/models"
 	mountsvc "rclone-manager/internal/mounts"
 	"rclone-manager/internal/proactive"
 	qbsvc "rclone-manager/internal/qbittorrent"
-	"rclone-manager/internal/quota"
 	"rclone-manager/internal/rclone"
 	"rclone-manager/internal/scheduler"
 	"rclone-manager/internal/taskdispatch"
@@ -35,16 +35,17 @@ import (
 )
 
 var (
-	executor            *rclone.Executor
-	proactiveDispatcher *proactive.Dispatcher
-	taskRunner          *taskdispatch.TaskDispatcher
-	wakeConsumer        *taskdispatch.WakeConsumer
-	sched               *scheduler.Scheduler
-	watch               *watcher.Watcher
-	qbWatch             *qbsvc.Watcher
-	hub                 *websocket.Hub
-	cfgGlobal           *config.Config
-	mountMgr            *mountsvc.Manager
+	executor              *rclone.Executor
+	proactiveDispatcher   *proactive.Dispatcher
+	taskRunner            *taskdispatch.TaskDispatcher
+	wakeConsumer          *taskdispatch.WakeConsumer
+	sched                 *scheduler.Scheduler
+	watch                 *watcher.Watcher
+	qbWatch               *qbsvc.Watcher
+	hub                   *websocket.Hub
+	cfgGlobal             *config.Config
+	mountMgr              *mountsvc.Manager
+	manualTransferService *manualtransfer.Service
 )
 
 // Hard caps for memory-hungry rclone flags.  These act as guardrails:
@@ -76,6 +77,13 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	}))
 
 	// Init database
+	if wakeConsumer != nil {
+		wakeConsumer.Stop()
+		wakeConsumer = nil
+	}
+	if manualTransferService != nil {
+		manualTransferService.Stop()
+	}
 	if err := InitDB(cfg.DataDir); err != nil {
 		panic(err)
 	}
@@ -87,25 +95,32 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	// Init executor (pass db so rclone can persist structured logs)
 	executor = rclone.NewExecutor(hub, db)
 
-	// Construct both execution lanes behind the ID-based task adapter.
-	quotaService := &quota.Service{DB: db, MoveEnabled: proactiveMoveEnabled}
-	proactiveExecutor := &proactive.Executor{DB: db, ManifestDir: filepath.Join(cfg.DataDir, "manifests"), Runner: proactive.ExecRunner{}, Manifest: proactive.ManifestWriter{}, MoveEnabled: proactiveMoveEnabled, ConfigResolver: quotaService.ResolveConfigPath}
-	proactiveDispatcher = &proactive.Dispatcher{DB: db, Quota: quotaService, Executor: proactiveExecutor, Inspector: proactive.LinuxProcessInspector{}, ManagerDataDir: cfg.DataDir, MoveEnabled: proactiveMoveEnabled, ConfigResolver: quotaService.ResolveConfigPath}
-	taskRunner = taskdispatch.New(db, executor, proactiveDispatcher)
-	if err := proactiveDispatcher.Recover(context.Background()); err != nil {
+	// Automatic rolling-quota execution is disabled. Keep the legacy task
+	// adapter on the generic runner so normal and legacy_error tasks retain
+	// their scheduler/watcher behavior, while historical proactive tasks are
+	// skipped below and never reach this launch path.
+	proactiveDispatcher = nil
+	taskRunner = taskdispatch.New(db, executor, nil)
+	executor.LaunchFence = taskRunner
+	manualTransferService = manualtransfer.NewService(db)
+	manualTransferService.TaskFence = taskRunner
+	manualTransferService.Runner = proactive.ExecRunner{}
+	manualTransferService.LogDir = filepath.Join(cfg.DataDir, "manual-worker-logs")
+	manualTransferService.ManifestDir = filepath.Join(cfg.DataDir, "manual-worker-manifests")
+	manualTransferService.StageDir = filepath.Join(cfg.DataDir, "manual-worker-stage")
+	if err := manualTransferService.RecoverAnalyzing(); err != nil {
 		panic(err)
 	}
-	if err := proactiveDispatcher.ProjectStatuses(); err != nil {
+	if err := manualTransferService.RecoverWorkers(); err != nil {
 		panic(err)
 	}
-	wakeConsumer = &taskdispatch.WakeConsumer{DB: db, Runner: taskRunner}
-	wakeConsumer.Start()
+	manualTransferService.Start()
 
 	// Scheduler and watcher register only after migration and recovery succeed.
 	sched = scheduler.NewScheduler(taskRunner)
 	sched.Start()
 	watch = watcher.NewWatcher(taskRunner)
-	qbWatch = qbsvc.NewWatcher(executor)
+	qbWatch = qbsvc.NewWatcher(executor, db)
 
 	// Init mount manager and auto-mount enabled mount configs
 	mountMgr = mountsvc.NewManager(db, cfg.MountRoot, cfg.DataDir)
@@ -116,8 +131,11 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	db.Where("enabled = ?", true).Find(&tasks)
 	for _, task := range tasks {
 		normalizeTaskDefaults(&task)
+		if task.TaskType == models.TaskTypeManual || isProactiveQuotaTask(&task) {
+			continue
+		}
 		startupError := ""
-		if task.Status == "running" && !(task.TaskType == "rotation" && task.RotationStrategy == "proactive_quota") {
+		if task.Status == "running" {
 			startupError = "服务重启中断了任务运行，任务未自动恢复"
 		}
 		if task.TaskType == "rotation" && task.QBEnabled {
@@ -184,13 +202,32 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 			tasks.POST("/:id/dedupe", dedupeTask)
 			tasks.GET("/:id/logs", getTaskLogs)
 			tasks.GET("/:id/status", getTaskStatus)
-			tasks.GET("/:id/proactive-status", requireTokenOrSession, getProactiveStatus)
-			tasks.POST("/:id/proactive-resolutions", requireStrictTokenOrSession, resolveProactiveMove)
-			tasks.POST("/:id/proactive-manual-merge", requireStrictTokenOrSession, startProactiveManualMerge)
-			tasks.POST("/:id/quota-accounts/:accountID/manual-reset", requireAdminStrictTokenOrSession, manualQuotaReset)
+			tasks.GET("/:id/manual-accounts", requireAdminStrictTokenOrSession, listManualTaskAccounts)
+			tasks.PUT("/:id/manual-accounts", requireAdminStrictTokenOrSession, updateManualTaskAccounts)
+			tasks.POST("/:id/manual-runs/analyze", requireAdminStrictTokenOrSession, analyzeManualRun)
+			tasks.GET("/:id/manual-runs", requireAdminStrictTokenOrSession, listManualRuns)
 		}
-		api.POST("/proactive-maintenance/:id/close-unknown", requireStrictTokenOrSession, closeProactiveUnknownMaintenance)
-
+		manualRuns := api.Group("/manual-runs")
+		{
+			manualRuns.POST("/:id/allocate", requireAdminStrictTokenOrSession, allocateManualRun)
+			manualRuns.POST("/:id/start", requireAdminStrictTokenOrSession, startManualRun)
+			manualRuns.GET("/:id/workers", requireAdminStrictTokenOrSession, listManualRunWorkers)
+			manualRuns.GET("/:id/files", requireAdminStrictTokenOrSession, listManualRunFiles)
+			manualRuns.GET("/:id/allocations", requireAdminStrictTokenOrSession, listManualRunFiles)
+			manualRuns.GET("/:id/allocation", requireAdminStrictTokenOrSession, getManualRunAllocationSummary)
+			manualRuns.GET("/:id/allocation-summary", requireAdminStrictTokenOrSession, getManualRunAllocationSummary)
+			manualRuns.GET("/:id/summary", requireAdminStrictTokenOrSession, getManualRunAllocationSummary)
+			manualRuns.GET("/:id/accounts", requireAdminStrictTokenOrSession, listManualRunAccounts)
+			manualRuns.GET("/:id/status", requireAdminStrictTokenOrSession, getManualRunStatus)
+			manualRuns.GET("/:id", requireAdminStrictTokenOrSession, getManualRun)
+		}
+		manualWorkers := api.Group("/manual-workers")
+		{
+			manualWorkers.GET("/:id", requireAdminStrictTokenOrSession, getManualWorker)
+			manualWorkers.POST("/:id/cancel", requireAdminStrictTokenOrSession, cancelManualWorker)
+			manualWorkers.POST("/:id/retry", requireAdminStrictTokenOrSession, retryManualWorker)
+			manualWorkers.GET("/:id/logs", requireAdminStrictTokenOrSession, getManualWorkerLogs)
+		}
 		// System
 		api.GET("/system/stats", getSystemStats)
 		api.GET("/system/rclone-stats", getRcloneStats)
@@ -248,6 +285,11 @@ func ShutdownBackgroundServices() {
 	if sched != nil {
 		sched.Stop()
 	}
+	if manualTransferService != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		_ = manualTransferService.StopContext(ctx)
+		cancel()
+	}
 }
 
 // requireStrictTokenOrSession protects mutation endpoints even when the
@@ -270,6 +312,8 @@ func requireAdminStrictTokenOrSession(c *gin.Context) {
 	if cfgGlobal != nil && cfgGlobal.APIToken != "" && c.Query("token") == cfgGlobal.APIToken {
 		c.Set("quota_reset_actor_identity", "configured-api-token")
 		c.Set("quota_reset_actor_type", models.QuotaManualResetActorPrivilegedToken)
+		c.Set("manual_transfer_actor_identity", "configured-api-token")
+		c.Set("manual_transfer_actor_type", "privileged_token")
 		c.Next()
 		return
 	}
@@ -279,6 +323,8 @@ func requireAdminStrictTokenOrSession(c *gin.Context) {
 		if ok && claims.IsAdmin {
 			c.Set("quota_reset_actor_identity", claims.Username)
 			c.Set("quota_reset_actor_type", models.QuotaManualResetActorAdminSession)
+			c.Set("manual_transfer_actor_identity", claims.Username)
+			c.Set("manual_transfer_actor_type", "admin_session")
 			c.Next()
 			return
 		}
@@ -485,6 +531,15 @@ func normalizeTaskDefaults(task *models.Task) {
 	if strings.TrimSpace(task.TaskType) == "" {
 		task.TaskType = "normal"
 	}
+	if task.TaskType == models.TaskTypeManual && strings.TrimSpace(task.ManualStrategy) == "" {
+		task.ManualStrategy = models.ManualStrategyAllocation
+	}
+	if task.ManualAccountRevision < 1 {
+		task.ManualAccountRevision = 1
+	}
+	if task.ManualInputRevision < 1 {
+		task.ManualInputRevision = 1
+	}
 	if task.TaskType == "rotation" && strings.TrimSpace(task.RotationStrategy) == "" {
 		task.RotationStrategy = "legacy_error"
 	}
@@ -517,12 +572,38 @@ func normalizeTaskDefaults(task *models.Task) {
 	}
 }
 
+func isProactiveQuotaTask(task *models.Task) bool {
+	return task != nil && task.TaskType == "rotation" && task.RotationStrategy == "proactive_quota"
+}
+
 func validateAndNormalizeTask(task *models.Task) error {
 	normalizeTaskDefaults(task)
-	if task.TaskType != "normal" && task.TaskType != "rotation" {
+	if task.TaskType != "normal" && task.TaskType != "rotation" && task.TaskType != models.TaskTypeManual {
 		return fmt.Errorf("任务类型无效")
 	}
-	if task.TaskType == "rotation" && task.RotationStrategy != "legacy_error" && task.RotationStrategy != "proactive_quota" {
+	if task.TaskType == models.TaskTypeManual {
+		if task.ManualStrategy != models.ManualStrategyAllocation {
+			return fmt.Errorf("手动任务策略无效")
+		}
+		if task.SourceType != "local" || task.DestType != "remote" {
+			return fmt.Errorf("手动分配任务只支持本地源和远程目标")
+		}
+		if strings.TrimSpace(task.SourceDir) == "" || !filepath.IsAbs(task.SourceDir) || filepath.Clean(task.SourceDir) != task.SourceDir {
+			return fmt.Errorf("手动分配任务需要有效的本地源路径")
+		}
+		if task.TransferMode != models.TransferModeCopy && task.TransferMode != models.TransferModeMove {
+			return fmt.Errorf("手动分配任务只支持复制或移动模式")
+		}
+		task.WatchEnabled = false
+		task.ScheduleEnabled = false
+		task.QBEnabled = false
+		task.AutoDedupe = false
+		return nil
+	}
+	if task.TaskType == "rotation" && task.RotationStrategy == "proactive_quota" {
+		return fmt.Errorf("proactive_quota rotation strategy is disabled")
+	}
+	if task.TaskType == "rotation" && task.RotationStrategy != "legacy_error" {
 		return fmt.Errorf("轮转策略无效")
 	}
 	if task.TaskType == "rotation" && task.RotationStrategy == "legacy_error" && task.QBEnabled {
@@ -548,40 +629,12 @@ func validateAndNormalizeTask(task *models.Task) error {
 	if task.DestType == "local" {
 		return fmt.Errorf("调度轮转任务只支持云盘目标目录")
 	}
-	if task.RotationStrategy == "proactive_quota" {
-		if task.SourceType != "local" || task.DestType != "remote" {
-			return fmt.Errorf("proactive_quota 只支持本地源和远程目标")
-		}
-		if strings.TrimSpace(task.SourceDir) == "" || strings.TrimSpace(task.RemoteName) == "" || !filepath.IsAbs(task.SourceDir) {
-			return fmt.Errorf("proactive_quota 需要有效的本地源路径和远程名称")
-		}
-		if task.RotationBatchFiles < 1 || task.RotationBatchFiles > 128 {
-			return fmt.Errorf("每批文件数必须在 1 到 128 之间")
-		}
-		if cfgGlobal != nil {
-			if err := proactive.ValidateSourceOutsideManager(task.SourceDir, cfgGlobal.DataDir); err != nil {
-				return err
-			}
-		}
-		switch task.TransferMode {
-		case models.TransferModeCopy:
-		case models.TransferModeMove:
-			if !proactiveMoveEnabled() {
-				return fmt.Errorf("proactive_quota move mode is disabled by operator setting")
-			}
-		default:
-			return fmt.Errorf("proactive_quota only supports copy mode while move is gated; sync is not supported")
-		}
-	}
 	if task.RotationQuotaLimitBytes < 0 || task.RotationQuotaLimitBytes > models.DefaultRotationQuotaLimitBytes {
 		return fmt.Errorf("轮转额度上限必须在 0 到 %d 字节之间", models.DefaultRotationQuotaLimitBytes)
 	}
 	remotes := models.ParseRotationRemotes(task.RotationRemotes)
 	if len(remotes) == 0 {
 		return fmt.Errorf("请选择至少一个轮转网盘")
-	}
-	if task.RotationStrategy == "proactive_quota" && (task.RotationConcurrentBatches < 1 || task.RotationConcurrentBatches > len(remotes)) {
-		return fmt.Errorf("并行账号批次数必须在 1 到已选账号数之间")
 	}
 	if task.RotationMaxRounds <= 0 {
 		return fmt.Errorf("轮数必须大于 0")
@@ -617,6 +670,26 @@ func validateAndNormalizeTask(task *models.Task) error {
 		return validateQBTask(task)
 	}
 	return nil
+}
+
+func nextManualInputRevision(current, updates models.Task) int64 {
+	revision := current.ManualInputRevision
+	if revision < 1 {
+		revision = 1
+	}
+	currentConfig := strings.TrimSpace(current.RcloneConfig)
+	updatedConfig := strings.TrimSpace(updates.RcloneConfig)
+	if currentConfig == "" {
+		currentConfig = models.DefaultRcloneConfigPath
+	}
+	if updatedConfig == "" {
+		updatedConfig = models.DefaultRcloneConfigPath
+	}
+	changed := current.TaskType != updates.TaskType || current.SourceDir != updates.SourceDir || current.RemoteName != updates.RemoteName || current.RemoteDir != updates.RemoteDir || current.TransferMode != updates.TransferMode || currentConfig != updatedConfig
+	if (current.TaskType == models.TaskTypeManual || updates.TaskType == models.TaskTypeManual) && changed {
+		return revision + 1
+	}
+	return revision
 }
 
 func proactiveMoveEnabled() bool {
@@ -753,6 +826,11 @@ func createTask(c *gin.Context) {
 
 	if err := db.Create(&task).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	if task.TaskType == models.TaskTypeManual {
+		c.JSON(http.StatusCreated, task)
 		return
 	}
 
@@ -957,6 +1035,12 @@ func updateTaskUnsafe(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	if updates.TaskType == models.TaskTypeManual {
+		updates.WatchEnabled = false
+		updates.ScheduleEnabled = false
+		updates.QBEnabled = false
+		updates.AutoDedupe = false
+	}
 	candidate := task
 	candidate.RcloneConfig = strings.TrimSpace(updates.RcloneConfig)
 	if candidate.RcloneConfig == "" {
@@ -1022,6 +1106,8 @@ func updateTaskUnsafe(c *gin.Context) {
 		"openlist_mapping":            updates.OpenlistMapping,
 		"openlist_refresh_dir":        updates.OpenlistRefreshDir,
 		"task_type":                   updates.TaskType,
+		"manual_strategy":             updates.ManualStrategy,
+		"manual_input_revision":       nextManualInputRevision(task, updates),
 		"rotation_strategy":           updates.RotationStrategy,
 		"rotation_quota_limit_bytes":  updates.RotationQuotaLimitBytes,
 		"rotation_quota_keys":         updates.RotationQuotaKeys,
@@ -1039,15 +1125,15 @@ func updateTaskUnsafe(c *gin.Context) {
 	}
 
 	// Restart if enabled
-	if updates.WatchEnabled || task.WatchEnabled {
+	if updates.TaskType != models.TaskTypeManual && task.TaskType != models.TaskTypeManual && (updates.WatchEnabled || task.WatchEnabled) {
 		db.First(&task, id)
 		watch.StartTaskWatch(&task, executor)
 	}
-	if updates.ScheduleEnabled || task.ScheduleEnabled {
+	if updates.TaskType != models.TaskTypeManual && task.TaskType != models.TaskTypeManual && (updates.ScheduleEnabled || task.ScheduleEnabled) {
 		db.First(&task, id)
 		sched.AddTask(&task)
 	}
-	if updates.QBEnabled || task.QBEnabled {
+	if updates.TaskType != models.TaskTypeManual && task.TaskType != models.TaskTypeManual && (updates.QBEnabled || task.QBEnabled) {
 		db.First(&task, id)
 		qbWatch.StartTaskWatch(&task)
 	}
@@ -1107,6 +1193,14 @@ func startTask(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
 		return
 	}
+	if task.TaskType == models.TaskTypeManual {
+		c.JSON(http.StatusConflict, gin.H{"error": "manual tasks use analyze and allocate; they cannot be started directly"})
+		return
+	}
+	if isProactiveQuotaTask(&task) {
+		c.JSON(http.StatusConflict, gin.H{"error": "automatic rolling-quota execution is disabled for proactive_quota tasks"})
+		return
+	}
 	if task.IsQuickTask {
 		if task.Status == "canceled" || (task.Status == "idle" && task.LastRun != nil && task.LastError == "") {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "quick task already finished"})
@@ -1135,10 +1229,6 @@ func startTask(c *gin.Context) {
 		return
 	}
 
-	if task.TaskType == "rotation" && task.RotationStrategy == "proactive_quota" {
-		db.Model(&task).Updates(map[string]interface{}{"status": "running", "last_run": gorm.Expr("CURRENT_TIMESTAMP")})
-	}
-
 	// ExecuteMove now updates status / last_run internally (covers both
 	// API-triggered and watcher/scheduler-triggered paths).
 	c.JSON(http.StatusOK, gin.H{"message": "task started"})
@@ -1149,6 +1239,10 @@ func pauseTask(c *gin.Context) {
 	var task models.Task
 	if err := db.First(&task, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		return
+	}
+	if task.TaskType == models.TaskTypeManual {
+		c.JSON(http.StatusConflict, gin.H{"error": "manual tasks use analyze and allocate; legacy pause is unavailable"})
 		return
 	}
 	if task.TaskType == "rotation" && task.RotationStrategy == "proactive_quota" {
@@ -1209,6 +1303,10 @@ func cancelTask(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
 		return
 	}
+	if task.TaskType == models.TaskTypeManual {
+		c.JSON(http.StatusConflict, gin.H{"error": "manual tasks use analyze and allocate; legacy cancel is unavailable"})
+		return
+	}
 	if !task.IsQuickTask {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "only quick task supports stop"})
 		return
@@ -1228,6 +1326,10 @@ func stopTask(c *gin.Context) {
 	var task models.Task
 	if err := db.First(&task, id).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
+		return
+	}
+	if task.TaskType == models.TaskTypeManual {
+		c.JSON(http.StatusConflict, gin.H{"error": "manual tasks use analyze and allocate; legacy stop is unavailable"})
 		return
 	}
 	if task.TaskType == "rotation" && task.RotationStrategy == "proactive_quota" {
@@ -1256,8 +1358,12 @@ func dedupeTask(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
 		return
 	}
+	if task.TaskType == models.TaskTypeManual {
+		c.JSON(http.StatusConflict, gin.H{"error": "manual tasks do not use legacy dedupe"})
+		return
+	}
 	if task.TaskType == "rotation" && task.RotationStrategy == "proactive_quota" {
-		c.JSON(http.StatusConflict, gin.H{"error": "proactive merge requires POST /tasks/:id/proactive-manual-merge"})
+		c.JSON(http.StatusConflict, gin.H{"error": "automatic rolling-quota tasks are disabled"})
 		return
 	}
 

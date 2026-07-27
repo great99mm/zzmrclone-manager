@@ -57,6 +57,8 @@ const (
 	BatchFileStateCommitted                      = "committed"
 	TransferModeCopy                             = "copy"
 	TransferModeMove                             = "move"
+	TaskTypeManual                               = "manual"
+	ManualStrategyAllocation                     = "allocation_v1"
 	CompletionEvidenceRemote                     = "remote_verified"
 	CompletionEvidenceLocal                      = "local_move"
 	ProactiveMoveSettingKey                      = "proactive_move_enabled"
@@ -279,7 +281,12 @@ type Task struct {
 	// TaskType controls execution behavior:
 	//   "normal"   -> existing single-remote behavior
 	//   "rotation" -> sequentially rotates destination remotes on 403/429/quota errors
-	TaskType string `json:"task_type" gorm:"default:normal"`
+	TaskType                    string `json:"task_type" gorm:"default:normal"`
+	ManualStrategy              string `json:"manual_strategy" gorm:"default:allocation_v1"`
+	ManualInputRevision         int64  `json:"manual_input_revision" gorm:"not null;default:1;check:manual_input_revision_positive,manual_input_revision >= 1"`
+	ManualAccountRevision       int64  `json:"manual_account_revision" gorm:"not null;default:1;check:manual_account_revision_nonnegative,manual_account_revision >= 1"`
+	ManualAccountIdempotencyKey string `json:"-"`
+	ManualAccountFingerprint    string `json:"-"`
 	// RotationStrategy isolates legacy error-driven rotation from future proactive quota rotation.
 	RotationStrategy        string `json:"rotation_strategy" gorm:"default:legacy_error"`
 	RotationQuotaLimitBytes int64  `json:"rotation_quota_limit_bytes"`

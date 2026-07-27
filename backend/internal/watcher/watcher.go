@@ -33,6 +33,13 @@ func NewWatcher(runner Runner) *Watcher {
 }
 
 func (w *Watcher) StartTaskWatch(task *models.Task, _ ...interface{}) error {
+	if task == nil {
+		return nil
+	}
+	if task.TaskType == models.TaskTypeManual {
+		w.StopTaskWatch(task.ID)
+		return nil
+	}
 	if !task.WatchEnabled {
 		return nil
 	}
