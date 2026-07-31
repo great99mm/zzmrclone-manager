@@ -39,26 +39,28 @@ type AllocateResult struct {
 }
 
 type AllocationSummary struct {
-	RunID                  uint   `json:"run_id"`
-	State                  string `json:"state"`
-	Revision               int64  `json:"revision"`
-	AllocationVersion      int    `json:"allocation_version"`
-	AllocationGeneration   int64  `json:"allocation_generation"`
-	AllocationDigest       string `json:"allocation_digest,omitempty"`
-	PerAccountCapBytes     int64  `json:"per_account_cap_bytes"`
-	PerRunCapBytes         int64  `json:"per_run_cap_bytes"`
-	TotalFileCount         int64  `json:"total_file_count"`
-	TotalFileBytes         int64  `json:"total_file_bytes"`
-	AssignedFileCount      int64  `json:"assigned_file_count"`
-	AssignedBytes          int64  `json:"assigned_bytes"`
-	UnassignedFileCount    int64  `json:"unassigned_file_count"`
-	UnassignedBytes        int64  `json:"unassigned_bytes"`
-	OversizeCount          int64  `json:"oversize_count"`
-	OversizeBytes          int64  `json:"oversize_bytes"`
-	AggregateCapacityCount int64  `json:"aggregate_capacity_count"`
-	AggregateCapacityBytes int64  `json:"aggregate_capacity_bytes"`
-	AccountCapacityCount   int64  `json:"account_capacity_count"`
-	AccountCapacityBytes   int64  `json:"account_capacity_bytes"`
+	RunID                   uint   `json:"run_id"`
+	State                   string `json:"state"`
+	Revision                int64  `json:"revision"`
+	AllocationVersion       int    `json:"allocation_version"`
+	AllocationGeneration    int64  `json:"allocation_generation"`
+	AllocationDigest        string `json:"allocation_digest,omitempty"`
+	PerAccountCapBytes      int64  `json:"per_account_cap_bytes"`
+	PerRunCapBytes          int64  `json:"per_run_cap_bytes"`
+	TotalFileCount          int64  `json:"total_file_count"`
+	TotalFileBytes          int64  `json:"total_file_bytes"`
+	AssignedFileCount       int64  `json:"assigned_file_count"`
+	AssignedBytes           int64  `json:"assigned_bytes"`
+	AlreadyTransferredCount int64  `json:"already_transferred_count"`
+	AlreadyTransferredBytes int64  `json:"already_transferred_bytes"`
+	UnassignedFileCount     int64  `json:"unassigned_file_count"`
+	UnassignedBytes         int64  `json:"unassigned_bytes"`
+	OversizeCount           int64  `json:"oversize_count"`
+	OversizeBytes           int64  `json:"oversize_bytes"`
+	AggregateCapacityCount  int64  `json:"aggregate_capacity_count"`
+	AggregateCapacityBytes  int64  `json:"aggregate_capacity_bytes"`
+	AccountCapacityCount    int64  `json:"account_capacity_count"`
+	AccountCapacityBytes    int64  `json:"account_capacity_bytes"`
 }
 
 type allocationAccountTotals struct {
@@ -67,18 +69,20 @@ type allocationAccountTotals struct {
 }
 
 type allocationResult struct {
-	Digest                 string
-	Assigned               int64
-	AssignedBytes          int64
-	Unassigned             int64
-	UnassignedBytes        int64
-	OversizeCount          int64
-	OversizeBytes          int64
-	AggregateCapacityCount int64
-	AggregateCapacityBytes int64
-	AccountCapacityCount   int64
-	AccountCapacityBytes   int64
-	AccountTotals          []allocationAccountTotals
+	Digest                  string
+	Assigned                int64
+	AssignedBytes           int64
+	AlreadyTransferredCount int64
+	AlreadyTransferredBytes int64
+	Unassigned              int64
+	UnassignedBytes         int64
+	OversizeCount           int64
+	OversizeBytes           int64
+	AggregateCapacityCount  int64
+	AggregateCapacityBytes  int64
+	AccountCapacityCount    int64
+	AccountCapacityBytes    int64
+	AccountTotals           []allocationAccountTotals
 }
 
 func (s *Service) CreateAllocate(request AllocateRequest) (AllocateResult, error) {
@@ -364,25 +368,31 @@ func (s *Service) runAllocationFenced(runID uint) error {
 		if err := tx.Model(&ManualRunAllocation{}).Where("run_id = ? AND generation = ? AND activated_at IS NULL", run.ID, generation).Update("activated_at", now).Error; err != nil {
 			return err
 		}
+		nextState := ManualRunStateAllocated
+		if result.Assigned == 0 && result.Unassigned == 0 {
+			nextState = ManualRunStateSucceeded
+		}
 		updated := tx.Model(&ManualTransferRun{}).Where("id = ? AND state = ? AND revision = ?", run.ID, ManualRunStateAllocating, run.Revision).Updates(map[string]interface{}{
-			"state":                    ManualRunStateAllocated,
-			"revision":                 gorm.Expr("revision + 1"),
-			"allocation_version":       ManualAllocationVersion,
-			"allocation_generation":    generation,
-			"allocation_digest":        result.Digest,
-			"allocation_count":         result.Assigned,
-			"allocation_bytes":         result.AssignedBytes,
-			"assigned_count":           result.Assigned,
-			"assigned_bytes":           result.AssignedBytes,
-			"unassigned_count":         result.Unassigned,
-			"unassigned_bytes":         result.UnassignedBytes,
-			"oversize_count":           result.OversizeCount,
-			"oversize_bytes":           result.OversizeBytes,
-			"aggregate_capacity_count": result.AggregateCapacityCount,
-			"aggregate_capacity_bytes": result.AggregateCapacityBytes,
-			"account_capacity_count":   result.AccountCapacityCount,
-			"account_capacity_bytes":   result.AccountCapacityBytes,
-			"last_error":               "",
+			"state":                     nextState,
+			"revision":                  gorm.Expr("revision + 1"),
+			"allocation_version":        ManualAllocationVersion,
+			"allocation_generation":     generation,
+			"allocation_digest":         result.Digest,
+			"allocation_count":          result.Assigned,
+			"allocation_bytes":          result.AssignedBytes,
+			"assigned_count":            result.Assigned,
+			"assigned_bytes":            result.AssignedBytes,
+			"already_transferred_count": result.AlreadyTransferredCount,
+			"already_transferred_bytes": result.AlreadyTransferredBytes,
+			"unassigned_count":          result.Unassigned,
+			"unassigned_bytes":          result.UnassignedBytes,
+			"oversize_count":            result.OversizeCount,
+			"oversize_bytes":            result.OversizeBytes,
+			"aggregate_capacity_count":  result.AggregateCapacityCount,
+			"aggregate_capacity_bytes":  result.AggregateCapacityBytes,
+			"account_capacity_count":    result.AccountCapacityCount,
+			"account_capacity_bytes":    result.AccountCapacityBytes,
+			"last_error":                "",
 		})
 		if updated.Error != nil {
 			return updated.Error
@@ -394,12 +404,16 @@ func (s *Service) runAllocationFenced(runID uint) error {
 		if err := tx.First(&active, run.ID).Error; err != nil {
 			return err
 		}
-		return createEvent(tx, active, ManualRunEventAllocationCompleted, ManualRunStateAllocating, ManualRunStateAllocated, fmt.Sprintf("allocation completed: %d assigned files, %d bytes", result.Assigned, result.AssignedBytes))
+		return createEvent(tx, active, ManualRunEventAllocationCompleted, ManualRunStateAllocating, nextState, fmt.Sprintf("allocation completed: %d assigned files, %d already verified files", result.Assigned, result.AlreadyTransferredCount))
 	})
 }
 
 func (s *Service) streamAllocation(run ManualTransferRun, accounts []ManualRunAccount, generation int64) (allocationResult, error) {
 	result := allocationResult{AccountTotals: make([]allocationAccountTotals, len(accounts))}
+	alreadyTransferred, err := s.previouslyVerifiedCopySnapshots(run)
+	if err != nil {
+		return allocationResult{}, err
+	}
 	used := make([]int64, len(accounts))
 	hash := sha256.New()
 	lastPath := ""
@@ -439,7 +453,11 @@ func (s *Service) streamAllocation(run ManualTransferRun, accounts []ManualRunAc
 				return allocationResult{}, fmt.Errorf("negative source file size for %q", file.RelativePath)
 			}
 			row := ManualRunAllocation{RunID: run.ID, Generation: generation, RelativePath: file.RelativePath, SnapshotKey: file.SnapshotKey, SizeBytes: file.SizeBytes}
-			if file.SizeBytes > PerAccountBudgetBytes {
+			if _, exists := alreadyTransferred[file.SnapshotKey]; exists {
+				row.UnassignedReason = ManualAllocationReasonAlreadyTransferred
+				result.AlreadyTransferredCount++
+				result.AlreadyTransferredBytes += file.SizeBytes
+			} else if file.SizeBytes > PerAccountBudgetBytes {
 				row.UnassignedReason = ManualAllocationReasonOversize
 				result.OversizeCount++
 				result.OversizeBytes += file.SizeBytes
@@ -471,7 +489,7 @@ func (s *Service) streamAllocation(run ManualTransferRun, accounts []ManualRunAc
 					result.AccountCapacityBytes += file.SizeBytes
 				}
 			}
-			if row.UnassignedReason != "" {
+			if row.UnassignedReason != "" && row.UnassignedReason != ManualAllocationReasonAlreadyTransferred {
 				result.Unassigned++
 				result.UnassignedBytes += file.SizeBytes
 			}
@@ -493,6 +511,31 @@ func (s *Service) streamAllocation(run ManualTransferRun, accounts []ManualRunAc
 	}
 	result.Digest = hex.EncodeToString(hash.Sum(nil))
 	return result, nil
+}
+
+func (s *Service) previouslyVerifiedCopySnapshots(run ManualTransferRun) (map[string]struct{}, error) {
+	keys := make(map[string]struct{})
+	if run.TransferMode != models.TransferModeCopy || strings.TrimSpace(run.ManualConfigFingerprint) == "" {
+		return keys, nil
+	}
+	type snapshotRecord struct {
+		SnapshotKey string
+	}
+	var records []snapshotRecord
+	if err := s.DB.Table("manual_worker_files").
+		Select("DISTINCT manual_worker_files.snapshot_key").
+		Joins("JOIN manual_transfer_runs ON manual_transfer_runs.id = manual_worker_files.run_id").
+		Where("manual_worker_files.state = ? AND manual_worker_files.snapshot_key <> ''", ManualWorkerFileStateVerified).
+		Where("manual_transfer_runs.task_id = ? AND manual_transfer_runs.id <> ? AND manual_transfer_runs.transfer_mode = ?", run.TaskID, run.ID, models.TransferModeCopy).
+		Where("manual_transfer_runs.source_path = ? AND manual_transfer_runs.source_root_device = ? AND manual_transfer_runs.source_root_inode = ?", run.SourcePath, run.SourceRootDevice, run.SourceRootInode).
+		Where("manual_transfer_runs.destination_path = ? AND manual_transfer_runs.config_identity = ? AND manual_transfer_runs.manual_config_fingerprint = ?", run.DestinationPath, run.ConfigIdentity, run.ManualConfigFingerprint).
+		Find(&records).Error; err != nil {
+		return nil, err
+	}
+	for _, record := range records {
+		keys[record.SnapshotKey] = struct{}{}
+	}
+	return keys, nil
 }
 
 func (s *Service) validateRunFence(run ManualTransferRun, task models.Task) error {
@@ -615,7 +658,7 @@ func (s *Service) GetAllocationSummary(runID uint) (AllocationSummary, error) {
 	if err != nil {
 		return AllocationSummary{}, err
 	}
-	return AllocationSummary{RunID: run.ID, State: run.State, Revision: run.Revision, AllocationVersion: run.AllocationVersion, AllocationGeneration: run.AllocationGeneration, AllocationDigest: run.AllocationDigest, PerAccountCapBytes: PerAccountBudgetBytes, PerRunCapBytes: PerRunBudgetBytes, TotalFileCount: run.SnapshotCount, TotalFileBytes: run.SnapshotBytes, AssignedFileCount: run.AssignedCount, AssignedBytes: run.AssignedBytes, UnassignedFileCount: run.UnassignedCount, UnassignedBytes: run.UnassignedBytes, OversizeCount: run.OversizeCount, OversizeBytes: run.OversizeBytes, AggregateCapacityCount: run.AggregateCapacityCount, AggregateCapacityBytes: run.AggregateCapacityBytes, AccountCapacityCount: run.AccountCapacityCount, AccountCapacityBytes: run.AccountCapacityBytes}, nil
+	return AllocationSummary{RunID: run.ID, State: run.State, Revision: run.Revision, AllocationVersion: run.AllocationVersion, AllocationGeneration: run.AllocationGeneration, AllocationDigest: run.AllocationDigest, PerAccountCapBytes: PerAccountBudgetBytes, PerRunCapBytes: PerRunBudgetBytes, TotalFileCount: run.SnapshotCount, TotalFileBytes: run.SnapshotBytes, AssignedFileCount: run.AssignedCount, AssignedBytes: run.AssignedBytes, AlreadyTransferredCount: run.AlreadyTransferredCount, AlreadyTransferredBytes: run.AlreadyTransferredBytes, UnassignedFileCount: run.UnassignedCount, UnassignedBytes: run.UnassignedBytes, OversizeCount: run.OversizeCount, OversizeBytes: run.OversizeBytes, AggregateCapacityCount: run.AggregateCapacityCount, AggregateCapacityBytes: run.AggregateCapacityBytes, AccountCapacityCount: run.AccountCapacityCount, AccountCapacityBytes: run.AccountCapacityBytes}, nil
 }
 
 type allocationFilters struct {
@@ -648,7 +691,7 @@ func normalizeAllocationFilters(assignment, reason, accountID string) (allocatio
 		}
 	}
 	switch filters.Reason {
-	case "", ManualAllocationReasonOversize, ManualAllocationReasonAggregateCapacity, ManualAllocationReasonAccountCapacity:
+	case "", ManualAllocationReasonOversize, ManualAllocationReasonAggregateCapacity, ManualAllocationReasonAccountCapacity, ManualAllocationReasonAlreadyTransferred:
 	default:
 		return allocationFilters{}, errors.New("reason is not a known manual allocation reason")
 	}
@@ -698,7 +741,7 @@ func (s *Service) ListAllocationFilesFiltered(runID uint, cursor string, limit i
 	case "assigned":
 		query = query.Where("unassigned_reason = ''")
 	case "unassigned":
-		query = query.Where("unassigned_reason <> ''")
+		query = query.Where("unassigned_reason <> '' AND unassigned_reason <> ?", ManualAllocationReasonAlreadyTransferred)
 	default:
 		if filters.AccountID != 0 {
 			query = query.Where("account_id = ?", filters.AccountID)

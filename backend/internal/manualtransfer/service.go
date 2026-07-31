@@ -67,48 +67,50 @@ type AnalyzeResult struct {
 }
 
 type RunStatus struct {
-	ID                     uint       `json:"id"`
-	TaskID                 uint       `json:"task_id"`
-	State                  string     `json:"state"`
-	Revision               int64      `json:"revision"`
-	ManualInputRevision    int64      `json:"manual_input_revision"`
-	ManualConfigRevision   int64      `json:"manual_config_revision"`
-	Terminal               bool       `json:"terminal"`
-	Analyzing              bool       `json:"analyzing"`
-	Allocating             bool       `json:"allocating"`
-	Allocated              bool       `json:"allocated"`
-	Running                bool       `json:"running"`
-	Succeeded              bool       `json:"succeeded"`
-	Failed                 bool       `json:"failed"`
-	Cancelled              bool       `json:"cancelled"`
-	NeedsAttention         bool       `json:"needs_attention"`
-	AllocationFailed       bool       `json:"allocation_failed"`
-	NeedsExplicitReanalyze bool       `json:"needs_explicit_reanalyze"`
-	FailurePolicy          string     `json:"failure_policy"`
-	SnapshotDigest         string     `json:"snapshot_digest,omitempty"`
-	SnapshotCount          int64      `json:"snapshot_count"`
-	SnapshotBytes          int64      `json:"snapshot_bytes"`
-	AllocationVersion      int        `json:"allocation_version"`
-	AllocationGeneration   int64      `json:"allocation_generation"`
-	AllocationDigest       string     `json:"allocation_digest,omitempty"`
-	AllocationCount        int64      `json:"allocation_count"`
-	AllocationBytes        int64      `json:"allocation_bytes"`
-	AssignedCount          int64      `json:"assigned_count"`
-	AssignedBytes          int64      `json:"assigned_bytes"`
-	UnassignedCount        int64      `json:"unassigned_count"`
-	UnassignedBytes        int64      `json:"unassigned_bytes"`
-	OversizeCount          int64      `json:"oversize_count"`
-	OversizeBytes          int64      `json:"oversize_bytes"`
-	AggregateCapacityCount int64      `json:"aggregate_capacity_count"`
-	AggregateCapacityBytes int64      `json:"aggregate_capacity_bytes"`
-	AccountCapacityCount   int64      `json:"account_capacity_count"`
-	AccountCapacityBytes   int64      `json:"account_capacity_bytes"`
-	LastError              string     `json:"last_error,omitempty"`
-	CreatedAt              time.Time  `json:"created_at"`
-	UpdatedAt              time.Time  `json:"updated_at"`
-	AnalysisStartedAt      *time.Time `json:"analysis_started_at,omitempty"`
-	AnalyzedAt             *time.Time `json:"analyzed_at,omitempty"`
-	FailedAt               *time.Time `json:"failed_at,omitempty"`
+	ID                      uint       `json:"id"`
+	TaskID                  uint       `json:"task_id"`
+	State                   string     `json:"state"`
+	Revision                int64      `json:"revision"`
+	ManualInputRevision     int64      `json:"manual_input_revision"`
+	ManualConfigRevision    int64      `json:"manual_config_revision"`
+	Terminal                bool       `json:"terminal"`
+	Analyzing               bool       `json:"analyzing"`
+	Allocating              bool       `json:"allocating"`
+	Allocated               bool       `json:"allocated"`
+	Running                 bool       `json:"running"`
+	Succeeded               bool       `json:"succeeded"`
+	Failed                  bool       `json:"failed"`
+	Cancelled               bool       `json:"cancelled"`
+	NeedsAttention          bool       `json:"needs_attention"`
+	AllocationFailed        bool       `json:"allocation_failed"`
+	NeedsExplicitReanalyze  bool       `json:"needs_explicit_reanalyze"`
+	FailurePolicy           string     `json:"failure_policy"`
+	SnapshotDigest          string     `json:"snapshot_digest,omitempty"`
+	SnapshotCount           int64      `json:"snapshot_count"`
+	SnapshotBytes           int64      `json:"snapshot_bytes"`
+	AllocationVersion       int        `json:"allocation_version"`
+	AllocationGeneration    int64      `json:"allocation_generation"`
+	AllocationDigest        string     `json:"allocation_digest,omitempty"`
+	AllocationCount         int64      `json:"allocation_count"`
+	AllocationBytes         int64      `json:"allocation_bytes"`
+	AssignedCount           int64      `json:"assigned_count"`
+	AssignedBytes           int64      `json:"assigned_bytes"`
+	AlreadyTransferredCount int64      `json:"already_transferred_count"`
+	AlreadyTransferredBytes int64      `json:"already_transferred_bytes"`
+	UnassignedCount         int64      `json:"unassigned_count"`
+	UnassignedBytes         int64      `json:"unassigned_bytes"`
+	OversizeCount           int64      `json:"oversize_count"`
+	OversizeBytes           int64      `json:"oversize_bytes"`
+	AggregateCapacityCount  int64      `json:"aggregate_capacity_count"`
+	AggregateCapacityBytes  int64      `json:"aggregate_capacity_bytes"`
+	AccountCapacityCount    int64      `json:"account_capacity_count"`
+	AccountCapacityBytes    int64      `json:"account_capacity_bytes"`
+	LastError               string     `json:"last_error,omitempty"`
+	CreatedAt               time.Time  `json:"created_at"`
+	UpdatedAt               time.Time  `json:"updated_at"`
+	AnalysisStartedAt       *time.Time `json:"analysis_started_at,omitempty"`
+	AnalyzedAt              *time.Time `json:"analyzed_at,omitempty"`
+	FailedAt                *time.Time `json:"failed_at,omitempty"`
 }
 
 type FilePage struct {
@@ -851,7 +853,7 @@ type fileCursor struct {
 }
 
 func StatusForRun(run ManualTransferRun) RunStatus {
-	return RunStatus{ID: run.ID, TaskID: run.TaskID, State: run.State, Revision: run.Revision, ManualInputRevision: run.ManualInputRevision, ManualConfigRevision: run.ManualConfigRevision, Terminal: IsTerminalState(run.State), Analyzing: run.State == ManualRunStateAnalyzing, Allocating: run.State == ManualRunStateAllocating, Allocated: run.State == ManualRunStateAllocated, Running: run.State == ManualRunStateRunning, Succeeded: run.State == ManualRunStateSucceeded, Failed: run.State == ManualRunStateFailed, Cancelled: run.State == ManualRunStateCancelled, NeedsAttention: run.State == ManualRunStateNeedsAttention, AllocationFailed: run.State == ManualRunStateAllocationFailed, NeedsExplicitReanalyze: run.State == ManualRunStateAnalysisFailed || run.State == ManualRunStateAllocationFailed, FailurePolicy: ManualRunFailurePolicy, SnapshotDigest: run.SnapshotDigest, SnapshotCount: run.SnapshotCount, SnapshotBytes: run.SnapshotBytes, AllocationVersion: run.AllocationVersion, AllocationGeneration: run.AllocationGeneration, AllocationDigest: run.AllocationDigest, AllocationCount: run.AllocationCount, AllocationBytes: run.AllocationBytes, AssignedCount: run.AssignedCount, AssignedBytes: run.AssignedBytes, UnassignedCount: run.UnassignedCount, UnassignedBytes: run.UnassignedBytes, OversizeCount: run.OversizeCount, OversizeBytes: run.OversizeBytes, AggregateCapacityCount: run.AggregateCapacityCount, AggregateCapacityBytes: run.AggregateCapacityBytes, LastError: SanitizeMessage(run.LastError), CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt, AnalysisStartedAt: run.AnalysisStartedAt, AnalyzedAt: run.AnalyzedAt, FailedAt: run.FailedAt}
+	return RunStatus{ID: run.ID, TaskID: run.TaskID, State: run.State, Revision: run.Revision, ManualInputRevision: run.ManualInputRevision, ManualConfigRevision: run.ManualConfigRevision, Terminal: IsTerminalState(run.State), Analyzing: run.State == ManualRunStateAnalyzing, Allocating: run.State == ManualRunStateAllocating, Allocated: run.State == ManualRunStateAllocated, Running: run.State == ManualRunStateRunning, Succeeded: run.State == ManualRunStateSucceeded, Failed: run.State == ManualRunStateFailed, Cancelled: run.State == ManualRunStateCancelled, NeedsAttention: run.State == ManualRunStateNeedsAttention, AllocationFailed: run.State == ManualRunStateAllocationFailed, NeedsExplicitReanalyze: run.State == ManualRunStateAnalysisFailed || run.State == ManualRunStateAllocationFailed, FailurePolicy: ManualRunFailurePolicy, SnapshotDigest: run.SnapshotDigest, SnapshotCount: run.SnapshotCount, SnapshotBytes: run.SnapshotBytes, AllocationVersion: run.AllocationVersion, AllocationGeneration: run.AllocationGeneration, AllocationDigest: run.AllocationDigest, AllocationCount: run.AllocationCount, AllocationBytes: run.AllocationBytes, AssignedCount: run.AssignedCount, AssignedBytes: run.AssignedBytes, AlreadyTransferredCount: run.AlreadyTransferredCount, AlreadyTransferredBytes: run.AlreadyTransferredBytes, UnassignedCount: run.UnassignedCount, UnassignedBytes: run.UnassignedBytes, OversizeCount: run.OversizeCount, OversizeBytes: run.OversizeBytes, AggregateCapacityCount: run.AggregateCapacityCount, AggregateCapacityBytes: run.AggregateCapacityBytes, LastError: SanitizeMessage(run.LastError), CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt, AnalysisStartedAt: run.AnalysisStartedAt, AnalyzedAt: run.AnalyzedAt, FailedAt: run.FailedAt}
 }
 
 func ValidatePublicRun(run ManualTransferRun) error {

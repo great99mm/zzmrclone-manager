@@ -120,6 +120,74 @@ func TestAllocationInactiveRowsAndStaleRevisionAreHidden(t *testing.T) {
 	}
 }
 
+func TestAllocationSkipsPreviouslyVerifiedCopySnapshots(t *testing.T) {
+	database := manualTestDB(t)
+	if err := database.AutoMigrate(&ManualWorkerFile{}); err != nil {
+		t.Fatal(err)
+	}
+	run := seedAllocationRun(t, database, 1, []allocationTestFile{{"copied", 10}, {"config-changed", 20}, {"new", 30}})
+	run.ManualConfigFingerprint = "same-config"
+	if err := database.Model(&ManualTransferRun{}).Where("id = ?", run.ID).Update("manual_config_fingerprint", run.ManualConfigFingerprint).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	history := run
+	history.ID = 0
+	history.State = ManualRunStateSucceeded
+	history.Revision = 3
+	history.IdempotencyKey = "history-same-config"
+	history.RequestFingerprint = "history-same-config"
+	if err := database.Create(&history).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Create(&ManualWorkerFile{RunID: history.ID, WorkerID: history.ID, AttemptID: 1, RelativePath: "copied", SnapshotKey: "snapshot-0", SizeBytes: 10, State: ManualWorkerFileStateVerified}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	otherConfig := history
+	otherConfig.ID = 0
+	otherConfig.IdempotencyKey = "history-other-config"
+	otherConfig.RequestFingerprint = "history-other-config"
+	otherConfig.ManualConfigFingerprint = "other-config"
+	if err := database.Create(&otherConfig).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Create(&ManualWorkerFile{RunID: otherConfig.ID, WorkerID: otherConfig.ID, AttemptID: 1, RelativePath: "config-changed", SnapshotKey: "snapshot-1", SizeBytes: 20, State: ManualWorkerFileStateVerified}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	var accounts []ManualRunAccount
+	if err := database.Where("run_id = ?", run.ID).Find(&accounts).Error; err != nil {
+		t.Fatal(err)
+	}
+	result, err := NewService(database).streamAllocation(run, accounts, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Assigned != 2 || result.AssignedBytes != 50 || result.AlreadyTransferredCount != 1 || result.AlreadyTransferredBytes != 10 || result.Unassigned != 0 {
+		t.Fatalf("allocation result = %#v", result)
+	}
+	var rows []ManualRunAllocation
+	if err := database.Where("run_id = ? AND generation = ?", run.ID, 1).Order("relative_path ASC").Find(&rows).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("allocation rows = %#v", rows)
+	}
+	for _, row := range rows {
+		switch row.RelativePath {
+		case "copied":
+			if row.UnassignedReason != ManualAllocationReasonAlreadyTransferred || row.AccountID != 0 {
+				t.Fatalf("copied allocation = %#v", row)
+			}
+		case "config-changed", "new":
+			if row.UnassignedReason != "" || row.AccountID == 0 {
+				t.Fatalf("reassigned allocation = %#v", row)
+			}
+		}
+	}
+}
+
 type allocationTestFile struct {
 	path string
 	size int64

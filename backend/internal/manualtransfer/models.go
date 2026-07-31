@@ -44,28 +44,29 @@ const (
 	ManualAccountPageLimit = 100
 	// ManualMaxAccountInputs is a transport/memory safety bound, not a business
 	// account-count limit; allocation must still support every accepted entry.
-	ManualMaxAccountInputs                        = 256
-	ManualMaxAnalyzeRequestBytes            int64 = 1 << 20
-	manualStringLimit                             = 4096
-	manualActorStringLimit                        = 256
-	ManualRunIdempotencyIndex                     = "uq_manual_transfer_runs_task_idempotency"
-	ManualRunActiveIndex                          = "uq_manual_transfer_runs_task_active"
-	ManualRunFilesRunPathIndex                    = "idx_manual_run_files_run_path"
-	ManualRunFilesPathUniqueIndex                 = "uq_manual_run_files_run_path"
-	ManualRunFilesSnapshotUniqueIndex             = "uq_manual_run_files_run_snapshot"
-	ManualRunAllocationsRunPathIndex              = "idx_manual_run_allocations_run_path"
-	ManualRunAllocationsPathUniqueIndex           = "uq_manual_run_allocations_run_generation_path"
-	ManualRunAllocationsSnapshotUniqueIndex       = "uq_manual_run_allocations_run_generation_snapshot"
-	ManualRunWorkersRunPositionIndex              = "uq_manual_run_workers_run_position"
-	ManualRunWorkerAttemptsNumberIndex            = "uq_manual_worker_attempts_worker_number"
-	ManualRunWorkerFilesPathIndex                 = "uq_manual_worker_files_worker_path"
-	ManualRunWorkerProgressSequenceIndex          = "uq_manual_worker_progress_worker_sequence"
-	ManualRunWorkerLogsWorkerIndex                = "uq_manual_worker_logs_worker"
-	ManualRunEventMigrationReconciled             = "migration_reconciled_duplicate_analysis"
-	ManualAllocationVersion                       = 1
-	ManualAllocationReasonOversize                = "oversize"
-	ManualAllocationReasonAggregateCapacity       = "aggregate_capacity"
-	ManualAllocationReasonAccountCapacity         = "account_capacity"
+	ManualMaxAccountInputs                         = 256
+	ManualMaxAnalyzeRequestBytes             int64 = 1 << 20
+	manualStringLimit                              = 4096
+	manualActorStringLimit                         = 256
+	ManualRunIdempotencyIndex                      = "uq_manual_transfer_runs_task_idempotency"
+	ManualRunActiveIndex                           = "uq_manual_transfer_runs_task_active"
+	ManualRunFilesRunPathIndex                     = "idx_manual_run_files_run_path"
+	ManualRunFilesPathUniqueIndex                  = "uq_manual_run_files_run_path"
+	ManualRunFilesSnapshotUniqueIndex              = "uq_manual_run_files_run_snapshot"
+	ManualRunAllocationsRunPathIndex               = "idx_manual_run_allocations_run_path"
+	ManualRunAllocationsPathUniqueIndex            = "uq_manual_run_allocations_run_generation_path"
+	ManualRunAllocationsSnapshotUniqueIndex        = "uq_manual_run_allocations_run_generation_snapshot"
+	ManualRunWorkersRunPositionIndex               = "uq_manual_run_workers_run_position"
+	ManualRunWorkerAttemptsNumberIndex             = "uq_manual_worker_attempts_worker_number"
+	ManualRunWorkerFilesPathIndex                  = "uq_manual_worker_files_worker_path"
+	ManualRunWorkerProgressSequenceIndex           = "uq_manual_worker_progress_worker_sequence"
+	ManualRunWorkerLogsWorkerIndex                 = "uq_manual_worker_logs_worker"
+	ManualRunEventMigrationReconciled              = "migration_reconciled_duplicate_analysis"
+	ManualAllocationVersion                        = 1
+	ManualAllocationReasonOversize                 = "oversize"
+	ManualAllocationReasonAggregateCapacity        = "aggregate_capacity"
+	ManualAllocationReasonAccountCapacity          = "account_capacity"
+	ManualAllocationReasonAlreadyTransferred       = "already_transferred"
 	// ManualAllocationReasonNoFit is retained as a source-compatible alias.
 	ManualAllocationReasonNoFit = ManualAllocationReasonAccountCapacity
 
@@ -140,6 +141,8 @@ type ManualTransferRun struct {
 	AllocationBytes              int64      `json:"allocation_bytes" gorm:"check:manual_transfer_run_allocation_bytes_nonnegative,allocation_bytes >= 0"`
 	AssignedCount                int64      `json:"assigned_count" gorm:"check:manual_transfer_run_assigned_count_nonnegative,assigned_count >= 0"`
 	AssignedBytes                int64      `json:"assigned_bytes" gorm:"check:manual_transfer_run_assigned_bytes_nonnegative,assigned_bytes >= 0"`
+	AlreadyTransferredCount      int64      `json:"already_transferred_count" gorm:"check:manual_transfer_run_already_transferred_count_nonnegative,already_transferred_count >= 0"`
+	AlreadyTransferredBytes      int64      `json:"already_transferred_bytes" gorm:"check:manual_transfer_run_already_transferred_bytes_nonnegative,already_transferred_bytes >= 0"`
 	UnassignedCount              int64      `json:"unassigned_count" gorm:"check:manual_transfer_run_unassigned_count_nonnegative,unassigned_count >= 0"`
 	UnassignedBytes              int64      `json:"unassigned_bytes" gorm:"check:manual_transfer_run_unassigned_bytes_nonnegative,unassigned_bytes >= 0"`
 	OversizeCount                int64      `json:"oversize_count" gorm:"check:manual_transfer_run_oversize_count_nonnegative,oversize_count >= 0"`
@@ -296,12 +299,12 @@ type ManualWorkerFile struct {
 	WorkerID     uint       `json:"worker_id" gorm:"not null;index;uniqueIndex:uq_manual_worker_files_worker_path,priority:1"`
 	AttemptID    uint       `json:"attempt_id" gorm:"not null;index"`
 	RelativePath string     `json:"relative_path" gorm:"not null;uniqueIndex:uq_manual_worker_files_worker_path,priority:2"`
-	SnapshotKey  string     `json:"snapshot_key" gorm:"not null"`
+	SnapshotKey  string     `json:"snapshot_key" gorm:"not null;index:idx_manual_worker_files_state_snapshot,priority:2"`
 	SizeBytes    int64      `json:"size_bytes" gorm:"not null"`
 	MtimeNS      int64      `json:"mtime_ns" gorm:"not null"`
 	Device       int64      `json:"device" gorm:"not null"`
 	Inode        int64      `json:"inode" gorm:"not null"`
-	State        string     `json:"state" gorm:"not null;default:'pending';index"`
+	State        string     `json:"state" gorm:"not null;default:'pending';index;index:idx_manual_worker_files_state_snapshot,priority:1"`
 	VerifiedAt   *time.Time `json:"verified_at,omitempty"`
 	LastError    string     `json:"last_error,omitempty"`
 	CreatedAt    time.Time  `json:"created_at"`

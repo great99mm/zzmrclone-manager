@@ -323,6 +323,8 @@ const ManualAllocationWorkspace = ({ taskId, task }) => {
   const analysisState = stale ? 'stale' : analysisPending(run) ? 'analyzing' : analysisFailed(run) ? 'failed' : analysisComplete(run) ? 'complete' : 'idle';
   const allocationState = allocationPending(run) ? 'allocating' : allocationComplete(run) ? 'complete' : 'idle';
   const allocatedBytes = run?.assigned_bytes;
+  const alreadyTransferredBytes = run?.already_transferred_bytes;
+  const alreadyTransferredCount = run?.already_transferred_count;
   const unassignedBytes = run?.unassigned_bytes;
   const unassignedCount = run?.unassigned_count;
   const executionState = ['running', 'succeeded', 'failed', 'cancelled', 'needs_attention'].includes(statusOf(run));
@@ -421,25 +423,33 @@ const ManualAllocationWorkspace = ({ taskId, task }) => {
           </section>
         )}
 
-        {previewReady && <ManualPreview run={run} onRunChange={setRun} accountRevision={accountRevision} accountGroups={accountGroups} accountCursor={accountCursor} accountLoading={accountLoading} loadAccountGroups={loadAccountGroups} expandedGroups={expandedGroups} toggleGroup={toggleGroup} filePages={filePages} loadFiles={loadFiles} fileSearch={fileSearch} setFileSearch={setFileSearch} fileFilter={fileFilter} setFileFilter={setFileFilter} allocatedBytes={allocatedBytes} unassignedBytes={unassignedBytes} unassignedCount={unassignedCount} />}
+        {previewReady && <ManualPreview run={run} onRunChange={setRun} accountRevision={accountRevision} accountGroups={accountGroups} accountCursor={accountCursor} accountLoading={accountLoading} loadAccountGroups={loadAccountGroups} expandedGroups={expandedGroups} toggleGroup={toggleGroup} filePages={filePages} loadFiles={loadFiles} fileSearch={fileSearch} setFileSearch={setFileSearch} fileFilter={fileFilter} setFileFilter={setFileFilter} allocatedBytes={allocatedBytes} alreadyTransferredBytes={alreadyTransferredBytes} alreadyTransferredCount={alreadyTransferredCount} unassignedBytes={unassignedBytes} unassignedCount={unassignedCount} />}
       </div>
     </section>
   );
 };
 
-const ManualPreview = ({ run, onRunChange, accountRevision, accountGroups, accountCursor, accountLoading, loadAccountGroups, expandedGroups, toggleGroup, filePages, loadFiles, fileSearch, setFileSearch, fileFilter, setFileFilter, allocatedBytes, unassignedBytes, unassignedCount }) => {
+const ManualPreview = ({ run, onRunChange, accountRevision, accountGroups, accountCursor, accountLoading, loadAccountGroups, expandedGroups, toggleGroup, filePages, loadFiles, fileSearch, setFileSearch, fileFilter, setFileFilter, allocatedBytes, alreadyTransferredBytes, alreadyTransferredCount, unassignedBytes, unassignedCount }) => {
   const summary = run || {};
   const groups = accountGroups.length ? accountGroups : listOf(run, ['accounts', 'account_groups']);
   const visibleGroups = groups.filter(group => fileFilter === 'all' || fileFilter === 'assigned');
+  const totalFileCount = Number(run.snapshot_count ?? summary.total_file_count ?? 0);
+  const totalFileBytes = Number(run.snapshot_bytes ?? summary.total_file_bytes ?? 0);
+  const completedFileCount = Number(alreadyTransferredCount ?? summary.already_transferred_count ?? 0);
+  const completedFileBytes = Number(alreadyTransferredBytes ?? summary.already_transferred_bytes ?? 0);
+  const pendingFileCount = Math.max(0, totalFileCount - completedFileCount);
+  const pendingFileBytes = Math.max(0, totalFileBytes - completedFileBytes);
   return (
     <section className="border-t border-gray-200 pt-4" aria-labelledby="manual-preview-heading">
       <div className="flex flex-col md:flex-row md:items-start justify-between gap-3">
         <div><h3 id="manual-preview-heading" className="text-sm font-semibold text-gray-900">分配预览</h3><p className="text-xs text-gray-500 mt-0.5">修订版 {run.revision ?? run.expected_revision ?? '-'} · {formatDateTime(run.updated_at || run.created_at)} · 运行尚未启用</p></div>
-        <div className="flex flex-col sm:flex-row gap-2"><label className="relative"><Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" /><input value={fileSearch} onChange={event => setFileSearch(event.target.value)} placeholder="筛选文件名" className="h-9 w-full sm:w-44 rounded-md border border-gray-300 pl-7 pr-2 text-xs focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500" aria-label="筛选预览文件名" /></label><select value={fileFilter} onChange={event => setFileFilter(event.target.value)} className="h-9 rounded-md border border-gray-300 px-2 text-xs text-gray-700 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500" aria-label="筛选预览分组"><option value="all">全部分组</option><option value="assigned">已分配</option><option value="oversize">文件过大</option><option value="aggregate_capacity">总容量不足</option><option value="account_capacity">账号容量不足</option></select></div>
+        <div className="flex flex-col sm:flex-row gap-2"><label className="relative"><Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" /><input value={fileSearch} onChange={event => setFileSearch(event.target.value)} placeholder="筛选文件名" className="h-9 w-full sm:w-44 rounded-md border border-gray-300 pl-7 pr-2 text-xs focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500" aria-label="筛选预览文件名" /></label><select value={fileFilter} onChange={event => setFileFilter(event.target.value)} className="h-9 rounded-md border border-gray-300 px-2 text-xs text-gray-700 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500" aria-label="筛选预览分组"><option value="all">全部分组</option><option value="assigned">已分配</option><option value="already_transferred">已验证完成</option><option value="oversize">文件过大</option><option value="aggregate_capacity">总容量不足</option><option value="account_capacity">账号容量不足</option></select></div>
       </div>
 
-      <div className="mt-3 grid grid-cols-2 lg:grid-cols-5 gap-3">
+      <div className="mt-3 grid grid-cols-2 md:grid-cols-3 xl:grid-cols-7 gap-3">
         <LimitMetric label="已分配" value={formatDecimalBytes(allocatedBytes ?? summary.assigned_bytes)} sub={`${run.assigned_count ?? summary.assigned_file_count ?? '-'} 个文件`} />
+        <LimitMetric label="已验证完成" value={formatDecimalBytes(alreadyTransferredBytes ?? summary.already_transferred_bytes)} sub={`${alreadyTransferredCount ?? summary.already_transferred_count ?? 0} 个文件`} />
+        <LimitMetric label="待处理" value={formatDecimalBytes(pendingFileBytes)} sub={`${pendingFileCount} 个文件`} />
         <LimitMetric label="未分配" value={formatDecimalBytes(unassignedBytes ?? summary.unassigned_bytes)} sub={`${unassignedCount ?? summary.unassigned_file_count ?? 0} 个文件`} />
         <LimitMetric label="未分配原因" value="按需查看" sub="文件过大 / 容量不足" />
         <LimitMetric label="总文件" value={run.snapshot_count ?? summary.total_file_count ?? '-'} sub="分析快照" />
@@ -451,6 +461,7 @@ const ManualPreview = ({ run, onRunChange, accountRevision, accountGroups, accou
           const id = accountIdOf(group) ?? index;
           return <ManualPreviewGroup key={id} group={group} groupKey={`account-${id}`} options={{ account_id: id }} expanded={expandedGroups[`account-${id}`]} toggleGroup={toggleGroup} filePage={filePages[`account-${id}`]} loadFiles={loadFiles} fileSearch={fileSearch} />;
         })}
+        {(fileFilter === 'all' || fileFilter === 'already_transferred') && <ManualPreviewGroup group={{ name: '已验证完成', file_count: run.already_transferred_count, bytes: run.already_transferred_bytes }} groupKey="already-transferred" options={{ reason: 'already_transferred' }} expanded={expandedGroups['already-transferred']} toggleGroup={toggleGroup} filePage={filePages['already-transferred']} loadFiles={loadFiles} fileSearch={fileSearch} tone="success" />}
         {(fileFilter === 'all' || fileFilter === 'oversize') && <ManualPreviewGroup group={{ name: '文件过大', file_count: run.oversize_count, bytes: run.oversize_bytes }} groupKey="oversize" options={{ reason: 'oversize' }} expanded={expandedGroups.oversize} toggleGroup={toggleGroup} filePage={filePages.oversize} loadFiles={loadFiles} fileSearch={fileSearch} tone="warning" />}
         {(fileFilter === 'all' || fileFilter === 'aggregate_capacity') && <ManualPreviewGroup group={{ name: '总容量不足', file_count: run.aggregate_capacity_count, bytes: run.aggregate_capacity_bytes }} groupKey="aggregate-capacity" options={{ reason: 'aggregate_capacity' }} expanded={expandedGroups['aggregate-capacity']} toggleGroup={toggleGroup} filePage={filePages['aggregate-capacity']} loadFiles={loadFiles} fileSearch={fileSearch} tone="warning" />}
         {(fileFilter === 'all' || fileFilter === 'account_capacity') && <ManualPreviewGroup group={{ name: '账号容量不足', file_count: run.account_capacity_count, bytes: run.account_capacity_bytes }} groupKey="account-capacity" options={{ reason: 'account_capacity' }} expanded={expandedGroups['account-capacity']} toggleGroup={toggleGroup} filePage={filePages['account-capacity']} loadFiles={loadFiles} fileSearch={fileSearch} tone="warning" />}
@@ -469,7 +480,7 @@ const ManualPreviewGroup = ({ group, groupKey, options, expanded, toggleGroup, f
   const usagePercent = Math.min(100, (usage / ACCOUNT_CAP_BYTES) * 100);
   const isAccountGroup = group.account_id != null;
   return (
-    <div className={`border ${tone === 'warning' ? 'border-amber-200 bg-amber-50/50' : 'border-gray-200'} rounded-lg`}>
+    <div className={`border ${tone === 'warning' ? 'border-amber-200 bg-amber-50/50' : tone === 'success' ? 'border-emerald-200 bg-emerald-50/50' : 'border-gray-200'} rounded-lg`}>
       <button type="button" onClick={() => toggleGroup(groupKey, options)} aria-expanded={expanded} className="w-full flex items-center gap-2 p-3 text-left hover:bg-white/70 focus:outline-none focus:ring-2 focus:ring-indigo-500">
         {expanded ? <ChevronDown className="w-4 h-4 text-gray-500" /> : <ChevronRight className="w-4 h-4 text-gray-500" />}
         <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium text-gray-800">{group.remote_name || group.name || `账号 ${group.account_id || ''}`}</span>{isAccountGroup && <span className="mt-1 block h-1.5 overflow-hidden rounded-full bg-gray-200" role="progressbar" aria-label={`${group.remote_name || `账号 ${group.account_id}`} 分配容量`} aria-valuemin={0} aria-valuemax={ACCOUNT_CAP_BYTES} aria-valuenow={usage}><span className="block h-full bg-indigo-500" style={{ width: `${usagePercent}%` }} /></span>}</span>
