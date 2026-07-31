@@ -8,6 +8,7 @@ import TaskDetail from './pages/TaskDetail';
 import TaskForm from './pages/TaskForm';
 import Logs from './pages/Logs';
 import Settings from './pages/Settings';
+import TrustedAccounts from './pages/TrustedAccounts';
 import FileBrowser from './pages/FileBrowser';
 import Mounts from './pages/Mounts';
 import Login from './pages/Login';
@@ -91,6 +92,7 @@ function App() {
             <Route path="/logs" element={<Logs />} />
             <Route path="/files" element={<FileBrowser />} />
             <Route path="/mounts" element={<Mounts />} />
+            <Route path="/accounts" element={<TrustedAccounts />} />
             <Route path="/settings" element={<Settings />} />
           </Routes>
         </main>

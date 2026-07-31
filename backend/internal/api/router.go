@@ -171,6 +171,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		api.POST("/register", handleRegister)
 		api.POST("/change-password", handleChangePassword)
 		api.GET("/manual-accounts", requireAdminStrictTokenOrSession, listManualAvailableAccounts)
+		api.GET("/quota-accounts", requireAdminStrictTokenOrSession, listQuotaAccounts)
+		api.POST("/quota-accounts", requireAdminStrictTokenOrSession, createQuotaAccount)
+		api.PUT("/quota-accounts/:id", requireAdminStrictTokenOrSession, updateQuotaAccount)
 
 		// Token management (read/update)
 		api.GET("/token", requireTokenQuery, getTokenInfo)

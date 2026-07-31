@@ -9,7 +9,8 @@ import {
   ChevronLeft,
   ChevronRight,
   HardDrive,
-  Cloud
+  Cloud,
+  ShieldCheck
 } from 'lucide-react';
 import useAuthStore from '../hooks/useAuthStore';
 
@@ -27,6 +28,7 @@ const Sidebar = ({ open, setOpen }) => {
     { path: '/tasks', icon: List, label: '任务管理' },
     { path: '/files', icon: FolderOpen, label: '文件浏览器' },
     { path: '/mounts', icon: Cloud, label: '云盘挂载' },
+    { path: '/accounts', icon: ShieldCheck, label: '账号管理' },
 
     { path: '/settings', icon: Settings, label: '系统设置' },
   ];

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { Link, useParams, useNavigate } from 'react-router-dom';
 import { 
   ArrowLeft, 
   Save, 
@@ -413,7 +413,7 @@ const TaskForm = () => {
                 <p id="manual-accounts-help" className="mt-1 text-xs text-gray-500">选择本次手动分配会使用的可信账号。创建后可在任务详情调整顺序。</p>
                 {manualAccountsLoading && <div className="py-3 text-sm text-gray-500">正在加载可信账号...</div>}
                 {manualAccountsError && <div className="py-3 text-sm text-red-600" role="alert">{manualAccountsError}</div>}
-                {!manualAccountsLoading && !manualAccountsError && manualAccounts.length === 0 && <div className="py-3 text-sm text-amber-700">没有可用的可信账号。</div>}
+                {!manualAccountsLoading && !manualAccountsError && manualAccounts.length === 0 && <div className="py-3 text-sm text-amber-700">没有可用的可信账号。<Link to="/accounts" className="ml-2 font-medium text-blue-700 hover:text-blue-800">前往账号管理</Link></div>}
                 {!manualAccountsLoading && manualAccounts.length > 0 && (
                   <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
                     {manualAccounts.map(account => {
