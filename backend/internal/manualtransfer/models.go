@@ -18,6 +18,13 @@ const (
 	ManualRunStateCancelled        = "cancelled"
 	ManualRunStateNeedsAttention   = "needs_attention"
 
+	ManualSettlementStateActive      = "active"
+	ManualSettlementStateStopping    = "stopping"
+	ManualSettlementStateStopped     = "stopped"
+	ManualSettlementStateReconciling = "reconciling"
+	ManualSettlementStateReconciled  = "reconciled"
+	ManualSettlementStateFinished    = "finished"
+
 	ManualRunEventRequested            = "analyze_requested"
 	ManualRunEventAnalysisStarted      = "analysis_started"
 	ManualRunEventAnalysisCompleted    = "analysis_completed"
@@ -29,6 +36,12 @@ const (
 	ManualRunEventAllocationFailed     = "allocation_failed"
 	ManualRunEventWorkersStarted       = "workers_started"
 	ManualRunEventWorkersReconciled    = "workers_reconciled"
+	ManualRunEventStopRequested        = "run_stop_requested"
+	ManualRunEventStopped              = "run_stopped"
+	ManualRunEventReconcileRequested   = "run_reconcile_requested"
+	ManualRunEventReconcileFailed      = "run_reconcile_failed"
+	ManualRunEventReconciled           = "run_reconciled"
+	ManualRunEventFinished             = "run_finished"
 	ManualWorkerEventStarted           = "worker_started"
 	ManualWorkerEventProcessStarted    = "process_started"
 	ManualWorkerEventFinished          = "worker_finished"
@@ -84,6 +97,10 @@ const (
 	ManualWorkerFileStateVerified = "verified"
 	ManualWorkerFileStateFailed   = "failed"
 	ManualWorkerFileStateUnknown  = "unknown"
+	ManualWorkerFileStateReleased = "released"
+
+	ManualWorkerFileReleaseRemoteMissing = "remote_missing"
+	ManualWorkerFileReleaseSizeMismatch  = "remote_size_mismatch"
 )
 
 // ManualTaskAccount is the durable ordered account template for a task. It is
@@ -156,6 +173,19 @@ type ManualTransferRun struct {
 	WorkerStartIdempotencyKey    string     `json:"-"`
 	WorkerStartFingerprint       string     `json:"-"`
 	WorkerStartedAt              *time.Time `json:"started_at,omitempty"`
+	SettlementState              string     `json:"settlement_state" gorm:"not null;default:'active';index"`
+	SettlementCheckedCount       int64      `json:"settlement_checked_count" gorm:"not null;default:0"`
+	SettlementVerifiedCount      int64      `json:"settlement_verified_count" gorm:"not null;default:0"`
+	SettlementVerifiedBytes      int64      `json:"settlement_verified_bytes" gorm:"not null;default:0"`
+	SettlementReleasedCount      int64      `json:"settlement_released_count" gorm:"not null;default:0"`
+	SettlementReleasedBytes      int64      `json:"settlement_released_bytes" gorm:"not null;default:0"`
+	SettlementError              string     `json:"-" gorm:"type:text"`
+	SettlementStopKey            string     `json:"-"`
+	SettlementReconcileKey       string     `json:"-"`
+	SettlementFinishKey          string     `json:"-"`
+	SettlementStoppedAt          *time.Time `json:"settlement_stopped_at,omitempty"`
+	SettlementReconciledAt       *time.Time `json:"settlement_reconciled_at,omitempty"`
+	SettlementFinishedAt         *time.Time `json:"settlement_finished_at,omitempty"`
 	CreatedAt                    time.Time  `json:"created_at" gorm:"index:idx_manual_transfer_runs_task_created"`
 	UpdatedAt                    time.Time  `json:"updated_at"`
 }
@@ -294,21 +324,22 @@ type ManualWorkerAttempt struct {
 // ManualWorkerFile is the durable assignment and completion ledger for one
 // worker. Its source identity comes from the immutable analyzed snapshot.
 type ManualWorkerFile struct {
-	ID           uint       `json:"id" gorm:"primaryKey"`
-	RunID        uint       `json:"run_id" gorm:"not null;index"`
-	WorkerID     uint       `json:"worker_id" gorm:"not null;index;uniqueIndex:uq_manual_worker_files_worker_path,priority:1"`
-	AttemptID    uint       `json:"attempt_id" gorm:"not null;index"`
-	RelativePath string     `json:"relative_path" gorm:"not null;uniqueIndex:uq_manual_worker_files_worker_path,priority:2"`
-	SnapshotKey  string     `json:"snapshot_key" gorm:"not null;index:idx_manual_worker_files_state_snapshot,priority:2"`
-	SizeBytes    int64      `json:"size_bytes" gorm:"not null"`
-	MtimeNS      int64      `json:"mtime_ns" gorm:"not null"`
-	Device       int64      `json:"device" gorm:"not null"`
-	Inode        int64      `json:"inode" gorm:"not null"`
-	State        string     `json:"state" gorm:"not null;default:'pending';index;index:idx_manual_worker_files_state_snapshot,priority:1"`
-	VerifiedAt   *time.Time `json:"verified_at,omitempty"`
-	LastError    string     `json:"last_error,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	ID            uint       `json:"id" gorm:"primaryKey"`
+	RunID         uint       `json:"run_id" gorm:"not null;index"`
+	WorkerID      uint       `json:"worker_id" gorm:"not null;index;uniqueIndex:uq_manual_worker_files_worker_path,priority:1"`
+	AttemptID     uint       `json:"attempt_id" gorm:"not null;index"`
+	RelativePath  string     `json:"relative_path" gorm:"not null;uniqueIndex:uq_manual_worker_files_worker_path,priority:2"`
+	SnapshotKey   string     `json:"snapshot_key" gorm:"not null;index:idx_manual_worker_files_state_snapshot,priority:2"`
+	SizeBytes     int64      `json:"size_bytes" gorm:"not null"`
+	MtimeNS       int64      `json:"mtime_ns" gorm:"not null"`
+	Device        int64      `json:"device" gorm:"not null"`
+	Inode         int64      `json:"inode" gorm:"not null"`
+	State         string     `json:"state" gorm:"not null;default:'pending';index;index:idx_manual_worker_files_state_snapshot,priority:1"`
+	VerifiedAt    *time.Time `json:"verified_at,omitempty"`
+	LastError     string     `json:"last_error,omitempty"`
+	ReleaseReason string     `json:"release_reason,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
 // ManualWorkerEvent and ManualWorkerProgress are append-only operational

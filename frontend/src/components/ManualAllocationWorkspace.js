@@ -30,9 +30,12 @@ import {
   getManualRunFiles,
   getManualRuns,
   getManualAccounts,
+  finishManualRun,
+  reconcileManualRun,
   saveManualAccounts,
   retryManualWorker,
   startManualRun,
+  stopManualRun,
 } from '../services/api';
 
 const ACCOUNT_CAP_BYTES = 700 * 1000 * 1000 * 1000;
@@ -65,7 +68,7 @@ const listOf = (payload, names) => {
 const statusOf = (run) => String(run?.status || run?.state || run?.phase || '').toLowerCase();
 const analysisPending = (run) => ['analyzing', 'analysis_pending', 'queued'].includes(statusOf(run));
 const allocationPending = (run) => ['allocating', 'allocation_pending'].includes(statusOf(run));
-const analysisFailed = (run) => ['analysis_failed', 'failed'].includes(statusOf(run));
+const analysisFailed = (run) => statusOf(run) === 'analysis_failed';
 const allocationFailed = (run) => run?.allocation_failed === true || statusOf(run) === 'allocation_failed';
 const analysisComplete = (run) => ['analyzed', 'analysis_complete', 'allocated', 'allocation_failed', 'preview', 'ready'].includes(statusOf(run));
 const allocationComplete = (run) => ['allocated', 'preview', 'ready'].includes(statusOf(run)) || run?.allocation_status === 'allocated';
@@ -178,7 +181,8 @@ const ManualAllocationWorkspace = ({ taskId, task }) => {
     () => selectedIds.map(id => availableAccounts.find(account => accountIdOf(account) === id) || { account_id: id }),
     [availableAccounts, selectedIds],
   );
-  const unusedAccounts = availableAccounts.filter(account => !selectedIds.includes(accountIdOf(account)));
+	const unusedAccounts = availableAccounts.filter(account => !selectedIds.includes(accountIdOf(account)));
+	const runRequiresSettlement = executionRunState(run) && runStatus !== 'succeeded' && settlementStateOf(run) !== 'finished';
 
   const refreshRun = useCallback(async () => {
     if (!runId) return;
@@ -228,7 +232,7 @@ const ManualAllocationWorkspace = ({ taskId, task }) => {
   };
 
   const startAnalyze = async () => {
-    if (!task.source_dir || !task.remote_dir || selectedIds.length === 0) return;
+	if (!task.source_dir || !task.remote_dir || selectedIds.length === 0 || runRequiresSettlement) return;
     setActionState({ kind: 'analyze', loading: true, error: '' });
     setRunError('');
     try {
@@ -319,7 +323,7 @@ const ManualAllocationWorkspace = ({ taskId, task }) => {
     if (open && !filePages[key]) loadFiles(key, options);
   };
 
-  const readyForAnalyze = selectedIds.length > 0 && Boolean(task.source_dir) && Boolean(task.remote_dir);
+	const readyForAnalyze = selectedIds.length > 0 && Boolean(task.source_dir) && Boolean(task.remote_dir) && !runRequiresSettlement;
   const analysisState = stale ? 'stale' : analysisPending(run) ? 'analyzing' : analysisFailed(run) ? 'failed' : analysisComplete(run) ? 'complete' : 'idle';
   const allocationState = allocationPending(run) ? 'allocating' : allocationComplete(run) ? 'complete' : 'idle';
   const allocatedBytes = run?.assigned_bytes;
@@ -392,7 +396,7 @@ const ManualAllocationWorkspace = ({ taskId, task }) => {
         <section className="border-t border-gray-200 pt-4" aria-labelledby="manual-analysis-heading">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="min-w-0"><h3 id="manual-analysis-heading" className="text-sm font-semibold text-gray-900">分析源文件</h3><p className="text-xs text-gray-500 mt-0.5 break-words">{task.source_dir || '未设置源目录'} → {task.remote_name ? `${task.remote_name}:` : ''}{task.remote_dir || '未设置目标目录'}</p></div>
-            <button type="button" onClick={startAnalyze} disabled={!readyForAnalyze || actionState.loading || analysisPending(run)} title={!readyForAnalyze ? '需要源目录、目标目录和至少一个账号' : '扫描文件但不上传或预留额度'} className="inline-flex min-h-11 w-full shrink-0 items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-indigo-500 sm:w-auto sm:min-h-10">
+            <button type="button" onClick={startAnalyze} disabled={!readyForAnalyze || actionState.loading || analysisPending(run)} title={runRequiresSettlement ? '请先停止、核对并结束当前运行' : !readyForAnalyze ? '需要源目录、目标目录和至少一个账号' : '扫描文件但不上传或预留额度'} className="inline-flex min-h-11 w-full shrink-0 items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-indigo-500 sm:w-auto sm:min-h-10">
               {actionState.kind === 'analyze' && actionState.loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
               {analysisComplete(run) || stale ? '重新分析' : '开始分析'}
             </button>
@@ -404,6 +408,7 @@ const ManualAllocationWorkspace = ({ taskId, task }) => {
             {allocationFailed(run) && <StateNotice tone="error" icon={AlertTriangle} text={`分配失败：${run?.last_error || run?.error || '未知错误'}。请重新分析后再生成分配。`} />}
             {run?.needs_explicit_reanalyze === true && <StateNotice tone="warning" icon={AlertTriangle} text="当前运行需要显式重新分析；旧预览不能继续使用。" />}
             {stale && !run?.needs_explicit_reanalyze && <StateNotice tone="warning" icon={AlertTriangle} text="源、目标或账号顺序已变化，当前分析/预览已失效，请重新分析。" />}
+            {runRequiresSettlement && <StateNotice tone="warning" icon={AlertTriangle} text="当前运行必须先停止、核对并结束，之后才能开始下一次分析。" />}
             {actionState.error && <StateNotice tone="error" icon={AlertTriangle} text={actionState.error} />}
             {runError && <StateNotice tone="error" icon={AlertTriangle} text={runError} />}
             {!run && !runLoading && !actionState.error && <StateNotice tone="neutral" icon={Info} text="分析只读取文件树，完成后才能生成确定性分配预览。" />}
@@ -435,20 +440,22 @@ const ManualPreview = ({ run, onRunChange, accountRevision, accountGroups, accou
   const visibleGroups = groups.filter(group => fileFilter === 'all' || fileFilter === 'assigned');
   const totalFileCount = Number(run.snapshot_count ?? summary.total_file_count ?? 0);
   const totalFileBytes = Number(run.snapshot_bytes ?? summary.total_file_bytes ?? 0);
-  const completedFileCount = Number(alreadyTransferredCount ?? summary.already_transferred_count ?? 0);
-  const completedFileBytes = Number(alreadyTransferredBytes ?? summary.already_transferred_bytes ?? 0);
+  const previouslyCompletedCount = Number(alreadyTransferredCount ?? summary.already_transferred_count ?? 0);
+  const previouslyCompletedBytes = Number(alreadyTransferredBytes ?? summary.already_transferred_bytes ?? 0);
+  const completedFileCount = previouslyCompletedCount + Number(run.settlement_verified_count ?? 0);
+  const completedFileBytes = previouslyCompletedBytes + Number(run.settlement_verified_bytes ?? 0);
   const pendingFileCount = Math.max(0, totalFileCount - completedFileCount);
   const pendingFileBytes = Math.max(0, totalFileBytes - completedFileBytes);
   return (
     <section className="border-t border-gray-200 pt-4" aria-labelledby="manual-preview-heading">
       <div className="flex flex-col md:flex-row md:items-start justify-between gap-3">
         <div><h3 id="manual-preview-heading" className="text-sm font-semibold text-gray-900">分配预览</h3><p className="text-xs text-gray-500 mt-0.5">修订版 {run.revision ?? run.expected_revision ?? '-'} · {formatDateTime(run.updated_at || run.created_at)} · 运行尚未启用</p></div>
-        <div className="flex flex-col sm:flex-row gap-2"><label className="relative"><Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" /><input value={fileSearch} onChange={event => setFileSearch(event.target.value)} placeholder="筛选文件名" className="h-9 w-full sm:w-44 rounded-md border border-gray-300 pl-7 pr-2 text-xs focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500" aria-label="筛选预览文件名" /></label><select value={fileFilter} onChange={event => setFileFilter(event.target.value)} className="h-9 rounded-md border border-gray-300 px-2 text-xs text-gray-700 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500" aria-label="筛选预览分组"><option value="all">全部分组</option><option value="assigned">已分配</option><option value="already_transferred">已验证完成</option><option value="oversize">文件过大</option><option value="aggregate_capacity">总容量不足</option><option value="account_capacity">账号容量不足</option></select></div>
+        <div className="flex flex-col sm:flex-row gap-2"><label className="relative"><Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" /><input value={fileSearch} onChange={event => setFileSearch(event.target.value)} placeholder="筛选文件名" className="h-9 w-full sm:w-44 rounded-md border border-gray-300 pl-7 pr-2 text-xs focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500" aria-label="筛选预览文件名" /></label><select value={fileFilter} onChange={event => setFileFilter(event.target.value)} className="h-9 rounded-md border border-gray-300 px-2 text-xs text-gray-700 focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500" aria-label="筛选预览分组"><option value="all">全部分组</option><option value="assigned">已分配</option><option value="already_transferred">此前已验证</option><option value="oversize">文件过大</option><option value="aggregate_capacity">总容量不足</option><option value="account_capacity">账号容量不足</option></select></div>
       </div>
 
       <div className="mt-3 grid grid-cols-2 md:grid-cols-3 xl:grid-cols-7 gap-3">
         <LimitMetric label="已分配" value={formatDecimalBytes(allocatedBytes ?? summary.assigned_bytes)} sub={`${run.assigned_count ?? summary.assigned_file_count ?? '-'} 个文件`} />
-        <LimitMetric label="已验证完成" value={formatDecimalBytes(alreadyTransferredBytes ?? summary.already_transferred_bytes)} sub={`${alreadyTransferredCount ?? summary.already_transferred_count ?? 0} 个文件`} />
+        <LimitMetric label="累计已验证完成" value={formatDecimalBytes(completedFileBytes)} sub={`${completedFileCount} 个文件`} />
         <LimitMetric label="待处理" value={formatDecimalBytes(pendingFileBytes)} sub={`${pendingFileCount} 个文件`} />
         <LimitMetric label="未分配" value={formatDecimalBytes(unassignedBytes ?? summary.unassigned_bytes)} sub={`${unassignedCount ?? summary.unassigned_file_count ?? 0} 个文件`} />
         <LimitMetric label="未分配原因" value="按需查看" sub="文件过大 / 容量不足" />
@@ -461,7 +468,7 @@ const ManualPreview = ({ run, onRunChange, accountRevision, accountGroups, accou
           const id = accountIdOf(group) ?? index;
           return <ManualPreviewGroup key={id} group={group} groupKey={`account-${id}`} options={{ account_id: id }} expanded={expandedGroups[`account-${id}`]} toggleGroup={toggleGroup} filePage={filePages[`account-${id}`]} loadFiles={loadFiles} fileSearch={fileSearch} />;
         })}
-        {(fileFilter === 'all' || fileFilter === 'already_transferred') && <ManualPreviewGroup group={{ name: '已验证完成', file_count: run.already_transferred_count, bytes: run.already_transferred_bytes }} groupKey="already-transferred" options={{ reason: 'already_transferred' }} expanded={expandedGroups['already-transferred']} toggleGroup={toggleGroup} filePage={filePages['already-transferred']} loadFiles={loadFiles} fileSearch={fileSearch} tone="success" />}
+        {(fileFilter === 'all' || fileFilter === 'already_transferred') && <ManualPreviewGroup group={{ name: '此前已验证完成', file_count: run.already_transferred_count, bytes: run.already_transferred_bytes }} groupKey="already-transferred" options={{ reason: 'already_transferred' }} expanded={expandedGroups['already-transferred']} toggleGroup={toggleGroup} filePage={filePages['already-transferred']} loadFiles={loadFiles} fileSearch={fileSearch} tone="success" />}
         {(fileFilter === 'all' || fileFilter === 'oversize') && <ManualPreviewGroup group={{ name: '文件过大', file_count: run.oversize_count, bytes: run.oversize_bytes }} groupKey="oversize" options={{ reason: 'oversize' }} expanded={expandedGroups.oversize} toggleGroup={toggleGroup} filePage={filePages.oversize} loadFiles={loadFiles} fileSearch={fileSearch} tone="warning" />}
         {(fileFilter === 'all' || fileFilter === 'aggregate_capacity') && <ManualPreviewGroup group={{ name: '总容量不足', file_count: run.aggregate_capacity_count, bytes: run.aggregate_capacity_bytes }} groupKey="aggregate-capacity" options={{ reason: 'aggregate_capacity' }} expanded={expandedGroups['aggregate-capacity']} toggleGroup={toggleGroup} filePage={filePages['aggregate-capacity']} loadFiles={loadFiles} fileSearch={fileSearch} tone="warning" />}
         {(fileFilter === 'all' || fileFilter === 'account_capacity') && <ManualPreviewGroup group={{ name: '账号容量不足', file_count: run.account_capacity_count, bytes: run.account_capacity_bytes }} groupKey="account-capacity" options={{ reason: 'account_capacity' }} expanded={expandedGroups['account-capacity']} toggleGroup={toggleGroup} filePage={filePages['account-capacity']} loadFiles={loadFiles} fileSearch={fileSearch} tone="warning" />}
@@ -497,6 +504,7 @@ const workerIsActive = (worker) => ['pending', 'starting', 'running', 'reconcili
 const workerIsTerminal = (worker) => ['succeeded', 'failed', 'cancelled', 'unknown', 'needs_attention'].includes(workerStatusOf(worker));
 const workerCanCancel = (worker) => worker?.actionability === 'cancel';
 const workerCanRetry = (worker) => worker?.actionability === 'retry';
+const settlementStateOf = (run) => String(run?.settlement_state || 'active').toLowerCase();
 const mergeWorkerData = (liveWorker, detail) => ({
   ...(detail?.worker || {}),
   ...liveWorker,
@@ -526,6 +534,7 @@ const ManualWorkerConsole = ({ run, onRunChange, accountRevision }) => {
   const [workersLoading, setWorkersLoading] = useState(true);
   const [workersError, setWorkersError] = useState('');
   const [startState, setStartState] = useState({ loading: false, error: '' });
+  const [settlementAction, setSettlementAction] = useState({ kind: '', loading: false, error: '' });
   const [expanded, setExpanded] = useState({});
   const [details, setDetails] = useState({});
   const [logs, setLogs] = useState({});
@@ -535,6 +544,9 @@ const ManualWorkerConsole = ({ run, onRunChange, accountRevision }) => {
   const isAllocated = statusOf(run) === 'allocated' || run?.allocated === true;
   const succeededWorkers = workers.filter(worker => workerStatusOf(worker) === 'succeeded').length;
   const runDisplayStatus = statusOf(run) === 'failed' && succeededWorkers > 0 ? '部分完成 · 有失败' : statusOf(run) === 'cancelled' && succeededWorkers > 0 ? '部分完成 · 已取消剩余' : statusOf(run) === 'needs_attention' ? '需要人工处理' : statusOf(run) === 'succeeded' ? '已完成' : statusOf(run) === 'failed' ? '失败' : statusOf(run) === 'cancelled' ? '已取消' : statusOf(run) || '待启动';
+  const settlementState = settlementStateOf(run);
+  const settlementPending = settlementState === 'stopping' || settlementState === 'reconciling';
+  const settlementActive = settlementState === 'active';
 
   const loadWorkers = useCallback(async () => {
     if (!runId) return;
@@ -560,7 +572,7 @@ const ManualWorkerConsole = ({ run, onRunChange, accountRevision }) => {
 
   const activeWorkers = workers.some(workerIsActive);
   const runTerminal = ['succeeded', 'failed', 'cancelled', 'needs_attention'].includes(statusOf(run));
-  const runNeedsPolling = workers.length > 0 && (!runTerminal || activeWorkers);
+  const runNeedsPolling = settlementPending || (workers.length > 0 && (!runTerminal || activeWorkers));
   const pollExecutionState = useCallback(async () => {
     await loadWorkers();
     if (!runId) return;
@@ -679,19 +691,70 @@ const ManualWorkerConsole = ({ run, onRunChange, accountRevision }) => {
     }
   };
 
+  const runSettlementAction = async (action) => {
+    if (!runId || settlementAction.loading) return;
+    if (action === 'stop' && !window.confirm('停止全部 worker 后将进入核对流程，不能再重试本次运行。继续停止？')) return;
+    setSettlementAction({ kind: action, loading: true, error: '' });
+    const payload = {
+      expected_revision: Number(run.revision),
+      idempotency_key: createIdempotencyKey(`manual-${action}`),
+    };
+    try {
+      const response = action === 'stop'
+        ? await stopManualRun(runId, payload)
+        : action === 'reconcile'
+          ? await reconcileManualRun(runId, payload)
+          : await finishManualRun(runId, payload);
+      onRunChange(runFromResponse(response.data) || run);
+      await loadWorkers();
+    } catch (error) {
+      setSettlementAction({ kind: action, loading: false, error: error.response?.data?.error || '运行结束流程失败，请刷新状态后重试。' });
+      await pollExecutionState();
+      return;
+    }
+    setSettlementAction({ kind: '', loading: false, error: '' });
+  };
+
+  const settlementControl = (() => {
+	if (statusOf(run) === 'succeeded') return null;
+    if (settlementState === 'active') {
+      if (workers.length === 0) return null;
+      return { action: 'stop', label: '停止这些任务', icon: Ban, tone: 'red' };
+    }
+    if (settlementState === 'stopping') {
+      if (run?.settlement_error) return { action: 'stop', label: '重试停止这些任务', icon: RefreshCw, tone: 'red' };
+      return { label: '正在停止全部任务', icon: Loader2, pending: true };
+    }
+    if (settlementState === 'stopped') return { action: 'reconcile', label: '比对后释放未完成文件', icon: RefreshCw, tone: 'amber' };
+    if (settlementState === 'reconciling') return { label: `正在比对 ${Number(run.settlement_checked_count || 0)}/${Number(run.assigned_count || 0)}`, icon: Loader2, pending: true };
+    if (settlementState === 'reconciled') return { action: 'finish', label: '结束本次任务', icon: CheckCircle2, tone: 'emerald' };
+    return null;
+  })();
+  const SettlementIcon = settlementControl?.icon;
+  const settlementButtonClass = settlementControl?.tone === 'red'
+    ? 'border-red-300 bg-red-50 text-red-700 hover:bg-red-100 focus:ring-red-500'
+    : settlementControl?.tone === 'amber'
+      ? 'border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 focus:ring-amber-500'
+      : 'border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 focus:ring-emerald-500';
+
   return (
     <section className="mt-4 border-t border-gray-200 pt-4" aria-labelledby="manual-workers-heading">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div><h3 id="manual-workers-heading" className="text-sm font-semibold text-gray-900">Worker 控制台</h3><p className="text-xs text-gray-500 mt-0.5">运行状态：{runDisplayStatus} · 每个已分配账号一个独立 worker；不会自动续跑。</p></div>
-        {isSupportedRun ? <button type="button" onClick={startWorkers} disabled={!isAllocated || startState.loading} title={!isAllocated ? '只有已分配的运行才能启动' : run?.transfer_mode === 'move' ? '开始运行；成功传输后删除源文件' : '显式启动已分配账号的 worker'} className="inline-flex min-h-11 w-full sm:w-auto items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-indigo-500">{startState.loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}开始运行</button> : <span className="w-full sm:w-auto text-center text-xs font-medium text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-2">当前传输模式不可运行</span>}
+        <div><h3 id="manual-workers-heading" className="text-sm font-semibold text-gray-900">Worker 控制台</h3><p className="text-xs text-gray-500 mt-0.5">运行状态：{runDisplayStatus} · 每个账号独立运行并保存对应的 Rclone 日志。</p></div>
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+          {isSupportedRun && settlementActive && isAllocated && <button type="button" onClick={startWorkers} disabled={startState.loading} title={run?.transfer_mode === 'move' ? '开始运行；成功传输后删除源文件' : '显式启动已分配账号的 worker'} className="inline-flex min-h-11 w-full sm:w-auto items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-indigo-500">{startState.loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}开始运行</button>}
+          {settlementControl && <button type="button" onClick={() => settlementControl.action && runSettlementAction(settlementControl.action)} disabled={settlementControl.pending || settlementAction.loading} className={`inline-flex min-h-11 w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 sm:w-auto ${settlementControl.pending ? 'border-gray-300 bg-gray-50 text-gray-600' : settlementButtonClass}`}><SettlementIcon className={`w-4 h-4 ${(settlementControl.pending || settlementAction.loading) ? 'animate-spin' : ''}`} />{settlementControl.label}</button>}
+          {!isSupportedRun && <span className="w-full sm:w-auto text-center text-xs font-medium text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-2">当前传输模式不可运行</span>}
+        </div>
       </div>
-      <div className="mt-2 min-h-[1.25rem]" aria-live="polite">{startState.error && <StateNotice tone="error" icon={AlertTriangle} text={startState.error} />}{workersError && <StateNotice tone="error" icon={AlertTriangle} text={workersError} />}</div>
-      {workersLoading && workers.length === 0 ? <InlineLoading text="正在获取 worker 状态..." /> : workers.length === 0 ? <div className="py-3 text-xs text-gray-500">尚未创建 worker。开始运行后，已分配账号会独立显示。</div> : <div className="mt-2 space-y-2" role="list" aria-label="手动传输 worker 列表">{workers.map(worker => <ManualWorkerRow key={workerIdOf(worker)} worker={mergeWorkerData(worker, details[workerIdOf(worker)])} expanded={expanded[workerIdOf(worker)]} onToggle={() => toggleWorker(worker)} onAction={workerAction} onRetryLogs={() => loadWorkerLogs(workerIdOf(worker))} action={workerActions[workerIdOf(worker)]} logs={logs[workerIdOf(worker)]} />)}</div>}
+      <div className="mt-2 min-h-[1.25rem] space-y-1" aria-live="polite">{startState.error && <StateNotice tone="error" icon={AlertTriangle} text={startState.error} />}{settlementAction.error && <StateNotice tone="error" icon={AlertTriangle} text={settlementAction.error} />}{run?.settlement_error && <StateNotice tone="warning" icon={AlertTriangle} text={run.settlement_error} />}{workersError && <StateNotice tone="error" icon={AlertTriangle} text={workersError} />}</div>
+      {settlementState !== 'active' && <div className="my-3 flex flex-wrap gap-x-5 gap-y-1 border-y border-gray-100 py-2 text-xs text-gray-600"><span>已核对 {Number(run.settlement_checked_count || 0)} 个</span><span className="text-emerald-700">远端已完成 {Number(run.settlement_verified_count || 0)} 个 · {formatDecimalBytes(run.settlement_verified_bytes)}</span><span className="text-amber-800">已释放 {Number(run.settlement_released_count || 0)} 个 · {formatDecimalBytes(run.settlement_released_bytes)}</span>{settlementState === 'finished' && <span className="font-medium text-gray-800">本次任务已结束</span>}</div>}
+      {workersLoading && workers.length === 0 ? <InlineLoading text="正在获取 worker 状态..." /> : workers.length === 0 ? <div className="py-3 text-xs text-gray-500">尚未创建 worker。开始运行后，已分配账号会独立显示。</div> : <div className="mt-2 space-y-2" role="list" aria-label="手动传输 worker 列表">{workers.map(worker => <ManualWorkerRow key={workerIdOf(worker)} worker={mergeWorkerData(worker, details[workerIdOf(worker)])} expanded={expanded[workerIdOf(worker)]} onToggle={() => toggleWorker(worker)} onAction={workerAction} onRetryLogs={() => loadWorkerLogs(workerIdOf(worker))} action={workerActions[workerIdOf(worker)]} logs={logs[workerIdOf(worker)]} actionsEnabled={settlementActive} />)}</div>}
     </section>
   );
 };
 
-const ManualWorkerRow = ({ worker, expanded, onToggle, onAction, onRetryLogs, action, logs }) => {
+const ManualWorkerRow = ({ worker, expanded, onToggle, onAction, onRetryLogs, action, logs, actionsEnabled }) => {
   const status = workerStatusOf(worker);
   const workerId = workerIdOf(worker);
   const completedBytes = Number(worker.completed_bytes || 0);
@@ -705,9 +768,9 @@ const ManualWorkerRow = ({ worker, expanded, onToggle, onAction, onRetryLogs, ac
       <div className="flex flex-col gap-2 p-3 sm:flex-row sm:items-center sm:gap-3">
         <button type="button" onClick={onToggle} aria-expanded={expanded} aria-controls={`worker-detail-${workerId}`} className="flex min-w-0 flex-1 items-start gap-2 rounded text-left focus:outline-none focus:ring-2 focus:ring-indigo-500"><span className="mt-0.5">{expanded ? <ChevronDown className="w-4 h-4 text-gray-500" /> : <ChevronRight className="w-4 h-4 text-gray-500" />}</span><span className="min-w-0 flex-1"><span className="flex flex-wrap items-center gap-2"><span className="min-w-0 break-words text-sm font-medium text-gray-800">{worker.remote_name || `账号 ${worker.account_id ?? workerId}`}</span><StatusPill status={status} /><span className="text-[11px] font-medium text-indigo-600">{expanded ? '收起日志' : '查看日志'}</span></span><span className="mt-1 block break-words text-xs text-gray-500">{currentFile}</span>{needsAttention && <span className="mt-1 block text-[11px] text-amber-800">需要查看日志并人工处理</span>}<span className="mt-1 block h-1.5 overflow-hidden rounded-full bg-gray-200" role="progressbar" aria-label="Worker 进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}><span className="block h-full bg-indigo-500 transition-all" style={{ width: `${percent}%` }} /></span></span></button>
         <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-left text-[11px] text-gray-500 sm:w-52 sm:shrink-0 sm:text-right"><span>文件 {worker.completed_count || 0}/{worker.assigned_count || 0}</span><span>尝试 {worker.attempt_number || 1}</span><span>{formatDecimalBytes(completedBytes)} / {formatDecimalBytes(totalBytes)}</span><span>{speed == null ? '-' : `${formatDecimalBytes(speed)}/s`}</span></div>
-        <div className="flex w-full shrink-0 gap-2 border-t border-gray-100 pt-2 sm:w-20 sm:border-0 sm:pt-0 sm:justify-end">{workerCanCancel(worker) && <button type="button" onClick={() => onAction(worker, 'cancel')} disabled={Boolean(action)} title="取消 worker" aria-label="取消 worker" className="inline-flex min-h-11 min-w-11 flex-1 items-center justify-center rounded-md border border-red-200 text-red-700 hover:bg-red-50 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-red-500 sm:flex-none sm:h-9 sm:min-h-0 sm:w-9">{action === 'cancel' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Ban className="w-4 h-4" />}</button>}{workerCanRetry(worker) && <button type="button" onClick={() => onAction(worker, 'retry')} disabled={Boolean(action)} title="重试 worker" aria-label="重试 worker" className="inline-flex min-h-11 min-w-11 flex-1 items-center justify-center rounded-md border border-indigo-200 text-indigo-700 hover:bg-indigo-50 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-indigo-500 sm:flex-none sm:h-9 sm:min-h-0 sm:w-9">{action === 'retry' ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />}</button>}</div>
+        {actionsEnabled && <div className="flex w-full shrink-0 gap-2 border-t border-gray-100 pt-2 sm:w-20 sm:border-0 sm:pt-0 sm:justify-end">{workerCanCancel(worker) && <button type="button" onClick={() => onAction(worker, 'cancel')} disabled={Boolean(action)} title="取消 worker" aria-label="取消 worker" className="inline-flex min-h-11 min-w-11 flex-1 items-center justify-center rounded-md border border-red-200 text-red-700 hover:bg-red-50 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-red-500 sm:flex-none sm:h-9 sm:min-h-0 sm:w-9">{action === 'cancel' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Ban className="w-4 h-4" />}</button>}{workerCanRetry(worker) && <button type="button" onClick={() => onAction(worker, 'retry')} disabled={Boolean(action)} title="重试 worker" aria-label="重试 worker" className="inline-flex min-h-11 min-w-11 flex-1 items-center justify-center rounded-md border border-indigo-200 text-indigo-700 hover:bg-indigo-50 disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-indigo-500 sm:flex-none sm:h-9 sm:min-h-0 sm:w-9">{action === 'retry' ? <Loader2 className="w-4 h-4 animate-spin" /> : <RotateCcw className="w-4 h-4" />}</button>}</div>}
       </div>
-      {expanded && <div id={`worker-detail-${workerId}`} className="border-t border-gray-200 p-3"><div className="flex min-w-0 flex-wrap items-center justify-between gap-2"><h4 className="min-w-0 max-w-full break-words text-xs font-semibold text-gray-800">Worker 日志</h4><span className="min-w-0 max-w-full break-words text-[11px] text-gray-500">仅显示此 worker 的增量事件</span></div>{needsAttention && <StateNotice tone="warning" icon={AlertTriangle} text={worker.last_error || 'Worker 启动或对账状态需要人工确认。请查看此 worker 日志；后端允许时可重试。'} />}{worker.last_error && !needsAttention && <StateNotice tone="error" icon={AlertTriangle} text={worker.last_error} />}{logs?.loading && <InlineLoading text="正在加载日志..." />}{logs?.error && <InlineError message={logs.error} onRetry={onRetryLogs} />}{!logs?.loading && !logs?.error && logs?.items?.length === 0 && <div className="py-3 text-xs text-gray-500">暂无日志事件。</div>}{logs?.eof && <div className="mt-2 text-[11px] text-gray-500">日志已读取至末尾。</div>}<div className="mt-2 max-h-[min(50vh,24rem)] overflow-auto rounded-md bg-gray-50 p-2 font-mono text-[11px] leading-5 text-gray-700 sm:text-xs" role="log" aria-live="polite">{(logs?.items || []).map((entry, index) => <div key={entry.id || `${entry.offset || index}-${index}`} className="break-all">{entry.text}</div>)}</div></div>}
+      {expanded && <div id={`worker-detail-${workerId}`} className="border-t border-gray-200 p-3"><div className="flex min-w-0 flex-wrap items-center justify-between gap-2"><h4 className="min-w-0 max-w-full break-words text-xs font-semibold text-gray-800">Rclone 日志</h4><span className="min-w-0 max-w-full break-words text-[11px] text-gray-500">仅显示此账号的实时 Rclone 输出</span></div>{needsAttention && <StateNotice tone="warning" icon={AlertTriangle} text={worker.last_error || 'Worker 启动或对账状态需要人工确认。请查看此账号的 Rclone 日志；后端允许时可重试。'} />}{worker.last_error && !needsAttention && <StateNotice tone="error" icon={AlertTriangle} text={worker.last_error} />}{logs?.loading && <InlineLoading text="正在加载 Rclone 日志..." />}{logs?.error && <InlineError message={logs.error} onRetry={onRetryLogs} />}{!logs?.loading && !logs?.error && logs?.items?.length === 0 && <div className="py-3 text-xs text-gray-500">Rclone 尚未输出日志。</div>}{logs?.eof && <div className="mt-2 text-[11px] text-gray-500">Rclone 日志已读取至末尾。</div>}<div className="mt-2 max-h-[min(50vh,24rem)] overflow-auto rounded-md bg-gray-50 p-2 font-mono text-[11px] leading-5 text-gray-700 sm:text-xs" role="log" aria-live="polite">{(logs?.items || []).map((entry, index) => <div key={entry.id || `${entry.offset || index}-${index}`} className="break-all">{entry.text}</div>)}</div></div>}
     </div>
   );
 };

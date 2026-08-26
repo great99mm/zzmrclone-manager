@@ -93,6 +93,8 @@ type CommandRunner interface {
 	StatRemote(context.Context, string, string, string, string) (RemoteObject, error)
 }
 
+var ErrRemoteObjectNotFound = errors.New("remote object not found")
+
 type MoveRunner interface {
 	StartMove(context.Context, MoveSpec) (ProcessHandle, error)
 }
@@ -130,7 +132,7 @@ func (r ExecRunner) StartCopy(ctx context.Context, spec CopySpec) (ProcessHandle
 	if binary == "" {
 		binary = "rclone"
 	}
-	cmd := exec.CommandContext(ctx, binary, "--config", spec.ConfigPath, "copy", "--transfers", strconv.Itoa(normalizeTransfers(spec.Transfers)), "--files-from-raw", spec.ManifestPath, "--no-traverse", "--drive-stop-on-upload-limit", "--stats-log-level", "INFO", "--stats", "1s", "/proc/self/fd/3", destination)
+	cmd := exec.CommandContext(ctx, binary, "--config", spec.ConfigPath, "copy", "--transfers", strconv.Itoa(normalizeTransfers(spec.Transfers)), "--files-from-raw", spec.ManifestPath, "--no-traverse", "--drive-stop-on-upload-limit", "--log-level", "INFO", "--stats-log-level", "INFO", "--stats", "1s", "/proc/self/fd/3", destination)
 	cmd.ExtraFiles = []*os.File{spec.SourceRoot}
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
@@ -177,7 +179,7 @@ func (r ExecRunner) StartMove(ctx context.Context, spec MoveSpec) (ProcessHandle
 	if binary == "" {
 		binary = "rclone"
 	}
-	cmd := exec.CommandContext(ctx, binary, "--config", spec.ConfigPath, "move", "--transfers", strconv.Itoa(normalizeTransfers(spec.Transfers)), "--files-from-raw", spec.ManifestPath, "--no-traverse", "--drive-stop-on-upload-limit", "--stats-log-level", "INFO", "/proc/self/fd/3", destination)
+	cmd := exec.CommandContext(ctx, binary, "--config", spec.ConfigPath, "move", "--transfers", strconv.Itoa(normalizeTransfers(spec.Transfers)), "--files-from-raw", spec.ManifestPath, "--no-traverse", "--drive-stop-on-upload-limit", "--log-level", "INFO", "--stats-log-level", "INFO", "--stats", "1s", "/proc/self/fd/3", destination)
 	cmd.ExtraFiles = []*os.File{spec.SourceRoot}
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
@@ -263,9 +265,13 @@ func (r ExecRunner) StatRemote(ctx context.Context, configPath, remote, destinat
 		binary = "rclone"
 	}
 	target := remote + ":" + canonicalRemotePath(destination) + "/" + canonicalRemotePath(relative)
-	output, err := exec.CommandContext(ctx, binary, "lsjson", "--stat", "--config", configPath, target).Output()
+	output, err := exec.CommandContext(ctx, binary, "lsjson", "--stat", "--config", configPath, target).CombinedOutput()
 	if err != nil {
-		return RemoteObject{}, err
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && (exitErr.ExitCode() == 3 || exitErr.ExitCode() == 4) {
+			return RemoteObject{}, fmt.Errorf("%w: %s", ErrRemoteObjectNotFound, canonicalRemotePath(relative))
+		}
+		return RemoteObject{}, fmt.Errorf("remote stat failed: %w", err)
 	}
 	var object struct {
 		Path  string `json:"Path"`

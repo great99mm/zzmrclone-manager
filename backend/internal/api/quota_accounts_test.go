@@ -26,7 +26,7 @@ func TestQuotaAccountManagement(t *testing.T) {
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(t.TempDir(), "rclone.conf")
-	if err := os.WriteFile(configPath, []byte("[drive-a]\ntype = drive\n"), 0600); err != nil {
+	if err := os.WriteFile(configPath, []byte("[drive-a]\ntype = drive\n[drive-b]\ntype = drive\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	previousDB, previousConfig := db, cfgGlobal
@@ -61,15 +61,19 @@ func TestQuotaAccountManagement(t *testing.T) {
 		t.Fatalf("stored identity = %#v", stored)
 	}
 
-	updated := call(updateQuotaAccount, http.MethodPut, "/api/quota-accounts/1", `{"budget_bytes":2000,"enabled":false}`, gin.Params{{Key: "id", Value: "1"}})
+	updated := call(updateQuotaAccount, http.MethodPut, "/api/quota-accounts/1", `{"remote_name":"drive-b","budget_bytes":2000,"enabled":false}`, gin.Params{{Key: "id", Value: "1"}})
 	if updated.Code != http.StatusOK {
 		t.Fatalf("update status=%d body=%s", updated.Code, updated.Body.String())
 	}
 	if err := database.First(&stored, account.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if stored.BudgetBytes != 2000 || stored.WindowSeconds != 3600 || stored.Enabled {
+	if stored.RemoteName != "drive-b" || stored.QuotaKey != models.DefaultRotationQuotaKey(configPath, "drive-b") || stored.BudgetBytes != 2000 || stored.WindowSeconds != 3600 || stored.Enabled {
 		t.Fatalf("updated account = %#v", stored)
+	}
+	invalidUpdate := call(updateQuotaAccount, http.MethodPut, "/api/quota-accounts/1", `{"remote_name":"missing"}`, gin.Params{{Key: "id", Value: "1"}})
+	if invalidUpdate.Code != http.StatusBadRequest {
+		t.Fatalf("invalid update status=%d body=%s", invalidUpdate.Code, invalidUpdate.Body.String())
 	}
 
 	invalid := call(createQuotaAccount, http.MethodPost, "/api/quota-accounts", `{"remote_name":"missing"}`, nil)
@@ -87,7 +91,7 @@ func TestQuotaAccountManagement(t *testing.T) {
 	if err := json.Unmarshal(listed.Body.Bytes(), &page); err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Accounts) != 1 || page.Accounts[0].Enabled {
+	if len(page.Accounts) != 1 || page.Accounts[0].RemoteName != "drive-b" || page.Accounts[0].Enabled {
 		t.Fatalf("listed accounts = %#v", page.Accounts)
 	}
 
@@ -95,7 +99,7 @@ func TestQuotaAccountManagement(t *testing.T) {
 	router.GET("/api/quota-accounts", requireAdminStrictTokenOrSession, listQuotaAccounts)
 	unauthorized := httptest.NewRecorder()
 	router.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/api/quota-accounts", nil))
-	if unauthorized.Code != http.StatusForbidden {
+	if unauthorized.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthorized status=%d body=%s", unauthorized.Code, unauthorized.Body.String())
 	}
 }

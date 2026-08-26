@@ -99,14 +99,34 @@ func updateQuotaAccount(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	remote := account.RemoteName
+	configIdentity := account.ConfigIdentity
+	if strings.TrimSpace(request.RemoteName) != "" {
+		remote, err = configuredQuotaAccountRemote(request.RemoteName)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		configIdentity = quotaAccountConfigIdentity()
+	}
 	if err := db.Model(&account).Updates(map[string]interface{}{
-		"budget_bytes":   budget,
-		"window_seconds": window,
-		"enabled":        enabled,
+		"remote_name":     remote,
+		"config_identity": configIdentity,
+		"quota_key":       models.DefaultRotationQuotaKey(configIdentity, remote),
+		"budget_bytes":    budget,
+		"window_seconds":  window,
+		"enabled":         enabled,
 	}).Error; err != nil {
+		if isQuotaAccountUniqueError(err) {
+			c.JSON(http.StatusConflict, gin.H{"error": "a trusted account is already configured for this remote"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update quota account"})
 		return
 	}
+	account.RemoteName = remote
+	account.ConfigIdentity = configIdentity
+	account.QuotaKey = models.DefaultRotationQuotaKey(configIdentity, remote)
 	account.BudgetBytes = budget
 	account.WindowSeconds = window
 	account.Enabled = enabled

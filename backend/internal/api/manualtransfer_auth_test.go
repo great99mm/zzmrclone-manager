@@ -22,7 +22,7 @@ func TestManualAnalyzeRoutesRequireAdministrator(t *testing.T) {
 		auth string
 		want int
 	}{
-		{name: "anonymous", want: http.StatusForbidden},
+		{name: "anonymous", want: http.StatusUnauthorized},
 		{name: "regular session", auth: "Bearer " + auth.IssueToken("operator", false), want: http.StatusForbidden},
 		{name: "admin session", auth: "Bearer " + auth.IssueToken("admin", true), want: http.StatusNoContent},
 	}
@@ -62,7 +62,7 @@ func TestManualWorkerRoutesRequireAdministrator(t *testing.T) {
 		auth   string
 		want   int
 	}{
-		{name: "anonymous start", method: http.MethodPost, path: "/api/manual-runs/1/start", want: http.StatusForbidden},
+		{name: "anonymous start", method: http.MethodPost, path: "/api/manual-runs/1/start", want: http.StatusUnauthorized},
 		{name: "regular worker", method: http.MethodGet, path: "/api/manual-workers/1", auth: "Bearer " + auth.IssueToken("operator", false), want: http.StatusForbidden},
 		{name: "admin logs", method: http.MethodGet, path: "/api/manual-workers/1/logs", auth: "Bearer " + auth.IssueToken("admin", true), want: http.StatusNoContent},
 	}

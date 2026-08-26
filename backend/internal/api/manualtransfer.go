@@ -71,6 +71,11 @@ type manualStartHTTPRequest struct {
 	IdempotencyKey         string `json:"idempotency_key"`
 }
 
+type manualSettlementHTTPRequest struct {
+	ExpectedRevision int64  `json:"expected_revision"`
+	IdempotencyKey   string `json:"idempotency_key"`
+}
+
 type manualRunResponse struct {
 	Run                manualtransfer.ManualTransferRun  `json:"run"`
 	Accounts           []manualtransfer.ManualRunAccount `json:"accounts"`
@@ -128,7 +133,7 @@ func analyzeManualRun(c *gin.Context) {
 	})
 	if err != nil {
 		switch {
-		case errors.Is(err, manualtransfer.ErrIdempotencyConflict), errors.Is(err, manualtransfer.ErrRevisionConflict), errors.Is(err, manualtransfer.ErrActiveAnalysis), errors.Is(err, manualtransfer.ErrNotManualTask), strings.Contains(err.Error(), "task is active"):
+		case errors.Is(err, manualtransfer.ErrIdempotencyConflict), errors.Is(err, manualtransfer.ErrRevisionConflict), errors.Is(err, manualtransfer.ErrActiveAnalysis), errors.Is(err, manualtransfer.ErrNotManualTask), errors.Is(err, manualtransfer.ErrSettlementConflict), strings.Contains(err.Error(), "task is active"):
 			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 		case errors.Is(err, gorm.ErrRecordNotFound):
 			c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
@@ -406,6 +411,75 @@ func startManualRun(c *gin.Context) {
 	c.JSON(http.StatusAccepted, responseData)
 }
 
+func stopManualRun(c *gin.Context) {
+	handleManualSettlement(c, "stop")
+}
+
+func reconcileManualRun(c *gin.Context) {
+	handleManualSettlement(c, "reconcile")
+}
+
+func finishManualRun(c *gin.Context) {
+	handleManualSettlement(c, "finish")
+}
+
+func handleManualSettlement(c *gin.Context, action string) {
+	if manualTransferService == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "manual run settlement is unavailable"})
+		return
+	}
+	runID, err := parseManualID(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid manual run id"})
+		return
+	}
+	var body manualSettlementHTTPRequest
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	key := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+	if key == "" {
+		key = body.IdempotencyKey
+	}
+	actorIdentity, actorType := manualActor(c)
+	request := manualtransfer.SettlementRequest{RunID: runID, ExpectedRevision: body.ExpectedRevision, IdempotencyKey: key, ActorIdentity: actorIdentity, ActorType: actorType}
+	var result manualtransfer.SettlementResult
+	switch action {
+	case "stop":
+		result, err = manualTransferService.StopRun(c.Request.Context(), request)
+	case "reconcile":
+		result, err = manualTransferService.ReconcileRun(c.Request.Context(), request)
+	case "finish":
+		result, err = manualTransferService.FinishRun(c.Request.Context(), request)
+	default:
+		err = errors.New("unsupported manual settlement action")
+	}
+	if err != nil {
+		switch {
+		case errors.Is(err, manualtransfer.ErrRunNotFound), errors.Is(err, gorm.ErrRecordNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "manual transfer run not found"})
+		case errors.Is(err, manualtransfer.ErrRevisionConflict), errors.Is(err, manualtransfer.ErrSettlementConflict), errors.Is(err, manualtransfer.ErrWorkerConflict):
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		case errors.Is(err, manualtransfer.ErrWorkerUnavailable):
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": sanitizeManualAPIError(err.Error())})
+		}
+		return
+	}
+	response, err := manualRunResponseFor(result.Run, manualTransferService)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load manual run accounts"})
+		return
+	}
+	status := http.StatusAccepted
+	if action == "finish" {
+		status = http.StatusOK
+	}
+	c.JSON(status, gin.H{"run": response.Run, "accounts": response.Accounts, "accounts_next_cursor": response.AccountsNextCursor, "accounts_has_more": response.AccountsHasMore, "accounts_page_limit": response.AccountsPageLimit, "status": response.Status, "existing": result.Existing})
+}
+
 func listManualRunWorkers(c *gin.Context) {
 	if manualTransferService == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "manual worker execution is unavailable"})
@@ -525,7 +599,7 @@ func writeManualWorkerError(c *gin.Context, err error) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "manual worker not found"})
 	case errors.Is(err, manualtransfer.ErrNotManualTask):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
-	case errors.Is(err, manualtransfer.ErrWorkerConflict), errors.Is(err, manualtransfer.ErrManualMoveUnsupported), errors.Is(err, manualtransfer.ErrWorkerNoIncomplete):
+	case errors.Is(err, manualtransfer.ErrWorkerConflict), errors.Is(err, manualtransfer.ErrManualMoveUnsupported), errors.Is(err, manualtransfer.ErrWorkerNoIncomplete), errors.Is(err, manualtransfer.ErrSettlementConflict):
 		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": sanitizeManualAPIError(err.Error())})

@@ -220,7 +220,7 @@ const Tasks = () => {
                       <div className="flex items-center justify-end gap-2">
                         {task.task_type === 'rotation' && <span className="text-xs text-amber-700">不可用</span>}
                         {task.task_type !== 'rotation' && <>
-                        {task.status !== 'running' ? (
+                        {task.task_type !== 'manual' && (task.status !== 'running' ? (
                           <button
                             onClick={() => handleStart(task.id)}
                             className="p-1.5 text-green-600 hover:bg-green-50 rounded-lg transition-colors"
@@ -236,7 +236,7 @@ const Tasks = () => {
                           >
                             <Square className="w-4 h-4" />
                           </button>
-                        )}
+                        ))}
                         <Link
                           to={`/tasks/${task.id}`}
                           className="p-1.5 text-gray-500 hover:bg-gray-100 rounded-lg transition-colors"
@@ -252,13 +252,13 @@ const Tasks = () => {
                           <Pencil className="w-4 h-4" />
                         </Link>
                         </>}
-                        <button
+                        {task.task_type !== 'manual' && <button
                           onClick={() => handleDelete(task.id)}
                           className="p-1.5 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
                           title="删除"
                         >
                           <Trash2 className="w-4 h-4" />
-                        </button>
+                        </button>}
                       </div>
                     </td>
                   </tr>
@@ -331,7 +331,7 @@ const Tasks = () => {
               <div className="flex items-center gap-2 pt-3 border-t border-gray-100">
                 {task.task_type === 'rotation' && <span className="flex-1 text-center text-xs text-amber-700">不可用</span>}
                 {task.task_type !== 'rotation' && <>
-                {task.status !== 'running' ? (
+                {task.task_type !== 'manual' && (task.status !== 'running' ? (
                   <button
                     onClick={() => handleStart(task.id)}
                     className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 bg-green-50 text-green-600 rounded-lg hover:bg-green-100 transition-colors text-sm font-medium"
@@ -347,7 +347,7 @@ const Tasks = () => {
                     <Square className="w-3.5 h-3.5" />
                     停止
                   </button>
-                )}
+                ))}
                 </>}
                 <Link
                   to={`/tasks/${task.id}`}
@@ -363,13 +363,13 @@ const Tasks = () => {
                   <Pencil className="w-3.5 h-3.5" />
                   编辑
                 </Link>}
-                <button
+                {task.task_type !== 'manual' && <button
                   onClick={() => handleDelete(task.id)}
                   className="inline-flex items-center justify-center p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
                   title="删除"
                 >
                   <Trash2 className="w-4 h-4" />
-                </button>
+                </button>}
               </div>
             </div>
           ))

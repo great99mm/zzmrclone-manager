@@ -111,6 +111,16 @@ type RunStatus struct {
 	AnalysisStartedAt       *time.Time `json:"analysis_started_at,omitempty"`
 	AnalyzedAt              *time.Time `json:"analyzed_at,omitempty"`
 	FailedAt                *time.Time `json:"failed_at,omitempty"`
+	SettlementState         string     `json:"settlement_state"`
+	SettlementCheckedCount  int64      `json:"settlement_checked_count"`
+	SettlementVerifiedCount int64      `json:"settlement_verified_count"`
+	SettlementVerifiedBytes int64      `json:"settlement_verified_bytes"`
+	SettlementReleasedCount int64      `json:"settlement_released_count"`
+	SettlementReleasedBytes int64      `json:"settlement_released_bytes"`
+	SettlementError         string     `json:"settlement_error,omitempty"`
+	SettlementStoppedAt     *time.Time `json:"settlement_stopped_at,omitempty"`
+	SettlementReconciledAt  *time.Time `json:"settlement_reconciled_at,omitempty"`
+	SettlementFinishedAt    *time.Time `json:"settlement_finished_at,omitempty"`
 }
 
 type FilePage struct {
@@ -139,6 +149,7 @@ type Service struct {
 
 	jobs            chan uint
 	allocationJobs  chan uint
+	settlementJobs  chan uint
 	workerCtx       context.Context
 	workerCancel    context.CancelFunc
 	workerDone      chan struct{}
@@ -158,7 +169,7 @@ func NewService(database *gorm.DB) *Service {
 			sqlDB.SetMaxIdleConns(1)
 		}
 	}
-	return &Service{DB: database, jobs: make(chan uint, manualRunQueueSize), allocationJobs: make(chan uint, manualRunQueueSize), workerProcesses: make(map[uint]*ownedWorkerProcess), launchLocks: make(map[uint]*sync.Mutex)}
+	return &Service{DB: database, jobs: make(chan uint, manualRunQueueSize), allocationJobs: make(chan uint, manualRunQueueSize), settlementJobs: make(chan uint, manualRunQueueSize), workerProcesses: make(map[uint]*ownedWorkerProcess), launchLocks: make(map[uint]*sync.Mutex)}
 }
 
 func (s *Service) now() time.Time {
@@ -218,6 +229,8 @@ func (s *Service) Start() {
 					s.processJob(runID)
 				case runID := <-s.allocationJobs:
 					s.processAllocationJob(runID)
+				case runID := <-s.settlementJobs:
+					s.processSettlementJob(runID)
 				case <-s.workerCtx.Done():
 					return
 				}
@@ -283,6 +296,20 @@ func (s *Service) EnqueueAllocation(runID uint) error {
 		return nil
 	default:
 		return errors.New("manual allocation queue is full")
+	}
+}
+
+func (s *Service) enqueueSettlement(runID uint) error {
+	if s == nil || s.settlementJobs == nil || s.workerCtx == nil {
+		return errors.New("manual settlement worker is not started")
+	}
+	select {
+	case <-s.workerCtx.Done():
+		return errors.New("manual settlement worker is stopping")
+	case s.settlementJobs <- runID:
+		return nil
+	default:
+		return errors.New("manual settlement queue is full")
 	}
 }
 
@@ -399,6 +426,8 @@ func (s *Service) createRunUnderFence(ctx context.Context, task *models.Task, re
 		return AnalyzeResult{}, latestResult.Error
 	} else if request.ExpectedRunID == nil || request.ExpectedRevision == nil || *request.ExpectedRunID != latest.ID || *request.ExpectedRevision != latest.Revision {
 		return AnalyzeResult{}, ErrRevisionConflict
+	} else if latest.WorkerStartIdempotencyKey != "" && latest.State != ManualRunStateSucceeded && normalizedSettlementState(latest.SettlementState) != ManualSettlementStateFinished {
+		return AnalyzeResult{}, ErrSettlementConflict
 	}
 	var active int64
 	if err := s.DB.Model(&ManualTransferRun{}).Where("task_id = ? AND state IN ?", task.ID, []string{ManualRunStateAnalyzing, ManualRunStateAllocating}).Count(&active).Error; err != nil {
@@ -414,7 +443,7 @@ func (s *Service) createRunUnderFence(ctx context.Context, task *models.Task, re
 	rootDevice, rootInode := root.Device, root.Inode
 	_ = root.Close()
 	run := ManualTransferRun{
-		TaskID: task.ID, State: ManualRunStateAnalyzing, Revision: 1,
+		TaskID: task.ID, State: ManualRunStateAnalyzing, Revision: 1, SettlementState: ManualSettlementStateActive,
 		ManualInputRevision: inputRevision, ManualConfigRevision: configRevision, ManualConfigFingerprint: configFingerprint,
 		ActorIdentity: request.ActorIdentity, ActorType: request.ActorType,
 		SourcePath: request.SourcePath, DestinationPath: request.DestinationPath,
@@ -853,7 +882,7 @@ type fileCursor struct {
 }
 
 func StatusForRun(run ManualTransferRun) RunStatus {
-	return RunStatus{ID: run.ID, TaskID: run.TaskID, State: run.State, Revision: run.Revision, ManualInputRevision: run.ManualInputRevision, ManualConfigRevision: run.ManualConfigRevision, Terminal: IsTerminalState(run.State), Analyzing: run.State == ManualRunStateAnalyzing, Allocating: run.State == ManualRunStateAllocating, Allocated: run.State == ManualRunStateAllocated, Running: run.State == ManualRunStateRunning, Succeeded: run.State == ManualRunStateSucceeded, Failed: run.State == ManualRunStateFailed, Cancelled: run.State == ManualRunStateCancelled, NeedsAttention: run.State == ManualRunStateNeedsAttention, AllocationFailed: run.State == ManualRunStateAllocationFailed, NeedsExplicitReanalyze: run.State == ManualRunStateAnalysisFailed || run.State == ManualRunStateAllocationFailed, FailurePolicy: ManualRunFailurePolicy, SnapshotDigest: run.SnapshotDigest, SnapshotCount: run.SnapshotCount, SnapshotBytes: run.SnapshotBytes, AllocationVersion: run.AllocationVersion, AllocationGeneration: run.AllocationGeneration, AllocationDigest: run.AllocationDigest, AllocationCount: run.AllocationCount, AllocationBytes: run.AllocationBytes, AssignedCount: run.AssignedCount, AssignedBytes: run.AssignedBytes, AlreadyTransferredCount: run.AlreadyTransferredCount, AlreadyTransferredBytes: run.AlreadyTransferredBytes, UnassignedCount: run.UnassignedCount, UnassignedBytes: run.UnassignedBytes, OversizeCount: run.OversizeCount, OversizeBytes: run.OversizeBytes, AggregateCapacityCount: run.AggregateCapacityCount, AggregateCapacityBytes: run.AggregateCapacityBytes, LastError: SanitizeMessage(run.LastError), CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt, AnalysisStartedAt: run.AnalysisStartedAt, AnalyzedAt: run.AnalyzedAt, FailedAt: run.FailedAt}
+	return RunStatus{ID: run.ID, TaskID: run.TaskID, State: run.State, Revision: run.Revision, ManualInputRevision: run.ManualInputRevision, ManualConfigRevision: run.ManualConfigRevision, Terminal: IsTerminalState(run.State), Analyzing: run.State == ManualRunStateAnalyzing, Allocating: run.State == ManualRunStateAllocating, Allocated: run.State == ManualRunStateAllocated, Running: run.State == ManualRunStateRunning, Succeeded: run.State == ManualRunStateSucceeded, Failed: run.State == ManualRunStateFailed, Cancelled: run.State == ManualRunStateCancelled, NeedsAttention: run.State == ManualRunStateNeedsAttention, AllocationFailed: run.State == ManualRunStateAllocationFailed, NeedsExplicitReanalyze: run.State == ManualRunStateAnalysisFailed || run.State == ManualRunStateAllocationFailed, FailurePolicy: ManualRunFailurePolicy, SnapshotDigest: run.SnapshotDigest, SnapshotCount: run.SnapshotCount, SnapshotBytes: run.SnapshotBytes, AllocationVersion: run.AllocationVersion, AllocationGeneration: run.AllocationGeneration, AllocationDigest: run.AllocationDigest, AllocationCount: run.AllocationCount, AllocationBytes: run.AllocationBytes, AssignedCount: run.AssignedCount, AssignedBytes: run.AssignedBytes, AlreadyTransferredCount: run.AlreadyTransferredCount, AlreadyTransferredBytes: run.AlreadyTransferredBytes, UnassignedCount: run.UnassignedCount, UnassignedBytes: run.UnassignedBytes, OversizeCount: run.OversizeCount, OversizeBytes: run.OversizeBytes, AggregateCapacityCount: run.AggregateCapacityCount, AggregateCapacityBytes: run.AggregateCapacityBytes, LastError: SanitizeMessage(run.LastError), CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt, AnalysisStartedAt: run.AnalysisStartedAt, AnalyzedAt: run.AnalyzedAt, FailedAt: run.FailedAt, SettlementState: normalizedSettlementState(run.SettlementState), SettlementCheckedCount: run.SettlementCheckedCount, SettlementVerifiedCount: run.SettlementVerifiedCount, SettlementVerifiedBytes: run.SettlementVerifiedBytes, SettlementReleasedCount: run.SettlementReleasedCount, SettlementReleasedBytes: run.SettlementReleasedBytes, SettlementError: SanitizeMessage(run.SettlementError), SettlementStoppedAt: run.SettlementStoppedAt, SettlementReconciledAt: run.SettlementReconciledAt, SettlementFinishedAt: run.SettlementFinishedAt}
 }
 
 func ValidatePublicRun(run ManualTransferRun) error {

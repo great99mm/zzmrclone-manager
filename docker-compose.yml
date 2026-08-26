@@ -15,6 +15,7 @@ services:
       - ./data:/app/data
       - /root/.config/rclone:/root/.config/rclone
       - ./logs:/app/logs
+      - /opt:/opt:rw
       # 映射你要监控的本机目录
       # 示例：
       #- /opt:/opt

@@ -680,14 +680,14 @@ const FileBrowser = () => {
                         {statusText}
                       </div>
                     </div>
-                    <button
+                    {task.task_type !== 'manual' && <button
                       type="button"
                       onClick={() => handleDeleteQuickTask(task.id)}
                       disabled={deletingQuickTaskId === task.id}
                       className={`p-1.5 rounded-lg transition-colors ${isError ? 'text-red-500 hover:bg-red-100' : 'text-green-600 hover:bg-green-100'} disabled:opacity-50`}
                     >
                       {deletingQuickTaskId === task.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <X className="w-4 h-4" />}
-                    </button>
+                    </button>}
                   </div>
                 );
               })}

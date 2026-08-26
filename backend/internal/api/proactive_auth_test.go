@@ -38,10 +38,10 @@ func runStrictAuth(t *testing.T, cfg *config.Config, query, authorization string
 }
 
 func TestStrictMoveResolutionAuthRequiresSessionOrExactToken(t *testing.T) {
-	if code := runStrictAuth(t, &config.Config{}, "", ""); code != http.StatusForbidden {
+	if code := runStrictAuth(t, &config.Config{}, "", ""); code != http.StatusUnauthorized {
 		t.Fatalf("anonymous optional-token request = %d", code)
 	}
-	if code := runStrictAuth(t, &config.Config{}, "", "Bearer arbitrary"); code != http.StatusForbidden {
+	if code := runStrictAuth(t, &config.Config{}, "", "Bearer arbitrary"); code != http.StatusUnauthorized {
 		t.Fatalf("bad bearer optional-token request = %d", code)
 	}
 	session := auth.IssueToken("phase3", true)
@@ -51,7 +51,7 @@ func TestStrictMoveResolutionAuthRequiresSessionOrExactToken(t *testing.T) {
 	if code := runStrictAuth(t, &config.Config{APIToken: "configured"}, "token=configured", ""); code != http.StatusNoContent {
 		t.Fatalf("exact configured token request = %d", code)
 	}
-	if code := runStrictAuth(t, &config.Config{APIToken: "configured"}, "token=wrong", "Bearer arbitrary"); code != http.StatusForbidden {
+	if code := runStrictAuth(t, &config.Config{APIToken: "configured"}, "token=wrong", "Bearer arbitrary"); code != http.StatusUnauthorized {
 		t.Fatalf("bad configured credentials request = %d", code)
 	}
 }
@@ -63,7 +63,7 @@ func TestManualQuotaResetAuthRequiresAdministratorSessionOrPrivilegedToken(t *te
 	if code := runAdminStrictAuth(t, &config.Config{}, "", "Bearer "+auth.IssueToken("admin", true)); code != http.StatusNoContent {
 		t.Fatalf("admin reset session = %d", code)
 	}
-	if code := runAdminStrictAuth(t, &config.Config{}, "token=unconfigured", ""); code != http.StatusForbidden {
+	if code := runAdminStrictAuth(t, &config.Config{}, "token=unconfigured", ""); code != http.StatusUnauthorized {
 		t.Fatalf("unconfigured reset token = %d", code)
 	}
 	if code := runAdminStrictAuth(t, &config.Config{APIToken: "privileged"}, "token=privileged", ""); code != http.StatusNoContent {
@@ -136,7 +136,7 @@ func TestActualManualMaintenanceRoutesStartAndCloseWithCAS(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/api/tasks/1/proactive-manual-merge", nil)
 	router.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusForbidden {
+	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("anonymous manual start status=%d", recorder.Code)
 	}
 	taskRouteRecorder := httptest.NewRecorder()

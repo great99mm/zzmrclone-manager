@@ -140,6 +140,10 @@ type manualWorkerFakeRunner struct {
 	streamedOutput       string
 	resultStdout         string
 	resultStderr         string
+	statCalls            map[string]int
+	statCallsAtStart     map[string][]int
+	statErrors           map[string]error
+	statStarted          chan struct{}
 }
 
 func (r *manualWorkerFakeRunner) StartCopy(_ context.Context, spec proactive.CopySpec) (proactive.ProcessHandle, error) {
@@ -153,6 +157,13 @@ func (r *manualWorkerFakeRunner) StartCopy(_ context.Context, spec proactive.Cop
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.statCalls == nil {
+		r.statCalls = make(map[string]int)
+	}
+	if r.statCallsAtStart == nil {
+		r.statCallsAtStart = make(map[string][]int)
+	}
+	r.statCallsAtStart[spec.DestinationRemote] = append(r.statCallsAtStart[spec.DestinationRemote], r.statCalls[spec.DestinationRemote])
 	r.specs = append(r.specs, spec)
 	r.manifests = append(r.manifests, append([]string(nil), paths...))
 	if r.startErr != nil {
@@ -283,13 +294,35 @@ func removeManualWorkerMoveFiles(paths []string, sourceRoot *os.File) error {
 	return nil
 }
 
-func (r *manualWorkerFakeRunner) StatRemote(_ context.Context, _ string, _ string, _ string, relative string) (proactive.RemoteObject, error) {
+func (r *manualWorkerFakeRunner) StatRemote(ctx context.Context, _ string, remote string, _ string, relative string) (proactive.RemoteObject, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if !r.remote[relative] {
-		return proactive.RemoteObject{}, errors.New("remote object not found")
+	if r.statCalls == nil {
+		r.statCalls = make(map[string]int)
 	}
-	return proactive.RemoteObject{Path: relative, Size: r.sizes[relative]}, nil
+	r.statCalls[remote]++
+	statStarted := r.statStarted
+	if statStarted != nil {
+		select {
+		case <-statStarted:
+		default:
+			close(statStarted)
+		}
+	}
+	statErr := r.statErrors[relative]
+	remoteExists := r.remote[relative]
+	size := r.sizes[relative]
+	r.mu.Unlock()
+	if statStarted != nil {
+		<-ctx.Done()
+		return proactive.RemoteObject{}, ctx.Err()
+	}
+	if statErr != nil {
+		return proactive.RemoteObject{}, statErr
+	}
+	if !remoteExists {
+		return proactive.RemoteObject{}, proactive.ErrRemoteObjectNotFound
+	}
+	return proactive.RemoteObject{Path: relative, Size: size}, nil
 }
 
 type manualWorkerFakeProcess struct {
@@ -419,6 +452,11 @@ func TestManualCopyWorkersHappyPathIsolationAndIdempotentStart(t *testing.T) {
 	if len(fixture.runner.specs) != 2 {
 		t.Fatalf("runner process count = %d, want 2", len(fixture.runner.specs))
 	}
+	for remote, counts := range fixture.runner.statCallsAtStart {
+		if len(counts) != 1 || counts[0] != 0 {
+			t.Fatalf("fresh worker %s remote stats before copy = %#v, want [0]", remote, counts)
+		}
+	}
 	got := make([]string, 0)
 	for _, manifest := range fixture.runner.manifests {
 		got = append(got, manifest...)
@@ -519,6 +557,12 @@ func TestManualCopyWorkerRetryUsesOnlyIncompleteFilesAndRedactsLogs(t *testing.T
 	if len(manifests) < 2 {
 		t.Fatalf("retry manifest = %#v, want a second attempt", manifests)
 	}
+	fixture.runner.mu.Lock()
+	preflightCounts := append([]int(nil), fixture.runner.statCallsAtStart[failedDetail.Worker.RemoteName]...)
+	fixture.runner.mu.Unlock()
+	if len(preflightCounts) < 2 || preflightCounts[0] != 0 || preflightCounts[1] != len(failedDetail.Files) {
+		t.Fatalf("retry remote stats before copy = %#v, want only %d post-run checks", preflightCounts, len(failedDetail.Files))
+	}
 	last := manifests[len(manifests)-1]
 	if len(last) != 1 || last[0] != incomplete {
 		t.Fatalf("retry manifest = %#v, want only incomplete %q", manifests, incomplete)
@@ -579,20 +623,91 @@ func TestManualCopyWorkerCancelRaceAndRestartNoAutoStart(t *testing.T) {
 	if err := fixture.db.Model(&ManualWorkerAttempt{}).Where("id = ?", activeWorker.CurrentAttemptID).Updates(map[string]interface{}{"state": ManualWorkerStateRunning, "lease_token": "restart-lease", "process_id": 12345, "process_start_token": "12345:1"}).Error; err != nil {
 		t.Fatal(err)
 	}
+	if err := fixture.db.Model(&ManualWorkerFile{}).Where("worker_id = ?", activeWorker.ID).Update("state", ManualWorkerFileStatePending).Error; err != nil {
+		t.Fatal(err)
+	}
+	fixture.runner.mu.Lock()
+	statsBeforeRecovery := fixture.runner.statCalls[activeWorker.RemoteName]
+	fixture.runner.mu.Unlock()
 	restarted := NewService(fixture.db)
 	restarted.Runner = fixture.runner
 	if err := restarted.RecoverWorkers(); err != nil {
 		t.Fatal(err)
 	}
 	state, err := restarted.GetWorker(activeWorker.ID)
-	if err != nil || state.Worker.State != ManualWorkerStateNeedsAttention {
+	if err != nil || state.Worker.State != ManualWorkerStateCancelled {
 		t.Fatalf("restart recovery = %#v, err=%v", state.Worker, err)
 	}
 	fixture.runner.mu.Lock()
 	started := len(fixture.runner.specs)
+	statsAfterRecovery := fixture.runner.statCalls[activeWorker.RemoteName]
 	fixture.runner.mu.Unlock()
 	if started != 1 {
 		t.Fatalf("restart recovery auto-started a process: %d", started)
+	}
+	if statsAfterRecovery != statsBeforeRecovery {
+		t.Fatalf("cancelled restart recovery performed remote stats: before=%d after=%d", statsBeforeRecovery, statsAfterRecovery)
+	}
+}
+
+func TestManualRunStopInterruptsPostRunRemoteVerification(t *testing.T) {
+	fixture := newManualWorkerFixture(t, models.TransferModeCopy, map[string]string{"a.txt": "a"})
+	fixture.runner.statStarted = make(chan struct{})
+	result := startFixture(t, fixture, "cancel-post-run-verification")
+	if len(result.WorkerIDs) != 1 {
+		t.Fatalf("worker IDs = %#v, want one worker", result.WorkerIDs)
+	}
+	select {
+	case <-fixture.runner.statStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("post-run remote verification did not start")
+	}
+	run, err := fixture.service.GetRun(fixture.run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped, err := fixture.service.StopRun(context.Background(), SettlementRequest{RunID: run.ID, ExpectedRevision: run.Revision, IdempotencyKey: "stop-post-run-verification", ActorIdentity: "operator", ActorType: "admin_session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopped.Run.SettlementState != ManualSettlementStateStopped {
+		t.Fatalf("settlement state = %q, want stopped", stopped.Run.SettlementState)
+	}
+	waitWorkerState(t, fixture.service, result.WorkerIDs[0], ManualWorkerStateCancelled)
+}
+
+func TestManualWorkerRecoverySkipsRemoteScanBeforeManifest(t *testing.T) {
+	fixture := newManualWorkerFixture(t, models.TransferModeCopy, map[string]string{"a.txt": "a"})
+	worker := ManualRunWorker{RunID: fixture.run.ID, AccountID: fixture.accounts[0].AccountID, AccountPosition: fixture.accounts[0].Position, AccountIdentity: fixture.accounts[0].AccountIdentity, RemoteName: fixture.accounts[0].RemoteName, ConfigIdentity: fixture.accounts[0].ConfigIdentity, State: ManualWorkerStateStarting, AttemptNumber: 1, Revision: 1, AssignedCount: 1, AssignedBytes: 1, LeaseToken: strings.Repeat("a", 48)}
+	if err := fixture.db.Create(&worker).Error; err != nil {
+		t.Fatal(err)
+	}
+	attempt := ManualWorkerAttempt{RunID: fixture.run.ID, WorkerID: worker.ID, AttemptNumber: 1, State: ManualWorkerStateStarting, LeaseToken: worker.LeaseToken, AssignedCount: 1, AssignedBytes: 1}
+	if err := fixture.db.Create(&attempt).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Model(&worker).Update("current_attempt_id", attempt.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	file := fixture.files[0]
+	if err := fixture.db.Create(&ManualWorkerFile{RunID: fixture.run.ID, WorkerID: worker.ID, AttemptID: attempt.ID, RelativePath: file.RelativePath, SnapshotKey: file.SnapshotKey, SizeBytes: file.SizeBytes, MtimeNS: file.MtimeNS, Device: file.Device, Inode: file.Inode, State: ManualWorkerFileStatePending}).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := NewService(fixture.db)
+	restarted.Runner = fixture.runner
+	if err := restarted.RecoverWorkers(); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := restarted.GetWorker(worker.ID)
+	if err != nil || detail.Worker.State != ManualWorkerStateNeedsAttention {
+		t.Fatalf("restart recovery = %#v, err=%v", detail.Worker, err)
+	}
+	fixture.runner.mu.Lock()
+	stats := fixture.runner.statCalls[worker.RemoteName]
+	fixture.runner.mu.Unlock()
+	if stats != 0 {
+		t.Fatalf("pre-manifest restart performed %d remote stats", stats)
 	}
 }
 
@@ -838,6 +953,9 @@ func TestManualWorkerPendingStartReplayAndNeedsAttentionRetryAreExplicit(t *test
 		t.Fatal(err)
 	}
 	if err := fixture.db.Model(&ManualRunWorker{}).Where("id = ?", worker.ID).Updates(map[string]interface{}{"state": ManualWorkerStateRunning, "lease_token": "restart-lease"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.db.Model(&ManualTransferRun{}).Where("id = ?", fixture.run.ID).Updates(map[string]interface{}{"state": ManualRunStateRunning, "settlement_state": ManualSettlementStateActive, "settlement_finished_at": nil}).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := fixture.db.Model(&ManualWorkerAttempt{}).Where("id = ?", worker.CurrentAttemptID).Updates(map[string]interface{}{"state": ManualWorkerStateRunning, "lease_token": "restart-lease"}).Error; err != nil {

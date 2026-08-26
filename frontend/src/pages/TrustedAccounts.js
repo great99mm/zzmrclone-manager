@@ -35,6 +35,7 @@ const TrustedAccounts = () => {
   }, []);
 
   const accountDraft = (account) => edits[account.id] || {
+    remote_name: account.remote_name,
     budget_gb: bytesToGigabytes(account.budget_bytes),
     window_hours: secondsToHours(account.window_seconds),
     enabled: account.enabled,
@@ -92,7 +93,7 @@ const TrustedAccounts = () => {
     }
     setSavingID(account.id);
     try {
-      const response = await updateQuotaAccount(account.id, { ...quota, enabled: current.enabled });
+      const response = await updateQuotaAccount(account.id, { remote_name: current.remote_name, ...quota, enabled: current.enabled });
       setAccounts((items) => items.map((item) => item.id === account.id ? response.data : item));
       setEdits((items) => {
         const next = { ...items };
@@ -155,13 +156,18 @@ const TrustedAccounts = () => {
           {accounts.map((account) => {
             const current = accountDraft(account);
             const saving = savingID === account.id;
+            const accountRemotes = remotes.filter((remote) => remote === account.remote_name || !accounts.some((item) => item.id !== account.id && item.remote_name === remote));
             return (
               <section key={account.id} className={`rounded-lg border bg-white p-4 shadow-sm ${current.enabled ? 'border-gray-200' : 'border-gray-200 opacity-70'}`} aria-label={`${account.remote_name} 账号配置`}>
                 <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_150px_150px_auto_auto] md:items-end">
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-semibold text-gray-900">{account.remote_name}</div>
+                  <label className="min-w-0 text-sm font-medium text-gray-700">
+                    远程盘
+                    <select value={current.remote_name} onChange={(event) => updateDraft(account, { remote_name: event.target.value })} className="mt-1 h-10 w-full rounded-md border border-gray-300 bg-white px-3 text-sm text-gray-900 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                      {!accountRemotes.includes(account.remote_name) && <option value={account.remote_name}>{account.remote_name}（未配置）</option>}
+                      {accountRemotes.map((remote) => <option key={remote} value={remote}>{remote}</option>)}
+                    </select>
                     <div className="mt-1 text-xs text-gray-500">账号 ID {account.id}</div>
-                  </div>
+                  </label>
                   <label className="text-sm font-medium text-gray-700">
                     额度 (GB)
                     <input type="number" min="1" step="1" value={current.budget_gb} onChange={(event) => updateDraft(account, { budget_gb: event.target.value })} className="mt-1 h-10 w-full rounded-md border border-gray-300 px-3 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500" />

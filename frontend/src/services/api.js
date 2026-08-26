@@ -23,6 +23,36 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
+const expiredSessionErrors = new Set([
+  'unauthorized',
+  'invalid token',
+  'authenticated session or exact API token required',
+  'administrator session or exact privileged API token required',
+]);
+
+let redirectingToLogin = false;
+
+api.interceptors.response.use(
+  response => response,
+  (error) => {
+    const message = String(error.response?.data?.error || '').trim().toLowerCase();
+    const requestPath = String(error.config?.url || '');
+    const status = Number(error.response?.status || 0);
+    const queryTokenRequest = requestPath.startsWith('/token') || requestPath.startsWith('/output-logs');
+    const sessionExpired = expiredSessionErrors.has(message)
+      || (status === 401 && requestPath !== '/change-password' && !queryTokenRequest);
+    if (requestPath !== '/login' && sessionExpired) {
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      if (!redirectingToLogin && window.location.pathname !== '/login') {
+        redirectingToLogin = true;
+        window.location.replace('/login');
+      }
+    }
+    return Promise.reject(error);
+  },
+);
+
 export const login = (credentials) => api.post('/login', credentials);
 export const register = (data) => api.post('/register', data);
 export const changePassword = (data) => api.post('/change-password', data);
@@ -55,6 +85,9 @@ export const getManualRunFiles = (runId, { account_id: accountId, reason, cursor
 });
 export const allocateManualRun = (runId, data) => api.post(`/manual-runs/${runId}/allocate`, data);
 export const startManualRun = (runId, data) => api.post(`/manual-runs/${runId}/start`, data);
+export const stopManualRun = (runId, data) => api.post(`/manual-runs/${runId}/stop`, data);
+export const reconcileManualRun = (runId, data) => api.post(`/manual-runs/${runId}/reconcile`, data);
+export const finishManualRun = (runId, data) => api.post(`/manual-runs/${runId}/finish`, data);
 export const getManualWorkers = (runId) => api.get(`/manual-runs/${runId}/workers`);
 export const getManualWorker = (workerId) => api.get(`/manual-workers/${workerId}`);
 export const cancelManualWorker = (workerId) => api.post(`/manual-workers/${workerId}/cancel`);

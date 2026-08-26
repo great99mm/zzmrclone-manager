@@ -327,7 +327,7 @@ func TestProactiveStatusAcceptsBearerSessionAndExactAPIToken(t *testing.T) {
 	context, _ := gin.CreateTestContext(recorder)
 	context.Request = request
 	requireTokenOrSession(context)
-	if !context.IsAborted() || recorder.Code != http.StatusForbidden {
+	if !context.IsAborted() || recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthorized access was not rejected: %d", recorder.Code)
 	}
 	request = httptest.NewRequest(http.MethodGet, "/api/tasks/1/proactive-status", nil)
@@ -336,7 +336,7 @@ func TestProactiveStatusAcceptsBearerSessionAndExactAPIToken(t *testing.T) {
 	context, _ = gin.CreateTestContext(recorder)
 	context.Request = request
 	requireTokenOrSession(context)
-	if !context.IsAborted() || recorder.Code != http.StatusForbidden {
+	if !context.IsAborted() || recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("invalid bearer access was not rejected: %d", recorder.Code)
 	}
 }

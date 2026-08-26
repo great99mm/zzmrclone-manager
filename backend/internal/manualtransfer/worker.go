@@ -187,6 +187,9 @@ func (s *Service) startRunUnderFence(request StartRequest) (StartResult, error) 
 			if err := requireManualTask(&task); err != nil {
 				return err
 			}
+			if normalizedSettlementState(run.SettlementState) != ManualSettlementStateActive {
+				return ErrSettlementConflict
+			}
 			if err := validateRunFenceDB(tx, &task, run); err != nil {
 				return err
 			}
@@ -592,10 +595,9 @@ func (s *Service) processWorker(ctx context.Context, workerID uint) {
 		_ = s.finishWorker(worker, attempt, ManualWorkerStateFailed, err, nil)
 		return
 	}
-	if err := s.verifyExistingRemote(ctx, worker, attempt, files); err != nil {
-		_ = s.finishWorker(worker, attempt, ManualWorkerStateUnknown, err, nil)
-		return
-	}
+	// rclone copy is idempotent and performs its own destination comparison.
+	// Recovery and the post-run reconciliation own explicit remote verification;
+	// doing the same work here serially delays every fresh start and retry.
 	files, err = s.incompleteWorkerFiles(worker.ID)
 	if err != nil {
 		_ = s.finishWorker(worker, attempt, ManualWorkerStateFailed, err, nil)
@@ -790,7 +792,7 @@ func (s *Service) processWorker(ctx context.Context, workerID uint) {
 		}
 		var reconcileErr error
 		if heartbeatFailure == nil {
-			reconcileErr = s.reconcileWorkerFiles(ctx, worker, attempt)
+			reconcileErr = s.reconcileWorkerFiles(processCtx, worker, attempt)
 		}
 		if heartbeatFailure != nil {
 			reconcileErr = heartbeatFailure
@@ -837,8 +839,10 @@ func (s *Service) processWorker(ctx context.Context, workerID uint) {
 	} else if result.ExitCode != 0 {
 		err = fmt.Errorf("copy exited with code %d", result.ExitCode)
 	}
-	if reconcileErr := s.reconcileWorkerFiles(ctx, worker, attempt); reconcileErr != nil {
-		if state == ManualWorkerStateSucceeded {
+	if reconcileErr := s.reconcileWorkerFiles(processCtx, worker, attempt); reconcileErr != nil {
+		if state == ManualWorkerStateSucceeded && s.isWorkerCancelRequested(worker.ID, attempt.ID) && errors.Is(reconcileErr, context.Canceled) {
+			state = ManualWorkerStateCancelled
+		} else if state == ManualWorkerStateSucceeded {
 			state = ManualWorkerStateUnknown
 		}
 		if err == nil {
@@ -1360,6 +1364,13 @@ func (s *Service) ensureWorkerLaunchAllowed(workerID, attemptID uint, lease stri
 				}
 				return err
 			}
+			var run ManualTransferRun
+			if err := tx.First(&run, worker.RunID).Error; err != nil {
+				return err
+			}
+			if normalizedSettlementState(run.SettlementState) != ManualSettlementStateActive {
+				return ErrSettlementConflict
+			}
 			var attempt ManualWorkerAttempt
 			if err := tx.Where("id = ? AND worker_id = ? AND lease_token = ? AND state = ? AND cancel_requested = ?", attemptID, workerID, lease, ManualWorkerStateStarting, false).First(&attempt).Error; err != nil {
 				if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1536,6 +1547,13 @@ func (s *Service) claimWorker(workerID uint) (ManualRunWorker, ManualWorkerAttem
 			}
 			if worker.State != ManualWorkerStatePending || worker.CurrentAttemptID == 0 {
 				return ErrWorkerConflict
+			}
+			var run ManualTransferRun
+			if err := tx.First(&run, worker.RunID).Error; err != nil {
+				return err
+			}
+			if normalizedSettlementState(run.SettlementState) != ManualSettlementStateActive {
+				return ErrSettlementConflict
 			}
 			if err := tx.First(&attempt, worker.CurrentAttemptID).Error; err != nil {
 				return err
@@ -1725,6 +1743,9 @@ func (s *Service) reconcileWorkerFiles(ctx context.Context, worker ManualRunWork
 	}
 	var firstErr error
 	for _, file := range files {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if file.State == ManualWorkerFileStateVerified {
 			continue
 		}
@@ -1913,17 +1934,54 @@ func (s *Service) deriveRunStateTx(tx *gorm.DB, runID uint) error {
 	if err := tx.First(&run, runID).Error; err != nil {
 		return err
 	}
-	if run.State == state {
+	stateChanged := run.State != state
+	settlementState := normalizedSettlementState(run.SettlementState)
+	autoFinish := false
+	var verified struct {
+		Count int64
+		Bytes int64
+	}
+	if state == ManualRunStateSucceeded && settlementState != ManualSettlementStateFinished {
+		var total int64
+		if err := tx.Model(&ManualWorkerFile{}).Where("run_id = ?", runID).Count(&total).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&ManualWorkerFile{}).Select("count(*) AS count, coalesce(sum(size_bytes), 0) AS bytes").Where("run_id = ? AND state = ?", runID, ManualWorkerFileStateVerified).Scan(&verified).Error; err != nil {
+			return err
+		}
+		autoFinish = total > 0 && verified.Count == total
+	}
+	if !stateChanged && !autoFinish {
 		return nil
 	}
-	updated := tx.Model(&ManualTransferRun{}).Where("id = ? AND state IN ?", runID, []string{ManualRunStateAllocated, ManualRunStateRunning, ManualRunStateSucceeded, ManualRunStateFailed, ManualRunStateCancelled, ManualRunStateNeedsAttention}).Updates(map[string]interface{}{"state": state, "revision": gorm.Expr("revision + 1")})
+	updates := map[string]interface{}{"state": state, "revision": gorm.Expr("revision + 1")}
+	if autoFinish {
+		now := s.now()
+		updates["settlement_state"] = ManualSettlementStateFinished
+		updates["settlement_checked_count"] = verified.Count
+		updates["settlement_verified_count"] = verified.Count
+		updates["settlement_verified_bytes"] = verified.Bytes
+		updates["settlement_released_count"] = 0
+		updates["settlement_released_bytes"] = 0
+		updates["settlement_finished_at"] = now
+		updates["settlement_error"] = ""
+	}
+	updated := tx.Model(&ManualTransferRun{}).Where("id = ? AND state IN ?", runID, []string{ManualRunStateAllocated, ManualRunStateRunning, ManualRunStateSucceeded, ManualRunStateFailed, ManualRunStateCancelled, ManualRunStateNeedsAttention}).Updates(updates)
 	if updated.Error != nil {
 		return updated.Error
 	}
 	if updated.RowsAffected == 0 {
 		return ErrRevisionConflict
 	}
-	return tx.Create(&ManualRunEvent{RunID: runID, EventType: ManualRunEventWorkersReconciled, FromState: run.State, ToState: state, ActorIdentity: "manual-transfer-worker", ActorType: "system", Details: "manual run state derived from worker states"}).Error
+	if stateChanged {
+		if err := tx.Create(&ManualRunEvent{RunID: runID, EventType: ManualRunEventWorkersReconciled, FromState: run.State, ToState: state, ActorIdentity: "manual-transfer-worker", ActorType: "system", Details: "manual run state derived from worker states"}).Error; err != nil {
+			return err
+		}
+	}
+	if autoFinish {
+		return createSettlementEvent(tx, runID, ManualRunEventFinished, settlementState, ManualSettlementStateFinished, "manual-transfer-worker", "system", "all workers succeeded; settlement workflow skipped")
+	}
+	return nil
 }
 
 func (s *Service) RecoverWorkers() error {
@@ -1939,32 +1997,40 @@ func (s *Service) RecoverWorkers() error {
 		if err := s.DB.First(&attempt, worker.CurrentAttemptID).Error; err != nil {
 			return err
 		}
+		cancelRequested := worker.CancelRequested || attempt.CancelRequested
+		mayHaveTransferred := strings.TrimSpace(attempt.ManifestPath) != "" || worker.ProcessID > 0 || worker.ProcessStartToken != "" || attempt.ProcessID > 0 || attempt.ProcessStartToken != ""
 		if err := s.stopPersistedWorkerProcess(worker.ID, attempt.ID, nil); err != nil {
 			if attentionErr := s.markWorkerNeedsAttention(worker.ID, attempt.ID, fmt.Errorf("worker restart recovery could not stop the verified process: %w", err)); attentionErr != nil {
 				return errors.Join(err, attentionErr)
 			}
 			continue
 		}
-		reconcileErr := error(nil)
-		if s.Runner == nil {
-			reconcileErr = ErrWorkerUnavailable
-		} else {
-			reconcileErr = s.reconcileWorkerFiles(context.Background(), worker, attempt)
-		}
+		targetState := ManualWorkerStateNeedsAttention
 		message := "worker was active during server restart; explicit retry is required"
-		if reconcileErr != nil {
-			message += ": " + sanitizeMessage(reconcileErr.Error())
+		if cancelRequested {
+			targetState = ManualWorkerStateCancelled
+			message = "worker cancellation completed during server restart recovery"
+		} else {
+			reconcileErr := error(nil)
+			if s.Runner == nil {
+				reconcileErr = ErrWorkerUnavailable
+			} else if mayHaveTransferred {
+				reconcileErr = s.reconcileWorkerFiles(context.Background(), worker, attempt)
+			}
+			if reconcileErr != nil {
+				message += ": " + sanitizeMessage(reconcileErr.Error())
+			}
 		}
 		if err := retryManualSQLite(func() error {
 			return s.DB.Transaction(func(tx *gorm.DB) error {
-				updates := map[string]interface{}{"state": ManualWorkerStateNeedsAttention, "lease_token": "", "lease_until": nil, "process_id": 0, "process_start_token": "", "last_error": message, "finished_at": s.now(), "revision": gorm.Expr("revision + 1")}
+				updates := map[string]interface{}{"state": targetState, "lease_token": "", "lease_until": nil, "process_id": 0, "process_start_token": "", "last_error": message, "finished_at": s.now(), "revision": gorm.Expr("revision + 1")}
 				if err := tx.Model(&ManualRunWorker{}).Where("id = ? AND state IN ?", worker.ID, []string{ManualWorkerStateStarting, ManualWorkerStateRunning, ManualWorkerStateReconciling, ManualWorkerStateNeedsAttention}).Updates(updates).Error; err != nil {
 					return err
 				}
-				if err := tx.Model(&ManualWorkerAttempt{}).Where("id = ? AND state IN ?", attempt.ID, []string{ManualWorkerStateStarting, ManualWorkerStateRunning, ManualWorkerStateReconciling, ManualWorkerStateNeedsAttention}).Updates(map[string]interface{}{"state": ManualWorkerStateNeedsAttention, "lease_token": "", "lease_until": nil, "process_id": 0, "process_start_token": "", "last_error": message, "finished_at": s.now()}).Error; err != nil {
+				if err := tx.Model(&ManualWorkerAttempt{}).Where("id = ? AND state IN ?", attempt.ID, []string{ManualWorkerStateStarting, ManualWorkerStateRunning, ManualWorkerStateReconciling, ManualWorkerStateNeedsAttention}).Updates(map[string]interface{}{"state": targetState, "lease_token": "", "lease_until": nil, "process_id": 0, "process_start_token": "", "last_error": message, "finished_at": s.now()}).Error; err != nil {
 					return err
 				}
-				if err := tx.Create(&ManualWorkerEvent{RunID: worker.RunID, WorkerID: worker.ID, AttemptID: attempt.ID, EventType: ManualWorkerEventStartupReconciled, FromState: worker.State, ToState: ManualWorkerStateNeedsAttention, ActorIdentity: "system", ActorType: "system", Details: message}).Error; err != nil {
+				if err := tx.Create(&ManualWorkerEvent{RunID: worker.RunID, WorkerID: worker.ID, AttemptID: attempt.ID, EventType: ManualWorkerEventStartupReconciled, FromState: worker.State, ToState: targetState, ActorIdentity: "system", ActorType: "system", Details: message}).Error; err != nil {
 					return err
 				}
 				return s.deriveRunStateTx(tx, worker.RunID)
@@ -1985,31 +2051,39 @@ func (s *Service) RecoverWorkers() error {
 		if worker.State == ManualWorkerStateStarting || worker.State == ManualWorkerStateRunning || worker.State == ManualWorkerStateReconciling {
 			continue
 		}
+		cancelRequested := worker.CancelRequested || attempt.CancelRequested
+		mayHaveTransferred := strings.TrimSpace(attempt.ManifestPath) != "" || worker.ProcessID > 0 || worker.ProcessStartToken != "" || attempt.ProcessID > 0 || attempt.ProcessStartToken != ""
 		if err := s.stopPersistedWorkerProcess(worker.ID, attempt.ID, nil); err != nil {
 			if attentionErr := s.markWorkerNeedsAttention(worker.ID, attempt.ID, fmt.Errorf("worker attempt recovery could not stop the verified process: %w", err)); attentionErr != nil {
 				return errors.Join(err, attentionErr)
 			}
 			continue
 		}
-		reconcileErr := error(nil)
-		if s.Runner == nil {
-			reconcileErr = ErrWorkerUnavailable
-		} else {
-			reconcileErr = s.reconcileWorkerFiles(context.Background(), worker, attempt)
-		}
+		targetState := ManualWorkerStateNeedsAttention
 		message := "worker attempt was active during server restart; explicit retry is required"
-		if reconcileErr != nil {
-			message += ": " + sanitizeMessage(reconcileErr.Error())
+		if cancelRequested {
+			targetState = ManualWorkerStateCancelled
+			message = "worker attempt cancellation completed during server restart recovery"
+		} else {
+			reconcileErr := error(nil)
+			if s.Runner == nil {
+				reconcileErr = ErrWorkerUnavailable
+			} else if mayHaveTransferred {
+				reconcileErr = s.reconcileWorkerFiles(context.Background(), worker, attempt)
+			}
+			if reconcileErr != nil {
+				message += ": " + sanitizeMessage(reconcileErr.Error())
+			}
 		}
 		if err := retryManualSQLite(func() error {
 			return s.DB.Transaction(func(tx *gorm.DB) error {
-				if err := tx.Model(&ManualWorkerAttempt{}).Where("id = ? AND state IN ?", attempt.ID, []string{ManualWorkerStateStarting, ManualWorkerStateRunning, ManualWorkerStateReconciling}).Updates(map[string]interface{}{"state": ManualWorkerStateNeedsAttention, "lease_token": "", "lease_until": nil, "process_id": 0, "process_start_token": "", "last_error": message, "finished_at": s.now()}).Error; err != nil {
+				if err := tx.Model(&ManualWorkerAttempt{}).Where("id = ? AND state IN ?", attempt.ID, []string{ManualWorkerStateStarting, ManualWorkerStateRunning, ManualWorkerStateReconciling, ManualWorkerStateNeedsAttention}).Updates(map[string]interface{}{"state": targetState, "lease_token": "", "lease_until": nil, "process_id": 0, "process_start_token": "", "last_error": message, "finished_at": s.now()}).Error; err != nil {
 					return err
 				}
-				if err := tx.Model(&ManualRunWorker{}).Where("id = ? AND state NOT IN ?", worker.ID, []string{ManualWorkerStateStarting, ManualWorkerStateRunning, ManualWorkerStateReconciling}).Updates(map[string]interface{}{"state": ManualWorkerStateNeedsAttention, "lease_token": "", "lease_until": nil, "last_error": message, "finished_at": s.now(), "process_id": 0, "process_start_token": "", "revision": gorm.Expr("revision + 1")}).Error; err != nil {
+				if err := tx.Model(&ManualRunWorker{}).Where("id = ? AND state NOT IN ?", worker.ID, []string{ManualWorkerStateStarting, ManualWorkerStateRunning, ManualWorkerStateReconciling}).Updates(map[string]interface{}{"state": targetState, "lease_token": "", "lease_until": nil, "last_error": message, "finished_at": s.now(), "process_id": 0, "process_start_token": "", "revision": gorm.Expr("revision + 1")}).Error; err != nil {
 					return err
 				}
-				if err := tx.Create(&ManualWorkerEvent{RunID: worker.RunID, WorkerID: worker.ID, AttemptID: attempt.ID, EventType: ManualWorkerEventAttemptReconciled, FromState: attempt.State, ToState: ManualWorkerStateNeedsAttention, ActorIdentity: "system", ActorType: "system", Details: message}).Error; err != nil {
+				if err := tx.Create(&ManualWorkerEvent{RunID: worker.RunID, WorkerID: worker.ID, AttemptID: attempt.ID, EventType: ManualWorkerEventAttemptReconciled, FromState: attempt.State, ToState: targetState, ActorIdentity: "system", ActorType: "system", Details: message}).Error; err != nil {
 					return err
 				}
 				return s.deriveRunStateTx(tx, worker.RunID)
@@ -2150,6 +2224,9 @@ func (s *Service) createWorkerRetry(workerID uint, actorIdentity, actorType stri
 			var run ManualTransferRun
 			if err := tx.First(&run, worker.RunID).Error; err != nil {
 				return err
+			}
+			if normalizedSettlementState(run.SettlementState) != ManualSettlementStateActive {
+				return ErrSettlementConflict
 			}
 			if run.TransferMode != models.TransferModeCopy {
 				return ErrManualMoveUnsupported

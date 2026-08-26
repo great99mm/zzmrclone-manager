@@ -98,6 +98,30 @@ func TestManualMaintenanceFencesTaskAndSharedScopeMutations(t *testing.T) {
 	}
 }
 
+func TestDeleteTaskRejectsManualTaskBeforeMutation(t *testing.T) {
+	database := proactiveStatusTestDB(t)
+	task := models.Task{ID: 41, Name: "manual", TaskType: models.TaskTypeManual, ManualStrategy: models.ManualStrategyAllocation}
+	if err := database.Create(&task).Error; err != nil {
+		t.Fatal(err)
+	}
+	previousDB := db
+	db = database
+	defer func() { db = previousDB }()
+	request := httptest.NewRequest(http.MethodDelete, "/tasks/41", nil)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = request
+	context.Params = gin.Params{{Key: "id", Value: "41"}}
+	deleteTask(context)
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "direct deletion is disabled") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var count int64
+	if err := database.Model(&models.Task{}).Where("id = ?", task.ID).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("manual task count=%d err=%v", count, err)
+	}
+}
+
 func TestUpdateRouteUsesDefaultConfigFenceWithoutMutation(t *testing.T) {
 	database := proactiveStatusTestDB(t)
 	if err := database.AutoMigrate(&models.DestinationScopeMaintenance{}); err != nil {

@@ -45,6 +45,7 @@ var (
 	cfgGlobal             *config.Config
 	mountMgr              *mountsvc.Manager
 	manualTransferService *manualtransfer.Service
+	errManualTaskDelete   = errors.New("manual tasks must be stopped, reconciled, and finished; direct deletion is disabled")
 )
 
 // Hard caps for memory-hungry rclone flags.  These act as guardrails:
@@ -116,6 +117,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	if err := manualTransferService.RecoverWorkers(); err != nil {
 		panic(err)
 	}
+	if err := manualTransferService.RecoverSettlements(); err != nil {
+		panic(err)
+	}
 	manualTransferService.Start()
 
 	// Scheduler and watcher register only after migration and recovery succeed.
@@ -169,15 +173,22 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// Auth
 		api.POST("/login", handleLogin)
 		api.POST("/register", handleRegister)
+
+		// Explicit query-token endpoints remain available to external clients.
+		api.GET("/token", requireTokenQuery, getTokenInfo)
+		api.POST("/token", requireTokenQuery, updateToken)
+		api.GET("/output-logs", requireTokenQuery, getOutputLogs)
+		api.DELETE("/output-logs/:id", requireTokenQuery, deleteOutputLog)
+		api.DELETE("/output-logs/clean", requireTokenQuery, cleanOutputLogs)
+
+		// Every browser/API route below requires a live session or the exact
+		// configured API token. Route-specific middleware may require admin.
+		api.Use(requireStrictTokenOrSession)
 		api.POST("/change-password", handleChangePassword)
 		api.GET("/manual-accounts", requireAdminStrictTokenOrSession, listManualAvailableAccounts)
 		api.GET("/quota-accounts", requireAdminStrictTokenOrSession, listQuotaAccounts)
 		api.POST("/quota-accounts", requireAdminStrictTokenOrSession, createQuotaAccount)
 		api.PUT("/quota-accounts/:id", requireAdminStrictTokenOrSession, updateQuotaAccount)
-
-		// Token management (read/update)
-		api.GET("/token", requireTokenQuery, getTokenInfo)
-		api.POST("/token", requireTokenQuery, updateToken)
 
 		// Tasks
 		tasks := api.Group("/tasks")
@@ -205,6 +216,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		{
 			manualRuns.POST("/:id/allocate", requireAdminStrictTokenOrSession, allocateManualRun)
 			manualRuns.POST("/:id/start", requireAdminStrictTokenOrSession, startManualRun)
+			manualRuns.POST("/:id/stop", requireAdminStrictTokenOrSession, stopManualRun)
+			manualRuns.POST("/:id/reconcile", requireAdminStrictTokenOrSession, reconcileManualRun)
+			manualRuns.POST("/:id/finish", requireAdminStrictTokenOrSession, finishManualRun)
 			manualRuns.GET("/:id/workers", requireAdminStrictTokenOrSession, listManualRunWorkers)
 			manualRuns.GET("/:id/files", requireAdminStrictTokenOrSession, listManualRunFiles)
 			manualRuns.GET("/:id/allocations", requireAdminStrictTokenOrSession, listManualRunFiles)
@@ -259,10 +273,6 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		api.PUT("/openlist-configs/:id", updateOpenlistConfig)
 		api.DELETE("/openlist-configs/:id", deleteOpenlistConfig)
 
-		// Output logs (structured persistent format) - protected by token query
-		api.GET("/output-logs", requireTokenQuery, getOutputLogs)
-		api.DELETE("/output-logs/:id", requireTokenQuery, deleteOutputLog)
-		api.DELETE("/output-logs/clean", requireTokenQuery, cleanOutputLogs)
 	}
 
 	// WebSocket
@@ -299,7 +309,7 @@ func requireStrictTokenOrSession(c *gin.Context) {
 		c.Next()
 		return
 	}
-	c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "authenticated session or exact API token required"})
+	c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "authenticated session or exact API token required"})
 }
 
 func requireAdminStrictTokenOrSession(c *gin.Context) {
@@ -327,7 +337,7 @@ func requireAdminStrictTokenOrSession(c *gin.Context) {
 			return
 		}
 	}
-	c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "administrator session or exact privileged API token required"})
+	c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "administrator session or exact privileged API token required"})
 }
 
 // requireTokenQuery middleware checks ?token= query param against configured API token.
@@ -365,7 +375,7 @@ func requireTokenOrSession(c *gin.Context) {
 		c.Next()
 		return
 	}
-	c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "invalid or missing token"})
+	c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid or missing token"})
 }
 
 // getTokenInfo returns whether token protection is enabled and the token value (masked).
@@ -1033,6 +1043,13 @@ func deleteTask(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "task not found"})
 		return
 	}
+	if blocked, err := manualTaskDeletionBlocked(existing); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check manual task settlement history"})
+		return
+	} else if blocked {
+		c.JSON(http.StatusConflict, gin.H{"error": errManualTaskDelete.Error()})
+		return
+	}
 	if blocked, err := proactiveMutationBlocked(existing); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check proactive maintenance fence"})
 		return
@@ -1044,6 +1061,11 @@ func deleteTask(c *gin.Context) {
 		var current models.Task
 		if err := db.First(&current, id).Error; err != nil {
 			return err
+		}
+		if blocked, err := manualTaskDeletionBlocked(current); err != nil {
+			return err
+		} else if blocked {
+			return errManualTaskDelete
 		}
 		blocked, err := proactiveMutationBlocked(current)
 		if err != nil {
@@ -1062,6 +1084,20 @@ func deleteTask(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "task deleted"})
+}
+
+func manualTaskDeletionBlocked(task models.Task) (bool, error) {
+	if task.TaskType == models.TaskTypeManual {
+		return true, nil
+	}
+	if !db.Migrator().HasTable(&manualtransfer.ManualTransferRun{}) {
+		return false, nil
+	}
+	var runs int64
+	if err := db.Model(&manualtransfer.ManualTransferRun{}).Where("task_id = ?", task.ID).Count(&runs).Error; err != nil {
+		return false, err
+	}
+	return runs != 0, nil
 }
 
 func startTask(c *gin.Context) {
