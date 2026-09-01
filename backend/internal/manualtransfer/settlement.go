@@ -12,6 +12,7 @@ import (
 	"gorm.io/gorm"
 	"rclone-manager/internal/models"
 	"rclone-manager/internal/proactive"
+	"rclone-manager/internal/quota"
 )
 
 var ErrSettlementConflict = errors.New("manual run settlement state conflict")
@@ -32,6 +33,7 @@ type SettlementResult struct {
 }
 
 type settlementObservation struct {
+	file          ManualWorkerFile
 	fileID        uint
 	workerID      uint
 	sizeBytes     int64
@@ -422,11 +424,14 @@ func (s *Service) reconcileRunFiles(ctx context.Context, runID uint) error {
 	if len(observations) != len(files) {
 		return errors.New("remote comparison was interrupted")
 	}
+	if err := s.restoreReleasedMoveFiles(run, observations); err != nil {
+		return err
+	}
 	return s.commitSettlementObservations(run, observations)
 }
 
 func (s *Service) observeSettlementTarget(ctx context.Context, run ManualTransferRun, target settlementTarget) settlementObservation {
-	result := settlementObservation{fileID: target.file.ID, workerID: target.worker.ID, sizeBytes: target.file.SizeBytes}
+	result := settlementObservation{file: target.file, fileID: target.file.ID, workerID: target.worker.ID, sizeBytes: target.file.SizeBytes}
 	object, err := s.Runner.StatRemote(ctx, target.worker.ConfigIdentity, target.worker.RemoteName, run.DestinationPath, target.file.RelativePath)
 	if err != nil {
 		if errors.Is(err, proactive.ErrRemoteObjectNotFound) {
@@ -448,6 +453,42 @@ func (s *Service) observeSettlementTarget(ctx context.Context, run ManualTransfe
 	}
 	result.state = ManualWorkerFileStateVerified
 	return result
+}
+
+func (s *Service) restoreReleasedMoveFiles(run ManualTransferRun, observations []settlementObservation) error {
+	if run.TransferMode != models.TransferModeMove {
+		return nil
+	}
+	root, err := quota.OpenSourceRoot(run.SourcePath)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if root.Device != run.SourceRootDevice || root.Inode != run.SourceRootInode {
+		return errors.New("source root identity changed during settlement recovery")
+	}
+	filesByWorker := make(map[uint][]ManualWorkerFile)
+	for _, observation := range observations {
+		if observation.state == ManualWorkerFileStateReleased {
+			filesByWorker[observation.workerID] = append(filesByWorker[observation.workerID], observation.file)
+		}
+	}
+	for workerID, files := range filesByWorker {
+		var worker ManualRunWorker
+		if err := s.DB.First(&worker, workerID).Error; err != nil {
+			return err
+		}
+		quarantine, err := openMoveWorkerQuarantine(root, run, worker)
+		if err != nil {
+			return err
+		}
+		restoreErr := restoreMoveWorkerFiles(root, quarantine, files)
+		closeErr := quarantine.Close()
+		if restoreErr != nil || closeErr != nil {
+			return errors.Join(restoreErr, closeErr)
+		}
+	}
+	return nil
 }
 
 func (s *Service) commitSettlementObservations(run ManualTransferRun, observations []settlementObservation) error {

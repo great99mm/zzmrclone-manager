@@ -133,6 +133,7 @@ type manualWorkerFakeRunner struct {
 	remote               map[string]bool
 	startErr             error
 	movePartialThenError bool
+	movePartialExitCode  int
 	failFirst            bool
 	started              chan struct{}
 	processes            []*manualWorkerFakeProcess
@@ -242,6 +243,7 @@ func (r *manualWorkerFakeRunner) StartMove(_ context.Context, spec proactive.Mov
 	r.moveSpecs = append(r.moveSpecs, spec)
 	startErr := r.startErr
 	partial := r.movePartialThenError
+	partialExitCode := r.movePartialExitCode
 	r.mu.Unlock()
 	if partial && len(paths) > 0 {
 		if err := removeManualWorkerMoveFiles(paths[:1], spec.SourceRoot); err != nil {
@@ -251,6 +253,17 @@ func (r *manualWorkerFakeRunner) StartMove(_ context.Context, spec proactive.Mov
 	}
 	if startErr != nil {
 		return nil, startErr
+	}
+	if partialExitCode != 0 && len(paths) > 0 {
+		if err := removeManualWorkerMoveFiles(paths[:1], spec.SourceRoot); err != nil {
+			return nil, err
+		}
+		r.mu.Lock()
+		process := &manualWorkerFakeProcess{result: proactive.ProcessResult{ExitCode: partialExitCode, PID: 200 + len(r.processes), ProcessStartToken: "move-token"}, done: make(chan struct{})}
+		r.processes = append(r.processes, process)
+		r.mu.Unlock()
+		process.release()
+		return process, nil
 	}
 	if err := removeManualWorkerMoveFiles(paths, spec.SourceRoot); err != nil {
 		return nil, err

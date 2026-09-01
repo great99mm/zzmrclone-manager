@@ -3,6 +3,8 @@ package manualtransfer
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -26,6 +28,22 @@ func waitSettlementState(t *testing.T, service *Service, runID uint, want string
 	run, _ := service.GetRun(runID)
 	t.Fatalf("run %d settlement state = %q, want %q (error=%q)", runID, run.SettlementState, want, run.SettlementError)
 	return run
+}
+
+func waitSettlementWorkersTerminal(t *testing.T, fixture manualWorkerFixture) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var active int64
+		if err := fixture.db.Model(&ManualRunWorker{}).Where("run_id = ? AND state IN ?", fixture.run.ID, []string{ManualWorkerStatePending, ManualWorkerStateStarting, ManualWorkerStateRunning, ManualWorkerStateReconciling}).Count(&active).Error; err != nil {
+			t.Fatal(err)
+		}
+		if active == 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("manual workers did not reach terminal states")
 }
 
 func stopFixtureRun(t *testing.T, fixture manualWorkerFixture) ManualTransferRun {
@@ -182,6 +200,34 @@ func TestManualRunSettlementTransientRemoteErrorRollsBackFileStates(t *testing.T
 	}
 	if _, err := fixture.service.FinishRun(context.Background(), SettlementRequest{RunID: failed.ID, ExpectedRevision: failed.Revision, IdempotencyKey: "early-finish", ActorIdentity: "operator", ActorType: "admin_session"}); !errors.Is(err, ErrSettlementConflict) {
 		t.Fatalf("finish after failed reconciliation error = %v", err)
+	}
+}
+
+func TestManualMoveSettlementRestoresReleasedFiles(t *testing.T) {
+	fixture := newManualWorkerFixture(t, models.TransferModeMove, map[string]string{"a.txt": "a", "b.txt": "bb", "c.txt": "ccc"})
+	fixture.runner.movePartialExitCode = 7
+	startFixture(t, fixture, "move-settlement-start")
+	waitSettlementWorkersTerminal(t, fixture)
+	if _, err := os.Stat(filepath.Join(fixture.root, "c.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pending move file was not quarantined: %v", err)
+	}
+	stopped := stopFixtureRun(t, fixture)
+	fixture.runner.mu.Lock()
+	fixture.runner.remote = map[string]bool{"a.txt": true, "b.txt": true, "c.txt": false}
+	fixture.runner.mu.Unlock()
+	if _, err := fixture.service.ReconcileRun(context.Background(), SettlementRequest{RunID: stopped.ID, ExpectedRevision: stopped.Revision, IdempotencyKey: "move-reconcile", ActorIdentity: "operator", ActorType: "admin_session"}); err != nil {
+		t.Fatal(err)
+	}
+	reconciled := waitSettlementState(t, fixture.service, fixture.run.ID, ManualSettlementStateReconciled)
+	if reconciled.SettlementReleasedCount != 1 {
+		t.Fatalf("released count = %d, want 1", reconciled.SettlementReleasedCount)
+	}
+	content, err := os.ReadFile(filepath.Join(fixture.root, "c.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "ccc" {
+		t.Fatalf("restored content = %q", content)
 	}
 }
 
